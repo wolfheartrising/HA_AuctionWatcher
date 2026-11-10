@@ -87,6 +87,13 @@ set_auto_booking:
           max: 10000
           mode: box
           unit_of_measurement: bids
+    topup_at:
+      selector:
+        number:
+          min: 0
+          max: 1000
+          mode: box
+          unit_of_measurement: bids
     max_price:
       selector:
         number:

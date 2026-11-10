@@ -125,8 +125,22 @@ class AuctionWatcherPanel extends HTMLElement {
 
   // Balance per the site, what's tied up, what could still be spent, and the weekly budget
   _tally(accounts) {
-    return accounts.filter((a) => a.spending).map((acc) =>
+    const cap = accounts.map((a) => a.spending?.cap).find(Boolean);
+    return (cap ? this._capLine(cap) : "") + accounts.filter((a) => a.spending).map((acc) =>
       acc.spending.site === "macbid" ? this._macbidTally(acc.spending) : this._govTally(acc.spending)).join("");
+  }
+
+  _capLine(c) {
+    const pct = c.amount ? Math.min(100, Math.round((c.used / c.amount) * 100)) : 0;
+    const per = c.period === "month" ? "this month" : "this week";
+    const sites = Object.entries(c.by_site || {}).filter(([, v]) => v).map(([k, v]) => `${siteDot(k)}${esc(SITE_NAMES[k] || k)} ${money(v)}`).join(" · ");
+    return `<div class="tally cap">
+      <div class="tally-row"><b>Spending cap</b> <span>${money(c.used)} of ${money(c.amount)} ${per}</span>
+        <span class="badge ${c.used >= c.amount ? "cap" : pct >= 80 ? "hot" : "on"}">${c.used >= c.amount
+          ? (c.mode === "block" ? "reached: bids stopped" : "reached (warning only)") : money(c.left) + " left"}</span>
+        <span class="muted">${sites}</span></div>
+      <div class="capbar"><div style="width:${pct}%"></div></div>
+    </div>`;
   }
 
   _macbidTally(m) {
@@ -185,7 +199,8 @@ class AuctionWatcherPanel extends HTMLElement {
   }
 
   _tabs(auctions) {
-    const sites = [...new Set(auctions.map((a) => a.site).filter(Boolean))].sort();
+    const sites = [...new Set([...auctions.map((a) => a.site), ...this._accounts().map((a) => a.site || "govauctions")]
+      .filter(Boolean))].sort();
     return [
       { id: "active", label: "Active", filter: (a) => a.category === "bidding" && (a.status === "live" || a.status === "upcoming") },
       { id: "winning", label: "Winning", filter: (a) => a.status === "live" && !!a.winning },
@@ -197,6 +212,7 @@ class AuctionWatcherPanel extends HTMLElement {
       { id: "pickup", label: "Awaiting pickup", filter: (a) => a.status === "awaiting_pickup" },
       { id: "ended", label: "Ended", filter: (a) => a.status === "ended" },
       { id: "searches", label: "Saved searches", filter: () => false, searches: true },
+      { id: "settings", label: "⚙ Settings", filter: () => false, settings: true },
       ...sites.map((site) => ({ id: "site-" + site, label: SITE_NAMES[site] || site, filter: (a) => a.site === site })),
     ];
   }
@@ -220,10 +236,12 @@ class AuctionWatcherPanel extends HTMLElement {
     const auctions = this._auctions();
     const accounts = this._accounts();
     const signature = JSON.stringify([this._tab, this._subtab, this._sort, auctions.map((a) => [a.entity_id, a.price, a.updated, a.bid_limit,
-      a.auto_cancel, a.auto_rebook, a.rebook_mode, a.rebook_amount, a.max_price, a.auto_status, a.your_booked_left,
+      a.auto_cancel, a.auto_rebook, a.rebook_mode, a.rebook_amount, a.topup_at, a.max_price, a.auto_status, a.your_booked_left,
       a.mb_mode, a.mb_placed, a.mb_status, a.winning, a.has_assurance, a.mb_assurance, (a.condition_notes || []).length]),
       accounts, this._saved, this._subtab === "packs" ? [this._packs(), this._showLocked] : null,
-      this._tab === "searches" ? [this._sd?.version, !!this._sd, this._sfilter, this._sLimit, this._serr, this._sbusy] : null, this._autoSwitch()?.state, this._autoSwitch("macbid")?.state]);
+      this._tab === "searches" ? [this._sd?.version, !!this._sd, this._sfilter, this._sLimit, this._serr, this._sbusy] : null,
+      this._tab === "settings" ? [this._gs, this._gmsg, this._gbusy] : null,
+      this._subtab === "settings" ? [this._ssMsg, this._ssBusy, this._ssKey] : null, this._autoSwitch()?.state, this._autoSwitch("macbid")?.state]);
     if (!force && signature === this._signature) return;
     this._signature = signature;
     this._pending = false;
@@ -235,6 +253,9 @@ class AuctionWatcherPanel extends HTMLElement {
     if (!tabs.find((t) => t.id === this._tab)) this._tab = "active";
     const tab = tabs.find((t) => t.id === this._tab);
     const shown = auctions.filter(tab.filter);
+    // Sub-tab of a site tab; Point packs only exists on GovAuctions
+    let sub = tab.id.startsWith("site-") ? (this._subtab || "following") : "";
+    if (sub === "packs" && !(tab.id === "site-govauctions" && this._packs())) sub = "following";
     const opp = auctions.filter((a) => a.opportunity).length;
 
     this.shadowRoot.innerHTML = `
@@ -261,17 +282,19 @@ class AuctionWatcherPanel extends HTMLElement {
         ${i ? `<span class="tabs-label">Sites</span>` : ""}
         ${row.map((t) => {
           const n = t.searches ? (this._sd ? this._sd.results.filter((h) => h.new).length || this._sd.results.length : "…") : auctions.filter(t.filter).length;
-          return `<button role="tab" class="tab ${t.id === this._tab ? "on" : ""}" data-tab="${esc(t.id)}">${t.id.startsWith("site-") ? siteDot(t.id.slice(5)) : ""}${esc(t.label)} <span class="count">${n}</span></button>`;
+          return `<button role="tab" class="tab ${t.id === this._tab ? "on" : ""}" data-tab="${esc(t.id)}">${t.id.startsWith("site-") ? siteDot(t.id.slice(5)) : ""}${esc(t.label)}${t.settings ? "" : ` <span class="count">${n}</span>`}</button>`;
         }).join("")}
       </div>`).join("")}
       ${tab.id === "active" ? this._tally(accounts) : ""}
-      ${tab.id === "site-govauctions" && this._packs() ? `<div class="subtabs">
-        <button class="subtab ${this._subtab !== "packs" ? "on" : ""}" data-subtab="following">Following <span class="count">${shown.length}</span></button>
-        <button class="subtab ${this._subtab === "packs" ? "on" : ""}" data-subtab="packs">Point packs
-          <span class="count">${this._packGroups().filter((g) => g.auctions.some((p) => p.open || p.your_bids)).length}</span></button>
-        <span class="muted">Point packs aren't auctions you're in: they're "if you're interested" picks.</span></div>` : ""}
-      ${tab.searches ? `<div class="sv-slot"></div>` : `<div class="grid">
-        ${tab.id === "site-govauctions" && this._subtab === "packs" && this._packs() ? this._packsView() : shown.length ? shown.map((a) => this._safeCard(a)).join("") : `<div class="empty">Nothing here right now.</div>`}
+      ${tab.id.startsWith("site-") ? `<div class="subtabs">
+        <button class="subtab ${sub === "following" ? "on" : ""}" data-subtab="following">Following <span class="count">${shown.length}</span></button>
+        ${tab.id === "site-govauctions" && this._packs() ? `<button class="subtab ${sub === "packs" ? "on" : ""}" data-subtab="packs">Point packs
+          <span class="count">${this._packGroups().filter((g) => g.auctions.some((p) => p.open || p.your_bids)).length}</span></button>` : ""}
+        <button class="subtab ${sub === "settings" ? "on" : ""}" data-subtab="settings">⚙ Settings</button>
+        ${sub === "packs" ? `<span class="muted">Point packs aren't auctions you're in: they're "if you're interested" picks.</span>` : ""}</div>` : ""}
+      ${tab.searches ? `<div class="sv-slot"></div>` : tab.settings ? `<div class="gs-slot"></div>`
+        : sub === "settings" ? `<div class="ss-slot"></div>` : `<div class="grid">
+        ${sub === "packs" ? this._packsView() : shown.length ? shown.map((a) => this._safeCard(a)).join("") : `<div class="empty">Nothing here right now.</div>`}
       </div>`}`;
 
     const slot = this.shadowRoot.querySelector(".menu");
@@ -282,9 +305,18 @@ class AuctionWatcherPanel extends HTMLElement {
 
     const root = this.shadowRoot;
     root.querySelectorAll("[data-subtab]").forEach((b) =>
-      b.addEventListener("click", () => { this._subtab = b.dataset.subtab; this._maybeRender(true); }));
+      b.addEventListener("click", () => {
+        if (this._subtab === "settings" && b.dataset.subtab !== "settings") { this._dropSiteFlow(); this._ssKey = null; }
+        this._subtab = b.dataset.subtab; this._maybeRender(true);
+      }));
     root.querySelectorAll("[data-tab]").forEach((b) =>
-      b.addEventListener("click", () => { this._tab = b.dataset.tab; if (this._tab !== "searches") this._stopSearchWatch(); this._maybeRender(true); }));
+      b.addEventListener("click", () => {
+        if (this._tab !== b.dataset.tab) {
+          if (this._subtab === "settings") { this._dropSiteFlow(); this._ssKey = null; }
+          this._subtab = "following";
+        }
+        this._tab = b.dataset.tab; if (this._tab !== "searches") this._stopSearchWatch(); this._maybeRender(true);
+      }));
     root.querySelector("[data-action=refresh]").addEventListener("click", () =>
       this._hass.callService("auction_watcher", "refresh", {}));
     root.querySelector("[data-action=packs-locked]")?.addEventListener("click", () => {
@@ -316,6 +348,8 @@ class AuctionWatcherPanel extends HTMLElement {
       d.addEventListener("toggle", () => { this._open[d.dataset.id] = d.open; }));
     root.querySelectorAll("[data-act]").forEach((b) =>
       b.addEventListener("click", () => this._action(b.dataset.act, b.dataset.id)));
+    if (tab.settings) this._mountGlobalSettings(root.querySelector(".gs-slot"));
+    if (sub === "settings") this._mountSiteSettings(root.querySelector(".ss-slot"), tab.id.slice(5), accounts);
     if (tab.searches) {
       const slot = root.querySelector(".sv-slot");
       const sig = JSON.stringify([this._sd?.version, this._sd ? 1 : 0, this._sfilter, this._sLimit, this._serr, this._sbusy, this._locsOpen]);
@@ -359,6 +393,200 @@ class AuctionWatcherPanel extends HTMLElement {
       this._serr = null;
     } catch (e) { this._serr = this._wsError(e); }
     this._sbusy = false; this._maybeRender(true);
+  }
+
+  // ---------------------------------------------------------------- settings: global (alerts)
+
+  async _loadGlobal() {
+    try {
+      this._gs = await this._hass.callWS({ type: "auction_watcher/settings" });
+      this._gdraft = null;
+    } catch (e) { this._gmsg = { warn: true, text: this._wsError(e) }; }
+    this._maybeRender(true);
+  }
+
+  _mountGlobalSettings(slot) {
+    const sig = JSON.stringify([this._gs, this._gmsg, this._gbusy]);
+    if (this._gsNode && this._gsSig === sig) { slot.replaceWith(this._gsNode); return; }
+    if (!this._gs && !this._gLoading) { this._gLoading = true; this._loadGlobal().finally(() => { this._gLoading = false; }); }
+    slot.innerHTML = this._globalView();
+    this._gsNode = slot; this._gsSig = sig;
+    const d = () => (this._gdraft ||= {
+      notify_services: [...this._gs.notify_services], notify_entities: [...this._gs.notify_entities], alert_kinds: [...this._gs.alert_kinds],
+    });
+    slot.querySelectorAll("[data-gs]").forEach((el) => el.addEventListener("change", () => {
+      const list = d()[el.dataset.gs], v = el.value;
+      if (el.checked && !list.includes(v)) list.push(v);
+      if (!el.checked) list.splice(list.indexOf(v), 1);
+      const btn = slot.querySelector("[data-gact=save]"); if (btn) btn.disabled = false;
+    }));
+    slot.querySelectorAll("[data-gcap]").forEach((el) => el.addEventListener(el.type === "number" ? "input" : "change", () => {
+      if (el.type === "radio" && !el.checked) return;
+      d()[el.dataset.gcap] = el.type === "number" ? Number(el.value || 0) : el.value;
+      const btn = slot.querySelector("[data-gact=save]"); if (btn) btn.disabled = false;
+    }));
+    slot.querySelectorAll("[data-gact]").forEach((b) => b.addEventListener("click", async () => {
+      this._gbusy = true; this._gmsg = null; this._maybeRender(true);
+      try {
+        if (b.dataset.gact === "save") {
+          this._gs = await this._hass.callWS({ type: "auction_watcher/settings/set", ...d() });
+          this._gdraft = null;
+          this._gmsg = { text: "Saved. These apply to every site and to saved searches." };
+        } else {
+          if (this._gdraft) this._gs = await this._hass.callWS({ type: "auction_watcher/settings/set", ...d() });
+          this._gdraft = null;
+          await this._hass.callWS({ type: "auction_watcher/settings/set", test: true });
+          this._gmsg = { text: "Test alert sent. Check your phone, chat or speaker." };
+        }
+      } catch (e) { this._gmsg = { warn: true, text: this._wsError(e) }; }
+      this._gbusy = false; this._maybeRender(true);
+    }));
+  }
+
+  _globalView() {
+    const g = this._gs;
+    if (!g) return `<div class="sv"><div class="empty">Loading settings…</div></div>`;
+    const dr = this._gdraft || g;
+    const label = (svc) => {
+      const m = { mobile_app_: "📱 Phone app: ", telegram: "💬 Telegram", alexa_media_: "🔊 Alexa: " };
+      for (const [k, v] of Object.entries(m)) if (svc.startsWith(k)) return v + svc.slice(k.length).replace(/_/g, " ");
+      return svc.replace(/_/g, " ");
+    };
+    const box = (group, value, text, on) =>
+      `<label class="chk gs-item"><input type="checkbox" data-gs="${group}" value="${esc(value)}" ${on ? "checked" : ""}> ${text}</label>`;
+    const services = [...new Set([...g.services_available, ...g.notify_services])];
+    const entities = [...new Set([...g.entities_available, ...g.notify_entities])];
+    return `<div class="sv gs">
+      <div class="note">These apply to every site and to saved searches. Each site's own options (polling, limits, budget, ...)
+        are under that site's tab → ⚙ Settings.</div>
+      <section class="gs-sec"><h3>Where alerts go</h3>
+        <div class="gs-list">${services.map((x) => box("notify_services", x, esc(label(x)), dr.notify_services.includes(x))).join("")
+          || `<span class="muted">No notify services found (install the Home Assistant phone app, Telegram, ...).</span>`}</div>
+        ${entities.length ? `<div class="k">Notify entities (e.g. Alexa announce, Telegram chats)</div>
+        <div class="gs-list">${entities.map((x) => box("notify_entities", x, esc(this._hass.states[x]?.attributes?.friendly_name || x), dr.notify_entities.includes(x))).join("")}</div>` : ""}
+      </section>
+      <section class="gs-sec"><h3>Which alerts</h3>
+        <div class="gs-list kinds">${g.kind_options.map((k) => box("alert_kinds", k.value,
+          `${k.sites.map((x) => siteDot(x)).join("")} ${esc(k.label)}`, dr.alert_kinds.includes(k.value))).join("")}</div>
+        <div class="note">Each alert is sent once, not on every check.</div>
+      </section>
+      <section class="gs-sec"><h3>Spending cap (all sites)</h3>
+        <div class="sadd" style="border:0;padding:0">
+          <label class="chk">Cap $ <input type="number" min="0" step="1" class="small" data-gcap="cap_amount" value="${esc(dr.cap_amount ?? g.cap.amount)}"></label>
+          <label class="chk">per <select data-gcap="cap_period">
+            <option value="week" ${(dr.cap_period ?? g.cap.period) === "week" ? "selected" : ""}>week (Mon–Sun)</option>
+            <option value="month" ${(dr.cap_period ?? g.cap.period) === "month" ? "selected" : ""}>month</option></select></label>
+          <label class="chk"><input type="radio" name="capmode" data-gcap="cap_mode" value="block" ${(dr.cap_mode ?? g.cap.mode) === "block" ? "checked" : ""}> Stop bids at the cap</label>
+          <label class="chk"><input type="radio" name="capmode" data-gcap="cap_mode" value="warn" ${(dr.cap_mode ?? g.cap.mode) === "warn" ? "checked" : ""}> Warn only</label>
+        </div>
+        ${g.cap_summary ? this._capLine(g.cap_summary) : ""}
+        <div class="note">0 = no cap. Counts GovAuctions points used plus points held in booked bids (at your point cost),
+          Mac.bid max bids on items still live plus scheduled late bids, and Mac.bid items won this period (winning price,
+          before fees and tax). "Stop bids" blocks automatic and manual bids and bookings that would go past it; cancelling
+          always works. Either way you get one alert when it's reached. Each site's own budget still applies too.</div>
+      </section>
+      <div class="sbar">
+        <button data-gact="save" ${this._gbusy || !this._gdraft ? "disabled" : ""}>Save</button>
+        <button class="secondary" data-gact="test" ${this._gbusy ? "disabled" : ""}>Send test alert</button>
+        ${this._gmsg ? `<span class="${this._gmsg.warn ? "warn" : "muted"}">${esc(this._gmsg.text)}</span>` : ""}
+      </div>
+    </div>`;
+  }
+
+  // ---------------------------------------------------------------- settings: one site (Home Assistant's own options form)
+
+  async _ensureHaForm() {
+    if (customElements.get("ha-form")) return true;
+    try {
+      // ha-form is loaded with the card editors; ask Home Assistant to load them
+      const helpers = await window.loadCardHelpers?.();
+      const card = helpers && await helpers.createCardElement({ type: "entities", entities: [] });
+      await card?.constructor?.getConfigElement?.();
+    } catch (e) { /* fall through */ }
+    await Promise.race([customElements.whenDefined("ha-form"), new Promise((r) => setTimeout(r, 4000))]);
+    return !!customElements.get("ha-form");
+  }
+
+  _mountSiteSettings(slot, site, accounts) {
+    const acc = accounts.find((a) => (a.site || "govauctions") === site);
+    const key = acc?.entry_id || "";
+    if (this._ssNode && this._ssKey === key && this._ssSig === JSON.stringify([this._ssMsg, this._ssBusy])) {
+      slot.replaceWith(this._ssNode); return;
+    }
+    const fresh = this._ssKey !== key;
+    this._ssKey = key; this._ssSig = JSON.stringify([this._ssMsg, this._ssBusy]); this._ssNode = slot;
+    if (!key) { slot.innerHTML = `<div class="sv"><div class="empty">This site's account sensor doesn't say which entry it is yet: restart Home Assistant after updating.</div></div>`; return; }
+    slot.innerHTML = `<div class="sv ss">
+      <div class="note">${esc(SITE_NAMES[site] || site)} options. Alerts are on the ⚙ Settings tab and apply to every site.
+        Saving reconnects this site with the new settings.</div>
+      <div class="ss-form"></div>
+      <div class="sbar"><button data-ssact="save" ${this._ssBusy ? "disabled" : ""}>Save</button>
+        ${this._ssMsg ? `<span class="${this._ssMsg.warn ? "warn" : "muted"}">${esc(this._ssMsg.text)}</span>` : ""}</div>
+    </div>`;
+    const host = slot.querySelector(".ss-form");
+    if (fresh) this._startSiteFlow(key);
+    else if (this._ssForm) host.appendChild(this._ssForm);
+    slot.querySelector("[data-ssact=save]").addEventListener("click", () => this._saveSiteFlow());
+  }
+
+  async _startSiteFlow(entryId, doneMsg = null) {
+    this._ssForm = null; this._ssMsg = doneMsg || { text: "Loading…" }; this._ssData = {};
+    await this._dropSiteFlow();
+    try {
+      if (!(await this._ensureHaForm())) throw new Error("NOFORM");
+      const step = await this._hass.callApi("POST", "config/config_entries/options/flow", { handler: entryId, show_advanced_options: false });
+      const loc = (await this._hass.loadBackendTranslation?.("options", "auction_watcher")) || this._hass.localize;
+      this._ssFlow = step.flow_id;
+      this._ssStep = step.step_id;
+      const data = {};
+      for (const f of step.data_schema || []) {
+        if ("default" in f) data[f.name] = f.default;
+        else if (f.description?.suggested_value !== undefined) data[f.name] = f.description.suggested_value;
+      }
+      this._ssData = data;
+      const form = document.createElement("ha-form");
+      form.hass = this._hass;
+      form.schema = step.data_schema;
+      form.data = data;
+      const k = (part, name) => `component.auction_watcher.options.step.${step.step_id}.${part}.${name}`;
+      form.computeLabel = (f) => loc(k("data", f.name)) || f.name;
+      form.computeHelper = (f) => loc(k("data_description", f.name)) || "";
+      form.addEventListener("value-changed", (ev) => { this._ssData = ev.detail.value; form.data = this._ssData; });
+      this._ssForm = form;
+      this._ssMsg = doneMsg;
+    } catch (e) {
+      this._ssMsg = { warn: true, text: e?.message === "NOFORM"
+        ? "Couldn't load Home Assistant's form here. Use Settings → Devices & services → Auction Watcher → Configure."
+        : (e?.body?.message || e?.message || String(e)) };
+    }
+    this._ssSig = null; this._maybeRender(true);
+  }
+
+  async _saveSiteFlow() {
+    if (!this._ssFlow) return;
+    this._ssBusy = true; this._maybeRender(true);
+    try {
+      const res = await this._hass.callApi("POST", `config/config_entries/options/flow/${this._ssFlow}`, this._ssData);
+      if (res.type === "create_entry") {
+        this._ssFlow = null;
+        const saved = { text: "Saved. This site reconnected with the new settings." };
+        this._ssMsg = { text: "Saved. Reconnecting…" };
+        this._ssForm = null;
+        const key = this._ssKey;
+        // Reload the form with the saved values once the site has reconnected
+        setTimeout(() => { if (this._ssKey === key && this._subtab === "settings") this._startSiteFlow(key, saved); }, 3000);
+      } else if (res.type === "form") {
+        this._ssFlow = res.flow_id;
+        if (this._ssForm) this._ssForm.error = res.errors || {};
+        this._ssMsg = { warn: true, text: "Please fix the highlighted fields." };
+      }
+    } catch (e) { this._ssMsg = { warn: true, text: e?.body?.message || e?.message || String(e) }; }
+    this._ssBusy = false; this._maybeRender(true);
+  }
+
+  async _dropSiteFlow() {
+    const id = this._ssFlow; this._ssFlow = null;
+    if (id) { try { await this._hass.callApi("DELETE", `config/config_entries/options/flow/${id}`); } catch (e) { /* already gone */ } }
   }
 
   _wsError(e) {
@@ -464,7 +692,9 @@ class AuctionWatcherPanel extends HTMLElement {
     return `<div class="hit">
       ${safeUrl(h.image) ? `<img src="${safeUrl(h.image)}" alt="" width="64" height="64" loading="lazy" decoding="async">` : `<div class="noimg"></div>`}
       <div class="hbody">
-        <div class="htitle">${siteDot(h.site)} ${h.new ? `<span class="badge on">NEW</span>` : ""}
+        <div class="htitle"><button class="star ${h.following ? "on" : ""}" data-sact="star" data-site="${esc(h.site)}" data-item="${esc(h.item_id)}"
+            data-on="${h.following ? "0" : "1"}" title="${h.following ? "You're following this (watching or bidding). Tap to remove it from your " + (h.site === "govauctions" ? "bookmarks" : "watchlist") : "Add to your " + (h.site === "govauctions" ? "GovAuctions bookmarks" : SITE_NAMES[h.site] + " watchlist") + ": it then shows on the Watching tab"}">${h.following ? "★" : "☆"}</button>
+          ${siteDot(h.site)} ${h.new ? `<span class="badge on">NEW</span>` : ""}
           <a href="${safeUrl(h.url)}" target="_blank" rel="noreferrer">${esc(h.title)}</a></div>
         <div class="hmeta">
           <b>${money(h.price)}</b>
@@ -503,6 +733,10 @@ class AuctionWatcherPanel extends HTMLElement {
       const act = b.dataset.sact;
       if (act === "run") return this._searchChange({ action: "run" });
       if (act === "more") { this._sLimit += 60; return this._maybeRender(true); }
+      if (act === "star") {
+        b.disabled = true; b.textContent = "…";
+        return this._searchChange({ action: "watch", site: b.dataset.site, item_id: b.dataset.item, on: b.dataset.on === "1" });
+      }
       if (act === "title") {
         const x = this._sd.searches.find((y) => y.id === b.dataset.sid);
         if (x) return this._searchChange({ action: "update", search_id: x.id, title_only: x.title_only === false });
@@ -911,6 +1145,10 @@ class AuctionWatcherPanel extends HTMLElement {
           <label><input data-id="${id}" data-field="rebook_mode" type="radio" name="rebook_mode_${id}" value="remaining" ${mode === "remaining" ? "checked" : ""}>
             what was left when it cancelled</label>
         </div>
+        <div class="bk-line">Top up when
+          <input data-id="${id}" data-field="topup_at" type="number" min="0" step="1" inputmode="numeric" class="small"
+            value="${esc(this._val(aid, "topup_at", a.topup_at || 0))}"> or fewer booked bids are left
+          <span class="muted">(0 = only once they run out)</span></div>
         <div class="bk-row">
           <button type="button" data-act="auto" data-id="${id}">Save booking settings</button>
           <span class="saved">${esc(this._saved["auto:" + aid] || "")}</span>
@@ -950,7 +1188,7 @@ class AuctionWatcherPanel extends HTMLElement {
   _field(id, field, fallback) {
     const a = this._auctions().find((x) => String(x.auction_id) === String(id)) || {};
     const saved = { limit: a.bid_limit, max_price: a.max_price, book_count: a.rebook_amount || 10, auto_cancel: a.auto_cancel,
-      auto_rebook: a.auto_rebook, rebook_mode: a.rebook_mode || "fixed", rebook_amount: a.rebook_amount || 10,
+      auto_rebook: a.auto_rebook, rebook_mode: a.rebook_mode || "fixed", rebook_amount: a.rebook_amount || 10, topup_at: a.topup_at || 0,
       mb_late: a.mb_mode === "late", mb_assure: !!a.mb_assurance, mb_late_min: Math.round((a.mb_late_seconds || 180) / 60) }[field];
     const v = this._val(id, field, saved);
     return v === undefined || v === null || v === "" ? fallback : v;
@@ -1035,9 +1273,10 @@ class AuctionWatcherPanel extends HTMLElement {
           auto_rebook: !!this._field(id, "auto_rebook", false),
           rebook_mode: this._field(id, "rebook_mode", "fixed"),
           rebook_amount: Math.max(1, int(this._field(id, "rebook_amount", 10))),
+          topup_at: Math.max(0, int(this._field(id, "topup_at", 0))),
           max_price: dec(this._field(id, "max_price", 0)),
         });
-        this._clearDrafts(id, ["limit", "max_price", "auto_cancel", "auto_rebook", "rebook_mode", "rebook_amount"]);
+        this._clearDrafts(id, ["limit", "max_price", "auto_cancel", "auto_rebook", "rebook_mode", "rebook_amount", "topup_at"]);
         this._saved[key] = "Saved";
       }
     } catch (err) {
@@ -1104,6 +1343,17 @@ const STYLE = `
              font-size: 12px; font-weight: 700; }
   .schip-t.on { color: var(--primary-color); }
   .hits .more { align-self: center; }
+  .star { background: none; border: 0; padding: 0 4px 0 0; font-size: 20px; line-height: 1; color: var(--secondary-text-color); cursor: pointer; vertical-align: middle; }
+  .star.on { color: #f5b301; }
+  .star:hover { color: #f5b301; }
+  .gs-sec { background: var(--card-background-color); border: 1px solid var(--divider-color); border-radius: 12px; padding: 12px 14px; }
+  .gs-sec h3 { margin: 0 0 8px; font-size: 16px; font-weight: 500; }
+  .gs-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 6px 12px; margin-bottom: 8px; }
+  .gs-list.kinds { grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
+  .gs .k { font-size: 12px; color: var(--secondary-text-color); margin: 8px 0 4px; }
+  .tally.cap .capbar { height: 6px; border-radius: 3px; background: var(--divider-color); overflow: hidden; margin-top: 6px; }
+  .tally.cap .capbar div { height: 100%; background: var(--primary-color); }
+  .ss-form { background: var(--card-background-color); border: 1px solid var(--divider-color); border-radius: 12px; padding: 8px 14px; }
   .schip-x { padding: 5px 10px; border-left: 1px solid var(--divider-color); font-size: 16px; line-height: 1; }
   .schip-x:hover { background: var(--error-color, #db4437); color: #fff; }
   details.locs { background: var(--card-background-color); border: 1px solid var(--divider-color); border-radius: 12px; padding: 10px 12px; }

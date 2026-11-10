@@ -96,8 +96,10 @@ from .logic import (
     macbid_committed,
     points_at_risk,
     record_spending,
+    record_wins,
     spent_since,
     week_start,
+    wins_since,
 )
 from .sites.base import (
     STATUS_ENDED,
@@ -110,6 +112,7 @@ from .sites.base import (
     state_from_dict,
     state_to_dict,
 )
+from . import global_settings
 from . import packs as packs_mod
 from .sites import govauctions as ga
 from .sites import ebay as eb
@@ -251,14 +254,34 @@ class AuctionWatcherCoordinator(DataUpdateCoordinator[dict[str, AuctionState]]):
         return int(self._opt(self.config_entry, CONF_WEEKLY_BUDGET, 0) or 0)
 
     def _budget_left(self, now: float, states: dict[str, AuctionState] | None = None) -> int | None:
-        """Weekly budget minus bids placed this week minus bids already booked (they'll be spent too)."""
+        """Points still allowed: the GovAuctions weekly budget (bids placed this week + bids already
+        booked) and the spending cap across all sites, whichever is tighter. None = no limit."""
+        left: int | None = None
         budget = self._budget()
-        if not budget:
-            return None
-        spent = spent_since(self._ledger, week_start(dt_util.as_local(dt_util.utc_from_timestamp(now))))
-        booked = sum(s.your_booked_left for s in (states if states is not None else (self.data or {})).values()
-                     if s.status in (STATUS_LIVE, STATUS_UPCOMING))
-        return budget - spent - booked
+        if budget:
+            spent = spent_since(self._ledger, week_start(dt_util.as_local(dt_util.utc_from_timestamp(now))))
+            booked = sum(s.your_booked_left for s in (states if states is not None else (self.data or {})).values()
+                         if s.status in (STATUS_LIVE, STATUS_UPCOMING))
+            left = budget - spent - booked
+        g = global_settings.get(self.hass)
+        cap_left = g.left(now) if g else None
+        if cap_left is not None:
+            cost = float(self._opt(self.config_entry, CONF_POINT_COST, DEFAULT_POINT_COST)) or DEFAULT_POINT_COST
+            pts = int(max(cap_left, 0) // cost)
+            left = pts if left is None else min(left, pts)
+        return left
+
+    async def async_watch(self, item_id: str, on: bool = True) -> None:
+        """Bookmark on GovAuctions (shows as Watching)."""
+        await self.client.bookmark(item_id, on)
+        self._lists = None
+        await self.async_request_refresh()
+
+    def dollars_used(self, since: float, exclude: str | None = None) -> float:
+        """Counted toward the spending cap: points used since `since` plus points held in booked bids."""
+        cost = float(self._opt(self.config_entry, CONF_POINT_COST, DEFAULT_POINT_COST))
+        booked = sum(s.your_booked_left for s in (self.data or {}).values() if s.status in (STATUS_LIVE, STATUS_UPCOMING))
+        return round((spent_since(self._ledger, since) + booked) * cost, 2)
 
     async def async_set_auto_paused(self, paused: bool) -> None:
         self.auto_paused = paused
@@ -289,6 +312,9 @@ class AuctionWatcherCoordinator(DataUpdateCoordinator[dict[str, AuctionState]]):
             "budget_left": (budget - spent_week - risk["booked"]) if budget else None,
             "auto_paused": self.auto_paused,
         }
+        if (g := global_settings.get(self.hass)) is not None:
+            self.spending["cap"] = g.summary(now)
+            await g.async_check(now)
         if budget and spent_week >= budget and self._budget_alerted_week != week:
             self._budget_alerted_week = week
             self._emit("budget", {"site": "govauctions", "auction_id": "budget", "title": "Weekly budget",
@@ -440,7 +466,7 @@ class AuctionWatcherCoordinator(DataUpdateCoordinator[dict[str, AuctionState]]):
         left = self._budget_left(time.time())
         if left is not None:
             if left <= 0:
-                raise SiteError("This week's budget is used up (raise it in the GovAuctions settings)")
+                raise SiteError("Your budget is used up: the GovAuctions weekly budget or the spending cap on the Settings tab")
             count = min(count, left)
         if max_price is None:
             max_price = self.auto_settings(aid).max_price or None
@@ -479,11 +505,9 @@ class AuctionWatcherCoordinator(DataUpdateCoordinator[dict[str, AuctionState]]):
         if EVENT_NAMES[kind] == EVENT_BOOKING:
             payload["action"] = kind
         self.hass.bus.async_fire(EVENT_NAMES[kind], payload)
-        if ALERT_KIND_OF.get(kind, kind) in set(self._opt(e, CONF_ALERT_KINDS, DEFAULT_ALERT_KINDS)):
-            services = list(self._opt(e, CONF_NOTIFY_SERVICES, []))
-            entities = list(self._opt(e, CONF_NOTIFY_ENTITIES, []))
-            for domain, service, service_data in build_calls(kind, data, services, entities):
-                self.hass.async_create_task(self._send(domain, service, service_data))
+        # Where alerts go and which ones: the Settings tab on the Auctions page (same for every site)
+        if (g := global_settings.get(self.hass)) is not None:
+            g.send(kind, data, ALERT_KIND_OF.get(kind, kind))
 
     async def _run_auto(self, states: dict[str, AuctionState], now: float) -> None:
         """Opt-in auto-cancel / auto-rebook, one decision per auction per check."""
@@ -513,14 +537,19 @@ class AuctionWatcherCoordinator(DataUpdateCoordinator[dict[str, AuctionState]]):
                     s.your_booked_left = 0
                     self._emit("cancelled", self._booking_data(aid, count, f"auto: {reason}", s))
                 else:
-                    await self.client.book(aid, count, settings.max_price or None)
+                    result = await self.client.book(aid, count, settings.max_price or None, partial=True)
+                    try:
+                        booked = int(result.get("bookedBids") or count)
+                    except (TypeError, ValueError):
+                        booked = count
+                    count = booked
                     if available is not None:
                         available -= count
                     if budget_left is not None:
                         budget_left -= count
                     mem.cancelled_with = 0
                     mem.status = f"booked {count} bids ({reason})"
-                    s.your_booked_left = count
+                    s.your_booked_left = (s.your_booked_left or 0) + count
                     self._emit("booked", self._booking_data(aid, count, f"auto: {reason}", s))
                 await self._save()
             except AuthError:
@@ -655,6 +684,7 @@ class MacBidCoordinator(AuctionWatcherCoordinator):
         self._details: dict[str, tuple[float, dict[str, Any]]] = {}  # lot_id -> (fetched at, parsed /lot/{id})
         self._mb: dict[str, MacBidSettings] = {}
         self._mbmem: dict[str, MacBidMemory] = {}
+        self._mb_wins: dict[str, list[float]] = {}  # lot -> [first seen as won, price]: counts toward the spending cap
         self._backoff_until = 0.0
 
     async def async_load(self) -> None:
@@ -662,12 +692,15 @@ class MacBidCoordinator(AuctionWatcherCoordinator):
         stored = await self._store.async_load() or {}
         self._mb = {str(k): MacBidSettings.from_dict(v) for k, v in (stored.get("macbid_bids") or {}).items()}
         self._mbmem = {str(k): MacBidMemory(placed=int(v)) for k, v in (stored.get("macbid_placed") or {}).items()}
+        self._mb_wins = {str(k): list(v) for k, v in (stored.get("macbid_wins") or {}).items()}
 
     async def _save(self) -> None:
         await super()._save()
         data = await self._store.async_load() or {}
         data["macbid_bids"] = {k: vars(v) for k, v in self._mb.items() if v.mode != MB_MODE_OFF}
         data["macbid_placed"] = {k: m.placed for k, m in self._mbmem.items() if m.placed}
+        cutoff = time.time() - 40 * 86400  # wins only matter for this week / month
+        data["macbid_wins"] = {k: v for k, v in getattr(self, "_mb_wins", {}).items() if v[0] >= cutoff}
         await self._store.async_save(data)
 
     def macbid_settings(self, lot_id: str) -> MacBidSettings:
@@ -685,13 +718,34 @@ class MacBidCoordinator(AuctionWatcherCoordinator):
         self.async_update_listeners()
 
     def _macbid_budget_left(self, states: dict[str, AuctionState], exclude: str | None = None) -> int | None:
+        """Dollars a new max on `exclude` may use: the Mac.bid budget and the spending cap across
+        all sites, whichever is tighter (that item's own current max isn't counted). None = no limit."""
+        left: int | None = None
         budget = int(self._opt(self.config_entry, CONF_MACBID_BUDGET, 0) or 0)
-        if not budget:
-            return None
-        others = {k: v for k, v in states.items() if k != exclude}
-        c = macbid_committed(others, {k: m.placed for k, m in self._mbmem.items()}, self._limits,
-                             {k: v.mode for k, v in self._mb.items()})
-        return budget - c["placed"] - c["scheduled"]
+        if budget:
+            others = {k: v for k, v in states.items() if k != exclude}
+            c = macbid_committed(others, {k: m.placed for k, m in self._mbmem.items()}, self._limits,
+                                 {k: v.mode for k, v in self._mb.items()})
+            left = budget - c["placed"] - c["scheduled"]
+        g = global_settings.get(self.hass)
+        cap_left = g.left(time.time(), exclude=(self, exclude or "")) if g else None
+        if cap_left is not None:
+            left = int(max(cap_left, 0)) if left is None else min(left, int(max(cap_left, 0)))
+        return left
+
+    async def async_watch(self, item_id: str, on: bool = True) -> None:
+        """Add to (or remove from) your Mac.bid watchlist."""
+        await self.client.watch(item_id, on)
+        self._watch_at = 0.0
+        await self.async_request_refresh()
+
+    def dollars_used(self, since: float, exclude: str | None = None) -> float:
+        """Counted toward the spending cap: max bids tied up on live items (and scheduled late bids)
+        plus items won since `since` (at their winning price)."""
+        states = {k: v for k, v in (self.data or {}).items() if k != exclude}
+        c = macbid_committed(states, {k: m.placed for k, m in self._mbmem.items()}, self._limits,
+                             {k: v.mode for k, v in self._mb.items() if k != exclude})
+        return round(c["placed"] + c["scheduled"] + wins_since(self._mb_wins, since), 2)
 
     async def async_place_bid(self, lot_id: str, amount: int, assurance: bool = False) -> int:
         """Manual max bid (the page's button / the place_bid service)."""
@@ -701,7 +755,7 @@ class MacBidCoordinator(AuctionWatcherCoordinator):
             raise SiteError("That item isn't live")
         left = self._macbid_budget_left(self.data or {}, exclude=aid)
         if left is not None and amount > left:
-            raise SiteError(f"A ${amount} max would go past your Mac.bid budget (${max(left, 0)} left)")
+            raise SiteError(f"A ${amount} max would go past your budget (${max(left, 0)} left: Mac.bid budget or the spending cap)")
         if s.price is not None and amount <= s.price:
             raise SiteError(f"Your max must be above the current bid (${s.price:.0f}); the minimum is ${int(s.price) + 1}")
         await self._place(s, int(amount), "placed by you", assurance)
@@ -755,6 +809,8 @@ class MacBidCoordinator(AuctionWatcherCoordinator):
                 self._lots.pop(aid, None)  # keep re-reading it until confirmed
 
     async def _run_macbid(self, states: dict[str, AuctionState], now: float) -> None:
+        if record_wins(self._mb_wins, states, now):
+            await self._save()
         await self._verify_pending(states, now)
         for aid, settings in list(self._mb.items()):
             s = states.get(aid)
@@ -787,6 +843,9 @@ class MacBidCoordinator(AuctionWatcherCoordinator):
             "won_awaiting_pickup": round(sum(s.price or 0 for s in states.values() if s.status == "awaiting_pickup"), 2),
             "auto_paused": self.auto_paused,
         }
+        if (g := global_settings.get(self.hass)) is not None:
+            self.spending["cap"] = g.summary(now)
+            await g.async_check(now)
 
     @staticmethod
     def _seconds_left(lot: dict[str, Any], now: float) -> float | None:
@@ -851,12 +910,16 @@ class MacBidCoordinator(AuctionWatcherCoordinator):
                 client.auth_changed = False
                 self.hass.config_entries.async_update_entry(e, data={**e.data, CONF_AUTH: client.auth})
 
-        # Item details (condition notes, description): once per item, refreshed daily, a few per check
+        # Item details (condition notes, description): public, once per item, refreshed daily.
+        # Items never loaded go first so new cards fill in on the next check; up to 20 per check.
         fetched = 0
-        for lot_id in tracked:
+        order = sorted(tracked, key=lambda i: (i in self._details, (self._details.get(i) or (0,))[0]))
+        for lot_id in order:
             cached = self._details.get(lot_id)
-            if (cached is None or now - cached[0] > 86400) and fetched < 5 and now >= self._backoff_until:
+            if (cached is None or now - cached[0] > 86400) and fetched < 20 and now >= self._backoff_until:
                 try:
+                    if fetched:
+                        await asyncio.sleep(0.3)
                     self._details[lot_id] = (now, await client.lot_details(lot_id))
                     fetched += 1
                 except mb.RateLimited:
@@ -929,6 +992,18 @@ class MacBidCoordinator(AuctionWatcherCoordinator):
 
 class EbayCoordinator(AuctionWatcherCoordinator):
     """eBay via the official APIs: your watchlist + bids (if signed in) and any item numbers you add."""
+
+    def dollars_used(self, since: float, exclude: str | None = None) -> float:
+        return 0.0  # no bidding on eBay from here, so nothing counts toward the spending cap
+
+    async def async_watch(self, item_id: str, on: bool = True) -> None:
+        """Add to (or remove from) your eBay watch list (needs eBay sign-in)."""
+        client: eb.EbayClient = self.client  # type: ignore[assignment]
+        if not client.signed_in:
+            raise SiteError("Sign in to eBay in its settings first (watching needs your eBay account)")
+        await client.watch(item_id, on)
+        self._mine_at = 0.0
+        await self.async_request_refresh()
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry, client: eb.EbayClient) -> None:
         super().__init__(hass, entry, client)  # type: ignore[arg-type]

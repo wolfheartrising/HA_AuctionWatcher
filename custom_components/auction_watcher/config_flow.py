@@ -431,8 +431,6 @@ class AuctionWatcherOptionsFlow(OptionsFlow):
             vol.Required(CONF_ALERT_MAX_PRICE, default=o.get(CONF_ALERT_MAX_PRICE, DEFAULT_ALERT_MAX_PRICE)): _num(0, 100000, 0.01, "$"),
             vol.Required(CONF_DEFAULT_BID_LIMIT, default=o.get(CONF_DEFAULT_BID_LIMIT, DEFAULT_BID_LIMIT)): _num(0, 100000, 1, "bids"),
             vol.Required(CONF_WEEKLY_BUDGET, default=o.get(CONF_WEEKLY_BUDGET, 0)): _num(0, 1000000, 1, "points"),
-            # Where alerts go
-            **self._alert_fields(GOV_KINDS),
             # Costs, timing, page
             vol.Required(CONF_POINT_COST, default=o.get(CONF_POINT_COST, DEFAULT_POINT_COST)): _num(0, 5, 0.01, "$"),
             vol.Required(CONF_FAST_INTERVAL, default=o.get(CONF_FAST_INTERVAL, DEFAULT_FAST_INTERVAL)): _num(5, 120, 1, "s"),
@@ -449,7 +447,6 @@ class AuctionWatcherOptionsFlow(OptionsFlow):
         schema = vol.Schema({
             vol.Required(CONF_ENDING_MINUTES, default=o.get(CONF_ENDING_MINUTES, DEFAULT_ENDING_MINUTES)): _num(0, 240, 1, "min"),
             vol.Required(CONF_DEFAULT_BID_LIMIT, default=o.get(CONF_DEFAULT_BID_LIMIT, DEFAULT_BID_LIMIT)): _num(0, 100000, 1, "$"),
-            **self._alert_fields(EBAY_KINDS),
             vol.Required(CONF_FAST_INTERVAL, default=o.get(CONF_FAST_INTERVAL, DEFAULT_FAST_INTERVAL)): _num(5, 120, 1, "s"),
             vol.Required(CONF_IDLE_INTERVAL, default=o.get(CONF_IDLE_INTERVAL, DEFAULT_IDLE_INTERVAL)): _num(5, 240, 1, "min"),
             vol.Required(CONF_KEEP_ENDED_DAYS, default=o.get(CONF_KEEP_ENDED_DAYS, DEFAULT_KEEP_ENDED_DAYS)): _num(0, 60, 1, "days"),
@@ -467,8 +464,6 @@ class AuctionWatcherOptionsFlow(OptionsFlow):
             vol.Required(CONF_PICKUP_HOURS, default=o.get(CONF_PICKUP_HOURS, DEFAULT_PICKUP_HOURS)): _num(1, 168, 1, "h"),
             vol.Required(CONF_DEFAULT_BID_LIMIT, default=o.get(CONF_DEFAULT_BID_LIMIT, DEFAULT_BID_LIMIT)): _num(0, 100000, 1, "$"),
             vol.Required(CONF_MACBID_BUDGET, default=o.get(CONF_MACBID_BUDGET, 0)): _num(0, 1000000, 1, "$"),
-            # Where alerts go
-            **self._alert_fields(MACBID_KINDS),
             # Timing, page
             vol.Required(CONF_FAST_INTERVAL, default=o.get(CONF_FAST_INTERVAL, DEFAULT_FAST_INTERVAL)): _num(5, 120, 1, "s"),
             vol.Required(CONF_IDLE_INTERVAL, default=o.get(CONF_IDLE_INTERVAL, DEFAULT_IDLE_INTERVAL)): _num(5, 240, 1, "min"),

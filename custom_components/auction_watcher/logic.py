@@ -178,6 +178,7 @@ class AutoSettings:
     rebook_mode: str = REBOOK_FIXED      # "fixed" -> rebook_amount; "remaining" -> what was left when cancelled
     rebook_amount: int = 10
     max_price: float = 0.0               # passed to the site's own price cap (0 = none)
+    topup_at: int = 0                    # rebook when booked bids left <= this (0 = only once they run out)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any] | None) -> "AutoSettings":
@@ -189,6 +190,7 @@ class AutoSettings:
             rebook_mode=mode if mode in (REBOOK_FIXED, REBOOK_REMAINING) else REBOOK_FIXED,
             rebook_amount=max(0, int(d.get("rebook_amount", 10) or 0)),
             max_price=max(0.0, float(d.get("max_price", 0) or 0)),
+            topup_at=max(0, int(d.get("topup_at", 0) or 0)),
         )
 
     @property
@@ -250,21 +252,25 @@ def decide_auto(
             return "cancel", s.your_booked_left, f"{s.active_bidders} bidders > {rules.max_bidders}"
         return "", 0, f"crowded ({s.active_bidders} bidders), holding off"
 
-    if settings.auto_rebook and s.your_booked_left == 0 and s.active_bidders >= 1:
+    topping_up = settings.topup_at > 0 and 0 < s.your_booked_left <= settings.topup_at
+    if settings.auto_rebook and (s.your_booked_left == 0 or topping_up) and s.active_bidders >= 1:
         if paused:
             return "", 0, "auto-booking is switched off"
         if budget_left is not None and budget_left <= 0:
             return "", 0, "weekly budget used up"
         if s.closed_to_new and s.your_bids == 0:
             return "", 0, "closed to new bidders and you haven't bid yet"
-        want = mem.cancelled_with if settings.rebook_mode == REBOOK_REMAINING and mem.cancelled_with else settings.rebook_amount
-        room = limit - s.your_bids
+        want = mem.cancelled_with if settings.rebook_mode == REBOOK_REMAINING and mem.cancelled_with and not topping_up \
+            else settings.rebook_amount
+        room = limit - s.your_bids - s.your_booked_left  # booked bids still to fire count against Max bids too
         if room <= 0:
             return "", 0, "bid limit reached"
         count = min(want, room, points if points is not None else want,
                     budget_left if budget_left is not None else want)
         if count < 1:
             return "", 0, "no points left to book"
+        if topping_up:
+            return "book", count, f"topping up: {s.your_booked_left} booked bid{'' if s.your_booked_left == 1 else 's'} left"
         return "book", count, f"down to {s.active_bidders} bidder{'' if s.active_bidders == 1 else 's'}"
     return "", 0, mem.status or "watching"
 
@@ -391,6 +397,44 @@ def week_start(local_now: Any) -> float:
     from datetime import timedelta
     monday = (local_now - timedelta(days=local_now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
     return monday.timestamp()
+
+
+def period_start(local_now: Any, period: str) -> float:
+    """Start of the spending-cap period: Monday 00:00 ("week") or the 1st at 00:00 ("month")."""
+    if period == "month":
+        return local_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp()
+    return week_start(local_now)
+
+
+def record_wins(wins: dict[str, list[float]], states: dict[str, AuctionState], now: float) -> bool:
+    """Mac.bid: remember when each won item first showed up (awaiting pickup) and its price."""
+    changed = False
+    for aid, s in states.items():
+        if s.status == "awaiting_pickup" and aid not in wins and s.price is not None:
+            wins[aid] = [now, float(s.price)]
+            changed = True
+    return changed
+
+
+def wins_since(wins: dict[str, list[float]], since: float) -> float:
+    return round(sum(price for t, price in wins.values() if t >= since), 2)
+
+
+@dataclass
+class SpendCap:
+    """One spending cap across every site (Settings tab)."""
+    amount: float = 0.0       # dollars, 0 = no cap
+    period: str = "week"      # "week" | "month"
+    mode: str = "block"       # "block" = stop bids/bookings at the cap; "warn" = alert only
+
+    def left(self, used: float) -> float | None:
+        """Dollars still allowed, or None when nothing should be blocked (no cap, or warn-only)."""
+        if not self.amount or self.mode != "block":
+            return None
+        return round(self.amount - used, 2)
+
+    def reached(self, used: float) -> bool:
+        return bool(self.amount) and used >= self.amount
 
 
 def record_spending(ledger: list[list[float]], last_bids: dict[str, int], states: dict[str, AuctionState],

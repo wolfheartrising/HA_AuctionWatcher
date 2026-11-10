@@ -324,6 +324,13 @@ class EbayClient:
         except aiohttp.ClientError as err:
             raise SiteError(f"Couldn't reach eBay: {err}") from err
 
+    async def watch(self, item_id: str, on: bool = True) -> None:
+        """Add (or remove) an item on your eBay watch list (official Trading API; needs eBay sign-in)."""
+        call = "AddToWatchList" if on else "RemoveFromWatchList"
+        answer = await self._trading(call, f"<ItemID>{item_id}</ItemID>")
+        if "<Ack>Failure</Ack>" in answer:
+            raise SiteError(f"eBay refused {call}")
+
     async def my_user_id(self) -> str:
         return parse_user_id(await self._trading("GetUser", ""))
 

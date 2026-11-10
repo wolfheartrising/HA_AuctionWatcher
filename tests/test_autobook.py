@@ -65,3 +65,22 @@ def test_only_rebooks_when_out_and_someone_is_bidding():
     assert decide_auto(auction(active_bidders=0), ON, AutoMemory(), RULES, 500, NOW)[0] == ""
     only_cancel = AutoSettings(auto_cancel=True)
     assert decide_auto(auction(), only_cancel, AutoMemory(), RULES, 500, NOW)[0] == ""
+
+
+def test_topup_is_opt_in_and_counts_booked_bids_against_the_limit():
+    s = replace(ON, topup_at=3)
+    # off (0): 3 left does nothing, same as before
+    assert decide_auto(auction(your_booked_left=3), ON, AutoMemory(), RULES, 500, NOW)[0] == ""
+    # on: 3 left -> top up with the fixed amount; 4 left -> not yet
+    action, count, why = decide_auto(auction(your_booked_left=3), s, AutoMemory(), RULES, 500, NOW)
+    assert (action, count) == ("book", 20) and "topping up" in why
+    assert decide_auto(auction(your_booked_left=4), s, AutoMemory(), RULES, 500, NOW)[0] == ""
+    # bids still booked count against Max bids: 990 used + 3 booked of 1000 -> room 7
+    assert decide_auto(auction(your_bids=990, your_booked_left=3), s, AutoMemory(), RULES, 500, NOW)[:2] == ("book", 7)
+    assert decide_auto(auction(your_bids=997, your_booked_left=3), s, AutoMemory(), RULES, 500, NOW)[0] == ""
+    # still never tops up when it's crowded, paused or over budget
+    crowded = auction(your_booked_left=3, active_bidders=5)
+    assert decide_auto(crowded, s, AutoMemory(), RULES, 500, NOW)[0] == "cancel"
+    assert decide_auto(auction(your_booked_left=3), s, AutoMemory(), RULES, 500, NOW, paused=True)[0] == ""
+    assert decide_auto(auction(your_booked_left=3), s, AutoMemory(), RULES, 500, NOW, budget_left=0)[0] == ""
+    assert AutoSettings.from_dict({"topup_at": "3"}).topup_at == 3 and AutoSettings.from_dict({}).topup_at == 0

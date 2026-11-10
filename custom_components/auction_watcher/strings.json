@@ -84,7 +84,7 @@
     "step": {
       "init": {
         "title": "GovAuctions settings",
-        "description": "When to alert, where alerts go, and how often to check.",
+        "description": "When to alert, where alerts go, and how often to check.\n\nWhere alerts go and which alerts to send are on the Auctions page → ⚙ Settings (shared by all sites).",
         "data": {
           "alert_max_bidders": "Alert when OTHER active bidders are at most (you aren't counted)",
           "active_window_minutes": "Count anyone who bid within the last N minutes",
@@ -114,7 +114,7 @@
       },
       "macbid_options": {
         "title": "Mac.bid settings",
-        "description": "When to alert, where alerts go, and how often to check.",
+        "description": "When to alert, where alerts go, and how often to check.\n\nWhere alerts go and which alerts to send are on the Auctions page → ⚙ Settings (shared by all sites).",
         "data": {
           "ending_soon_minutes": "Alert this many minutes before an auction ends (0 = off)",
           "pickup_reminder_hours": "Pickup reminder this many hours before the deadline",
@@ -137,7 +137,7 @@
       },
       "ebay_options": {
         "title": "eBay settings",
-        "description": "When to alert, where alerts go, and how often to check.",
+        "description": "When to alert, where alerts go, and how often to check.\n\nWhere alerts go and which alerts to send are on the Auctions page → ⚙ Settings (shared by all sites).",
         "data": {
           "ending_soon_minutes": "Alert this many minutes before an auction ends (0 = off)",
           "default_bid_limit": "Default max price per item, in dollars (0 = none)",
@@ -231,6 +231,10 @@
         "max_price": {
           "name": "Max price",
           "description": "Passed to the site so your booked bids stop above this price (0 = none)."
+        },
+        "topup_at": {
+          "name": "Top up at",
+          "description": "Rebook while this many booked bids or fewer are left, so you never run out mid-fight (0 = rebook only once they run out)."
         }
       }
     },

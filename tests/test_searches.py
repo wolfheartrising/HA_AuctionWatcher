@@ -55,9 +55,13 @@ def test_macbid_search_marks_transfer_items():
 
 
 def test_search_alert_wording():
-    title, msg, spoken = format_alert("search", {"count": 3, "lines": ["bluey: 2 Mac.bid", "drone: 1 GovAuctions"]})
-    assert title == "3 new matches for your saved searches"
-    assert msg == "bluey: 2 Mac.bid; drone: 1 GovAuctions" and "3 new auction matches" in spoken
+    title, msg, spoken = format_alert("search", {"count": 5, "lines": ["bluey - 2 new", "drone - 3 new"],
+                                                 "quiet": ["shed", "generator", "greenhouse"]})
+    assert title == "You have new matches for your saved searches"
+    assert msg == "bluey - 2 new\ndrone - 3 new\n\nshed, generator, greenhouse - no new results"
+    assert "5 new auction matches" in spoken
+    assert format_alert("search", {"count": 1, "lines": ["bluey - 1 new"]})[1] == "bluey - 1 new"
+
 
 
 def test_title_only_drops_the_sites_loose_matches():

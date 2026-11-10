@@ -46,6 +46,7 @@ from .sites.base import SiteError
 from .panel import async_register_panel, async_remove_panel
 from .search_manager import DATA_KEY as SEARCHES_KEY
 from .search_manager import SearchManager, async_register_ws
+from . import global_settings
 from .sites import govauctions as ga
 
 PLATFORMS = [Platform.SENSOR, Platform.SWITCH]
@@ -187,6 +188,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             vol.Optional("auto_rebook"): cv.boolean,
             vol.Optional("rebook_mode"): vol.In(["fixed", "remaining"]),
             vol.Optional("rebook_amount"): vol.All(vol.Coerce(int), vol.Range(min=1, max=10000)),
+            vol.Optional("topup_at"): vol.All(vol.Coerce(int), vol.Range(min=0, max=1000)),
             vol.Optional("max_price"): vol.All(vol.Coerce(float), vol.Range(min=0)),
         }),
     )
@@ -209,10 +211,17 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
     hass.services.async_register(DOMAIN, "search_now", search_now)
     async_register_ws(hass)
+    global_settings.async_register_ws(hass)
     return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: AuctionWatcherConfigEntry) -> bool:
+    # Alert targets are shared by all sites (Settings tab); older per-site targets are brought in once
+    if global_settings.DATA_KEY not in hass.data:
+        g = global_settings.GlobalSettings(hass)
+        await g.async_load()
+        hass.data[global_settings.DATA_KEY] = g
+    await hass.data[global_settings.DATA_KEY].async_adopt_entry(entry)
     session = async_create_clientsession(hass, cookie_jar=aiohttp.DummyCookieJar())
     if entry.data.get(CONF_SITE) == SITE_EBAY:
         client_e = eb.EbayClient(
@@ -260,4 +269,5 @@ async def async_unload_entry(hass: HomeAssistant, entry: AuctionWatcherConfigEnt
         manager = hass.data.pop(SEARCHES_KEY, None)
         if manager is not None:
             manager.stop()
+        hass.data.pop(global_settings.DATA_KEY, None)
     return unloaded

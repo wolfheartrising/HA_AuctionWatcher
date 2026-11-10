@@ -88,6 +88,7 @@ site's own search: what typing in its search box does.
 - **Results** from all sites are in one list, soonest-ending first, with **NEW** on matches since the last run.
   Filter by search, by site, or new only. Each new match is alerted once (alert type *New matches for saved searches*).
   A search's first run only records what's already listed, so you don't get alerts for everything at once.
+  The alert lists each search with new matches ("bluey - 2 new"), then the ones with nothing new; no message when nothing is new.
 - **Mac.bid pickup locations**: a sub-menu of toggles, starting from the locations on your Mac.bid account.
   Results include items at those buildings or transferable to them ("transfer needed"); the tab notes how many results
   the location filter excluded. Changing a toggle searches again a few seconds later.
@@ -110,6 +111,9 @@ Each auction card on the **Auctions** page has a *Booking & auto* section. These
 - **Max bids** and **Max price** (top of each card, saved separately): Max bids is the total you'll spend there including bids already placed; Max price is handed to the site's own price cap. The card shows the **total max cost** = max bids × point cost + what you'd pay to win at your max price (1¢ on 1¢ auctions).
 - **Auto-cancel when crowded** (off by default): when the auction has more bidders than your alert number, your booked bids are cancelled and the unused points come back.
 - **Auto-rebook when it thins out** (off by default): when it's back down to your alert number and you have nothing booked, it books again: either a **fixed amount** or **what was left when it auto-cancelled**.
+- **Top up early** (optional, per auction): "Top up when 3 or fewer booked bids are left" books more *before* you run out,
+  so you don't drop out mid-fight. Booking while bids are still booked adds to them (same as the site's own button).
+  Bids still booked count toward Max bids, and if your balance changed it books what it can instead of failing.
 
 Safety rules, always on:
 - Auto-booking can't be turned on for an auction without a **bid limit**, and never books past it or past your balance.
@@ -130,7 +134,7 @@ This is automated use of your account. Check the site's terms and decide for you
    - **GovAuctions**: upload or paste your cookies (see below).
    - **Mac.bid**: email and password; the first time, type in the code Mac.bid texts or emails you. (Or paste the browser's saved login.)
    - **eBay**: your developer App ID + Cert ID, plus your RuName to sign in to your account (see the eBay section).
-5. Click the ⚙️ on the account: one page per site with alert rules, where alerts go (phone, Telegram, Alexa), budgets and timing.
+5. Open the **Auctions** page in the sidebar → **⚙ Settings** to choose where alerts go (phone, Telegram, Alexa) and which ones; each site's tab → ⚙ Settings for its rules, budgets and timing.
 6. Open **Auctions** in the sidebar. (A YAML dashboard is also in `dashboards/` if you prefer building your own.)
 
 **After every update**: restart Home Assistant if the release changed Python code, then hard-refresh the Auctions page (Ctrl+F5; in the phone app: Settings → Companion app → Troubleshooting → Reset frontend cache). Browsers sometimes keep the old page.
@@ -149,7 +153,12 @@ The cookies are stored in your Home Assistant config like any other integration'
 
 ## Options
 
-Each site's ⚙️ shows only its own settings.
+Settings live on the **Auctions page**:
+
+- **⚙ Settings tab** (shared by every site and saved searches): **where alerts go** (phone app, Telegram, Alexa, notify entities),
+  **which alerts** to send (each shows colored dots for the sites that send it), and **Send test alert**. Upgrading brings your
+  old per-site alert targets over automatically.
+- **Each site's tab → ⚙ Settings**: that site's own options below (the same form as Devices & services → Configure).
 
 | GovAuctions | Default |
 |---|---|
@@ -180,7 +189,7 @@ Each site's ⚙️ shows only its own settings.
 | Check every N s in an item's last 15 min / idle | 10 s / 45 min |
 | Keep ended auctions | 3 days |
 
-All sites: where alerts go, which alerts to send, extra auction IDs to follow.
+All sites: extra auction IDs to follow.
 
 ## Notes and limits
 

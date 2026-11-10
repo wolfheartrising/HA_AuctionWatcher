@@ -399,15 +399,24 @@ class GovAuctionsClient:
 
     # ---- booking: these spend points. Same calls the site's own Book / Cancel buttons make.
 
-    async def book(self, auction_id: str, count: int, max_price: float | None = None) -> dict[str, Any]:
-        """Book `count` bids. With max_price the site stops bidding past that price."""
+    async def book(self, auction_id: str, count: int, max_price: float | None = None,
+                   partial: bool = False) -> dict[str, Any]:
+        """Book `count` bids (adds to any you already have booked, like the site's own "add" button).
+        With max_price the site stops bidding past that price. partial: if your balance can't
+        cover all of them, book what it can (the answer's bookedBids says how many)."""
         if count < 1:
             raise SiteError("Nothing to book")
-        body: dict[str, Any] = {"bid_count": int(count), "book_partial": False}
+        body: dict[str, Any] = {"bid_count": int(count), "book_partial": bool(partial)}
         if max_price:
             body["max_price"] = float(max_price)
         data = await self._request("POST", f"/api/v1/auction/{auction_id}/bidBuddy", json_body=body)
         return booking_result(data, "book")
+
+    async def bookmark(self, auction_id: str, on: bool = True) -> None:
+        """Bookmark (or un-bookmark) an auction: the site's own bookmark button. Bookmarks show as Watching."""
+        data = await self._request("POST" if on else "DELETE", f"/api/v1/auction/{auction_id}/bookmark")
+        if isinstance(data, dict) and data.get("success") is False:
+            raise SiteError(f"GovAuctions refused to {'bookmark' if on else 'remove the bookmark'}")
 
     async def cancel_booked(self, auction_id: str) -> dict[str, Any]:
         """Cancel your booked bids. Unused points go back to your balance."""

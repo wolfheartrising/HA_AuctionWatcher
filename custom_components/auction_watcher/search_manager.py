@@ -21,13 +21,9 @@ from homeassistant.helpers.event import async_call_later, async_track_time_chang
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
-from .alerts import build_calls
+from . import global_settings
 from .const import (
-    CONF_ALERT_KINDS,
-    CONF_NOTIFY_ENTITIES,
-    CONF_NOTIFY_SERVICES,
     CONF_SITE,
-    DEFAULT_ALERT_KINDS,
     DOMAIN,
     EVENT_SEARCH,
     EVENT_SEARCHES_UPDATED,
@@ -81,6 +77,7 @@ class SearchManager:
         self._lock = asyncio.Lock()
         self.running = False
         self.version = 1  # bumped on every change, so the page only downloads results when something changed
+        self._starred: dict[str, bool] = {}  # site:item -> just starred/unstarred here (until the site's list catches up)
 
     # ---------------- storage / schedule
     async def async_load(self) -> None:
@@ -248,36 +245,33 @@ class SearchManager:
             self.errors.update(errors)
         await self._save()
         if fresh:
-            self._alert(fresh)
+            quiet = [sid for sid in raw if sid not in fresh and sid not in first]
+            self._alert(fresh, quiet)
 
-    def _alert(self, fresh: dict[str, list[Hit]]) -> None:
+    def _alert(self, fresh: dict[str, list[Hit]], quiet: list[str]) -> None:
+        """One message per run: each search with new matches, then the ones with nothing new."""
         by_id = {s.id: s for s in self.searches}
+        name = lambda sid: by_id[sid].keyword if sid in by_id else sid  # noqa: E731
         count = sum(len(v) for v in fresh.values())
-        lines = []
-        for sid, hits in fresh.items():
-            per_site: dict[str, int] = {}
-            for h in hits:
-                per_site[h.site] = per_site.get(h.site, 0) + 1
-            where = ", ".join(f"{n} {SITE_LABELS.get(k, k)}" for k, n in per_site.items())
-            lines.append(f"{by_id[sid].keyword if sid in by_id else sid}: {where}")
-        data = {"count": count, "lines": lines, "auction_id": "searches",
+        lines = [f"{name(sid)} - {len(hits)} new" for sid, hits in fresh.items()]
+        data = {"count": count, "lines": lines, "quiet": [name(sid) for sid in quiet], "auction_id": "searches",
                 "items": [hit_dict(h, [sid], True) for sid, hs in fresh.items() for h in hs][:25]}
         self.hass.bus.async_fire(EVENT_SEARCH, data)
-        services: list[str] = []
-        entities: list[str] = []
-        for e in self.hass.config_entries.async_entries(DOMAIN):
-            if e.state is not ConfigEntryState.LOADED or "search" not in e.options.get(CONF_ALERT_KINDS, DEFAULT_ALERT_KINDS):
-                continue
-            services += [x for x in e.options.get(CONF_NOTIFY_SERVICES, []) if x not in services]
-            entities += [x for x in e.options.get(CONF_NOTIFY_ENTITIES, []) if x not in entities]
-        for domain, service, service_data in build_calls("search", data, services, entities):
-            self.hass.async_create_task(self._send(domain, service, service_data))
+        if (g := global_settings.get(self.hass)) is not None:
+            g.send("search", data)
 
-    async def _send(self, domain: str, service: str, data: dict[str, Any]) -> None:
-        try:
-            await self.hass.services.async_call(domain, service, data, blocking=True)
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.warning("Couldn't send saved-search alert to %s: %s", data.get("entity_id") or f"{domain}.{service}", err)
+    async def async_watch(self, site: str, item_id: str, on: bool) -> None:
+        """The star on a result: the site's own bookmark / watchlist, so it shows up there and here (Watching)."""
+        coord = self._coordinators().get(site)
+        if coord is None or not hasattr(coord, "async_watch"):
+            raise SiteError(f"No {SITE_LABELS.get(site, site)} account is set up")
+        await coord.async_watch(item_id, on)
+        self._starred[f"{site}:{item_id}"] = on
+        self._changed()
+
+    def _following(self) -> dict[str, set[str]]:
+        """Per site, the items the plugin already follows (watching or bidding)."""
+        return {site: set((c.data or {}).keys()) for site, c in self._coordinators().items()}
 
     # ---------------- changes from the page
     async def async_add(self, keyword: str, sites: list[str] | None, max_price: float, save_to_macbid: bool,
@@ -376,10 +370,16 @@ class SearchManager:
             when = dt_util.parse_datetime(h["ends_at"]) if h.get("ends_at") else None
             return bool(when and when < gone)
 
+        following = self._following()
+        for k, on in list(self._starred.items()):  # forget overrides once the site's list agrees
+            site, _, item = k.partition(":")
+            if (item in following.get(site, set())) == on:
+                self._starred.pop(k)
         for s in self.searches:
             for h in self.results.get(s.id, []):
                 if ended(h, s.id):
                     continue
+                h = {**h, "following": self._starred.get(h["key"], h["item_id"] in following.get(h["site"], set()))}
                 cur = merged.get(h["key"])
                 if cur is None:
                     merged[h["key"]] = {**h, "searches": [s.id]}
@@ -433,7 +433,9 @@ async def ws_view(hass: HomeAssistant, connection: Any, msg: dict[str, Any]) -> 
 
 @websocket_api.websocket_command({
     vol.Required("type"): "auction_watcher/searches/change",
-    vol.Required("action"): vol.In(["add", "remove", "update", "run", "settings"]),
+    vol.Required("action"): vol.In(["add", "remove", "update", "run", "settings", "watch"]),
+    vol.Optional("site"): vol.In(list(SITE_ORDER)),
+    vol.Optional("item_id"): str,
     vol.Optional("keyword"): str,
     vol.Optional("search_id"): str,
     vol.Optional("sites"): [vol.In(list(SITE_ORDER))],
@@ -462,6 +464,8 @@ async def ws_change(hass: HomeAssistant, connection: Any, msg: dict[str, Any]) -
             await m.async_remove(msg.get("search_id", ""))
         elif action == "update":
             await m.async_update(msg.get("search_id", ""), msg.get("sites"), msg.get("max_price"), msg.get("title_only"))
+        elif action == "watch":
+            await m.async_watch(msg.get("site", ""), msg.get("item_id", ""), bool(msg.get("on", True)))
         elif action == "run":
             await m.async_run(only=msg.get("search_id"))
         else:

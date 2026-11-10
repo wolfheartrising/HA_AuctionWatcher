@@ -91,6 +91,7 @@ class PointsSensor(_Base):
             "poll_every_seconds": int(interval.total_seconds()) if interval else None,
             # Lets the Auctions page find each site's account sensor
             "auction_watcher_account": self.coordinator.config_entry.title,
+            "entry_id": self.coordinator.config_entry.entry_id,
             "site": self.coordinator.config_entry.data.get("site"),
             **({"spending": self.coordinator.spending} if self.coordinator.spending else {}),
         }
@@ -218,6 +219,7 @@ class AuctionSensor(_Base):
         attrs["auto_rebook"] = auto.auto_rebook
         attrs["rebook_mode"] = auto.rebook_mode
         attrs["rebook_amount"] = auto.rebook_amount
+        attrs["topup_at"] = auto.topup_at
         attrs["max_price"] = auto.max_price
         attrs["auto_status"] = self.coordinator.auto_status(self.auction_id)
         attrs["auction_watcher"] = True  # lets dashboards find these entities

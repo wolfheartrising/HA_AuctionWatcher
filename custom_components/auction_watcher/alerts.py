@@ -107,6 +107,14 @@ def format_alert(kind: str, d: dict[str, Any]) -> tuple[str, str, str]:
         title = f"Pick up by {when}: {name}"
         msg = f"Won for {_money(d.get('price'))}. Pickup deadline {when}."
         spoken = f"Reminder: pick up {name} by {when}."
+    elif kind == "spend_cap":
+        per = "this month" if d.get("period") == "month" else "this week"
+        until = "the 1st" if d.get("period") == "month" else "Monday"
+        title = "Spending cap reached" + ("" if d.get("mode") == "block" else " (warning)")
+        msg = f"You've used ${float(d.get('used') or 0):.2f} of your ${float(d.get('amount') or 0):.0f} cap {per} across all sites. "
+        msg += (f"Bids and bookings are stopped until {until} (or raise the cap on the Settings tab)."
+                if d.get("mode") == "block" else "This is a warning only: bidding continues.")
+        spoken = "Your auction spending cap is reached."
     elif kind == "budget":
         title = "Weekly auction budget used up"
         msg = (f"You've spent {d.get('spent')} of your {d.get('budget')} points this week. "
@@ -144,10 +152,16 @@ def format_alert(kind: str, d: dict[str, Any]) -> tuple[str, str, str]:
         title = f"Booking problem: {name}"
         msg = f"{d.get('reason') or 'The site refused.'} Check the auction on the site."
         spoken = f"Booking problem on {name}. Check your phone."
+    elif kind == "test":
+        title = "Auction Watcher test"
+        msg = "Alerts from Auction Watcher will arrive here."
+        spoken = "This is a test from Auction Watcher."
     elif kind == "search":
         n = d.get("count") or 0
-        title = f"{n} new match{'' if n == 1 else 'es'} for your saved searches"
-        msg = "; ".join(d.get("lines") or [])
+        title = "You have new matches for your saved searches"
+        msg = "\n".join(d.get("lines") or [])
+        if d.get("quiet"):
+            msg += "\n\n" + ", ".join(d["quiet"]) + " - no new results"
         spoken = f"{n} new auction match{'' if n == 1 else 'es'} for your saved searches."
     else:  # won
         title = f"You won: {name}"

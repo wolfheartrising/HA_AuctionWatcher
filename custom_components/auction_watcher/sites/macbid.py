@@ -657,6 +657,15 @@ class MacBidClient:
         await self._call("PUT", f"/user/{self.user_id}",
                          {"keywords": ",".join(k.strip() for k in keywords if k.strip()), "verify_phone_enabled": True})
 
+    async def watch(self, lot_id: str, on: bool = True) -> None:
+        """Add (or remove) a lot on your Mac.bid watchlist: the site's own watch button."""
+        await self.ensure_fresh()
+        if on:
+            await self._call("POST", f"/user/{self.user_id}/watchlist",
+                             {"auction_lot_id": int(lot_id) if str(lot_id).isdigit() else lot_id})
+        else:
+            await self._call("DELETE", f"/user/{self.user_id}/watchlist/{lot_id}")
+
     async def lot(self, lot_id: str) -> dict[str, Any]:
         return await self.get(f"/map-bid/ddb/lot/{lot_id}")
 
