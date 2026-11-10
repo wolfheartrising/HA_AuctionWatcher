@@ -27,6 +27,28 @@ refresh:
 
 search_now: {}
 
+follow:
+  fields:
+    auction_id:
+      required: true
+      example: "17796950"
+      selector:
+        text:
+    site:
+      default: govauctions
+      selector:
+        select:
+          options:
+            - govauctions
+            - macbid
+            - ebay
+    limit:
+      selector:
+        number:
+          min: 0
+          max: 100000
+          mode: box
+
 book_bids:
   fields:
     auction_id:

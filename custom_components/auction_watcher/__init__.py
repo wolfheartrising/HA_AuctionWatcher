@@ -202,6 +202,32 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     )
     hass.services.async_register(DOMAIN, SERVICE_REFRESH, refresh, schema=vol.Schema({vol.Optional("site"): cv.string}))
 
+    async def follow(call: ServiceCall) -> None:
+        """Follow an auction you aren't in yet (GovAuctions bookmark / Mac.bid or eBay watchlist), e.g. a point
+        pack, so it gets a full card with booking; optionally set its max at the same time."""
+        await _require_admin(call)
+        site = call.data.get("site", "govauctions")
+        coord = next((e.runtime_data for e in hass.config_entries.async_entries(DOMAIN)
+                      if e.state is ConfigEntryState.LOADED and e.data.get(CONF_SITE, "govauctions") == site), None)
+        if coord is None or not hasattr(coord, "async_watch"):
+            raise ServiceValidationError(f"No {site} account is set up")
+        aid = str(call.data["auction_id"]).strip()
+        try:
+            await coord.async_watch(aid, True)
+            if call.data.get("limit"):
+                await coord.async_set_bid_limit(aid, int(call.data["limit"]))
+        except SiteError as err:
+            raise HomeAssistantError(str(err)) from err
+
+    hass.services.async_register(
+        DOMAIN, "follow", follow,
+        schema=vol.Schema({
+            vol.Required("auction_id"): cv.string,
+            vol.Optional("site", default="govauctions"): vol.In(["govauctions", "macbid", "ebay"]),
+            vol.Optional("limit"): vol.All(vol.Coerce(int), vol.Range(min=0, max=100000)),
+        }),
+    )
+
     async def search_now(call: ServiceCall) -> None:
         """Run the saved searches now (they also run daily at the time set on the Auctions page)."""
         manager: SearchManager | None = hass.data.get(SEARCHES_KEY)
@@ -221,12 +247,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: AuctionWatcherConfigEntr
     if global_settings.DATA_KEY not in hass.data:
         g = global_settings.GlobalSettings(hass)
         await g.async_load()
-        hass.data[global_settings.DATA_KEY] = g
+        hass.data.setdefault(global_settings.DATA_KEY, g)  # both accounts start together: keep the first
     await hass.data[global_settings.DATA_KEY].async_adopt_entry(entry)
     if proxy_manager.DATA_KEY not in hass.data:
         pm = proxy_manager.ProxyManager(hass)
         await pm.async_load()
-        hass.data[proxy_manager.DATA_KEY] = pm
+        if hass.data.setdefault(proxy_manager.DATA_KEY, pm) is not pm:
+            pm.stop()  # another account set it up meanwhile: one listener for Telegram, not two
     session = async_create_clientsession(hass, cookie_jar=aiohttp.DummyCookieJar())
     if entry.data.get(CONF_SITE) == SITE_EBAY:
         client_e = eb.EbayClient(
@@ -253,8 +280,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: AuctionWatcherConfigEntr
     await async_register_panel(hass)
     if SEARCHES_KEY not in hass.data:
         manager = SearchManager(hass)
-        hass.data[SEARCHES_KEY] = manager
-        await manager.async_load()
+        await manager.async_load()  # read the saved searches and results first...
+        if SEARCHES_KEY not in hass.data:  # ...then make it available (another account may have set up meanwhile)
+            hass.data[SEARCHES_KEY] = manager
+        else:
+            manager.stop()
     return True
 
 

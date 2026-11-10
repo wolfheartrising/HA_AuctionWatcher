@@ -10,7 +10,7 @@
  * until you save it, and the page re-draws from those drafts.
  */
 
-const PANEL_VERSION = "1.4.0";  // must match const.py VERSION (a test checks)
+const PANEL_VERSION = "1.5.1";  // must match const.py VERSION (a test checks)
 const SITE_NAMES = { govauctions: "GovAuctions", macbid: "Mac.bid", ebay: "eBay" };
 // What the per-auction spending cap is called on each site
 const LIMIT_LABEL = { govauctions: "Max bids", macbid: "Max bid ($)", ebay: "Max price ($)" };
@@ -863,7 +863,11 @@ class AuctionWatcherPanel extends HTMLElement {
       }
       if (act === "add") {
         const keyword = (f.keyword || "").trim();
-        if (!keyword) { this._serr = "Type a keyword first"; return this._maybeRender(true); }
+        if (!keyword) {
+          this._serr = "Type a keyword first";
+          setTimeout(() => { if (this._serr === "Type a keyword first") { this._serr = null; this._maybeRender(true); } }, 4000);
+          return this._maybeRender(true);
+        }
         const payload = { action: "add", keyword, sites: f.sites || this._sd.sites, save_to_macbid: !!f.save_to_macbid,
           title_only: f.title_only !== false };
         if (f.max_price !== "" && !isNaN(Number(f.max_price))) payload.max_price = Number(f.max_price);
@@ -1025,13 +1029,22 @@ class AuctionWatcherPanel extends HTMLElement {
       const blocks = Object.entries(p.blocks || {}).map(([k, v]) => `${esc(blockLabel[k] || k)}: ~${num(v.median)} bids (${v.wins})`).join(" · ");
       const rows = auctions.map((a) => {
         const start = a.starts_at ? Date.parse(a.starts_at) : null;
-        const when = a.live && start && start < Date.now()
-          ? `<b>live</b>${a.clock !== null && a.clock !== undefined ? ` · clock ${a.clock}s` : ""}${a.bidders !== null && a.bidders !== undefined ? ` · ${num(a.bidders)} bidding` : ""}`
-          : start ? `starts in <span class="timer" data-deadline="${start}">–</span>` : "";
+        // GovAuctions: a live auction first runs a long countdown (bidding already open), then the short
+        // per-bid clock where booked bids take turns. "unixStarts" is when that first countdown ends.
+        const bidding = a.bidders !== null && a.bidders !== undefined ? ` · ${num(a.bidders)} bidding` : "";
+        const when = a.live && start && start > Date.now()
+          ? `<b>live</b> · first countdown <span class="timer" data-deadline="${start}">–</span>${bidding}`
+          : a.live
+            ? `<b>live</b>${a.clock !== null && a.clock !== undefined ? ` · clock ${a.clock}s` : ""}${bidding}`
+            : start ? `starts in <span class="timer" data-deadline="${start}">–</span>` : "";
+        const following = this._auctions().some((x) => x.site === "govauctions" && String(x.auction_id) === String(a.id));
+        const follow = following ? `<span class="badge on">following</span>`
+          : (a.open || a.your_bids) ? `<button type="button" class="secondary small-btn" data-act="pack_follow" data-id="${esc(a.id)}"
+              data-limit="${esc(p.suggested_max || "")}" title="Bookmark it on GovAuctions so it gets a full card (Book, auto-booking, limits)${p.suggested_max ? ` and set its Max bids to ${p.suggested_max}` : ""}">Follow</button>` : "";
         const entry = a.open ? (a.bids_to_lock !== null && a.bids_to_lock !== undefined ? `entry open ~${num(a.bids_to_lock)} more bids` : "entry open") : `<span class="warn">entry closed</span>`;
         const stars = a.stars !== null && a.stars !== undefined ? `<span class="stars" title="How cheaply it usually goes at this auction's time of day">${a.stars ? "★".repeat(a.stars) + "☆".repeat(3 - a.stars) : "skip"}</span>` : "";
         return `<div class="pack-auction"><a href="${safeUrl(a.url)}" target="_blank" rel="noopener">${a.price !== null && a.price !== undefined ? money(a.price) : "–"}</a>
-          <span>${when}</span><span class="muted">${entry}</span>${a.your_bids ? `<span class="badge on">you: ${num(a.your_bids)} bids</span>` : ""}${stars}</div>`;
+          <span>${when}</span><span class="muted">${entry}</span>${a.your_bids ? `<span class="badge on">you: ${num(a.your_bids)} bids</span>` : ""}${follow}${stars}</div>`;
       }).join("");
       return `<div class="card pack ${esc(p.grade)}">
         <div class="pack-head">
@@ -1129,6 +1142,9 @@ class AuctionWatcherPanel extends HTMLElement {
                 value="${esc(limit)}" placeholder="none">`}</label>
             ${a.site === "macbid" && a.status === "live"
               ? `<button type="button" class="bid-now" data-act="mb_place" data-id="${id}">Bid now</button>
+                 ${a.winning && a.price && Number(a.mb_placed || a.bid_limit || 0) > Number(a.price)
+                   ? `<button type="button" class="secondary" data-act="mb_lower" data-id="${id}"
+                        title="You're winning: pull your max back to the current price (Mac.bid allows this while you lead)">Lower my max to ${money(a.price)}</button>` : ""}
                  <button type="button" class="secondary" data-act="limit" data-id="${id}" title="Save the max without bidding (for alerts and late auto-bids)">Save</button>`
               : `<button type="button" data-act="limit" data-id="${id}">Save</button>`}
             <span class="saved">${esc(this._saved["limit:" + a.auction_id] || this._saved["mb:" + a.auction_id] || "")}</span>
@@ -1416,7 +1432,15 @@ class AuctionWatcherPanel extends HTMLElement {
     const a = this._auctions().find((x) => String(x.auction_id) === String(id)) || {};
     const max = parseInt(this._field(id, "limit", a.bid_limit || 0), 10) || 0;
     try {
-      if (act === "mb_place") {
+      if (act === "mb_lower") {
+        const price = Math.round(Number(a.price || 0));
+        if (!a.winning || !price) throw new Error("you can only lower your max while you're winning");
+        if (!confirm(`Lower your max on "${a.title}" to the current price, $${price}?\n\nYou stay in the lead at $${price}, but anyone who bids more wins it. Your saved max here becomes $${price} too, so auto-bid won't raise it again.`)) return;
+        await this._hass.callService("auction_watcher", "set_bid_limit", { auction_id: id, limit: price });
+        this._clearDrafts(id, ["limit"]);
+        await this._hass.callService("auction_watcher", "place_bid", { auction_id: id, amount: price, buyers_assurance: false }, undefined, false, true);
+        this._saved[key] = `Lowering your max to $${price}: checking Mac.bid recorded it`;
+      } else if (act === "mb_place") {
         if (!max) throw new Error("enter your max bid first");
         if (a.min_next_bid && max < a.min_next_bid) throw new Error(`your max must be at least ${money(a.min_next_bid)}`);
         const total = (max * 1.15 + 3) * (1 + (a.sales_tax || 0));
@@ -1450,7 +1474,19 @@ class AuctionWatcherPanel extends HTMLElement {
   }
 
   async _action(act, id, site) {
-    if (act === "mb_place" || act === "mb_auto") return this._macbidAction(act, id);
+    if (act === "mb_place" || act === "mb_auto" || act === "mb_lower") return this._macbidAction(act, id);
+    if (act === "pack_follow") {
+      const btn = this.shadowRoot.querySelector(`[data-act=pack_follow][data-id="${CSS.escape(id)}"]`);
+      const limit = parseInt(btn?.dataset.limit || "0", 10) || 0;
+      if (btn) { btn.disabled = true; btn.textContent = "…"; }
+      try {
+        await this._hass.callService("auction_watcher", "follow", { auction_id: id, site: "govauctions", ...(limit ? { limit } : {}) });
+        if (btn) btn.textContent = "Followed: see Following";
+      } catch (err) {
+        if (btn) { btn.disabled = false; btn.textContent = "Follow"; btn.title = "Couldn't: " + (err?.message || err); }
+      }
+      return;
+    }
     if (act === "proxy_ask" || act === "proxy_cancel") return this._proxyAction(act, id, site);
     const key = (act === "limit" || act === "max_price" ? act + ":" : "auto:") + id;
     const int = (v) => Math.max(0, parseInt(v, 10) || 0);
@@ -1537,6 +1573,7 @@ const STYLE = `
                   background: var(--secondary-background-color); }
   .pack-auction a { font-weight: 600; color: var(--primary-color); text-decoration: none; min-width: 52px; }
   .pack-auction .stars { margin-left: auto; }
+  .small-btn { padding: 2px 10px; font-size: 12px; }
   details.packs-intro, .packs-more { grid-column: 1 / -1; }
   details.packs-intro summary, details.hist summary { cursor: pointer; }
   .banner { margin: 12px 16px 0; padding: 10px 14px; border-radius: 12px; border: 1px solid var(--error-color, #db4437);

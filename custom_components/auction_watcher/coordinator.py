@@ -761,6 +761,11 @@ class MacBidCoordinator(AuctionWatcherCoordinator):
         if s is None or s.status != STATUS_LIVE:
             raise SiteError("That item isn't live")
         now = await self.async_lot_now(aid)  # the price may have moved since the last check
+        if mb.lowering_to_price(amount, now):
+            # You're winning and pull your max back to the current price (Mac.bid allows this; not a new bid)
+            await self._place(s, int(amount), "lowered to the current price by you", assurance=False)
+            await self.async_request_refresh()
+            return int(amount)
         if not mb.is_valid_bid(int(amount)):
             lower = mb.round_down_bid(amount)
             raise SiteError(f"Mac.bid only takes its own steps at this price: ${lower} or ${mb.next_valid_bid(lower)}"
@@ -836,12 +841,18 @@ class MacBidCoordinator(AuctionWatcherCoordinator):
                 mem.status = (f"max bid ${mem.placed} confirmed: "
                               + ("you're winning" if s.extra.get("winning") else "someone's max is higher")
                               + "; Mac.bid raises for you up to your max")
-                if raised:
+                if raised and reason.startswith("lowered"):
+                    mem.status = (f"Mac.bid still shows your ${int(recorded)} max: lowering it to ${sent} didn't take. "
+                                  "Check the item on Mac.bid.")
+                elif raised:
                     mem.status = (f"Mac.bid recorded a ${int(recorded)} max, not the ${sent} sent "
                                   "(it rounded up to its minimum bid)")
+                elif reason.startswith("lowered"):
+                    mem.status = f"max lowered to ${mem.placed} (the current price); you're still in the lead there"
                 await self._save()
                 self._emit("bid_placed", {**self._booking_data(aid, mem.placed, reason or "confirmed", s),
-                                          "amount": mem.placed, "sent": sent, "raised": raised})
+                                          "amount": mem.placed, "sent": sent,
+                                          "raised": raised and not reason.startswith("lowered")})
             elif now - mem.pending_since > 45:
                 amount, mem.pending = mem.pending, 0
                 mem.failures += 1

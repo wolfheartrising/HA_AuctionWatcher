@@ -87,3 +87,12 @@ def test_for_someone_needs_an_allowed_amount():
     ok, why = on_amount(r, 118, 110, min_next=115)
     assert not ok and "$115 or $120" in why
     assert on_amount(r, 120, 110, min_next=115)[0]
+
+
+
+def test_leader_can_lower_max_to_the_current_price_only():
+    from aw.sites import macbid as mb
+    leading = {"price": 116.0, "winning": True}
+    assert mb.lowering_to_price(116, leading)                       # the "retract to current price" move
+    assert not mb.lowering_to_price(117, leading)                   # anything else follows the normal rules
+    assert not mb.lowering_to_price(116, {"price": 116.0, "winning": False})   # only while you lead

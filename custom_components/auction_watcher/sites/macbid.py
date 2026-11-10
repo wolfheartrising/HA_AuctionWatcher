@@ -299,6 +299,12 @@ def parse_details(d: dict[str, Any]) -> dict[str, Any]:
 BID_STEPS = ((1, 100, 1), (105, 500, 5), (510, 1000, 10), (1050, 50000, 50))
 
 
+def lowering_to_price(amount: float, now: dict[str, Any]) -> bool:
+    """Mac.bid lets the leader lower their max to the current price (its FAQ; how you "pull back" a max
+    while winning). That amount needn't be one of the dropdown steps."""
+    return bool(now.get("winning")) and int(amount) == int(now.get("price") or 0) and int(amount) > 0
+
+
 def is_valid_bid(amount: int) -> bool:
     return any(lo <= amount <= hi and (amount - lo) % step == 0 for lo, hi, step in BID_STEPS)
 

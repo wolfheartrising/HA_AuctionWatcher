@@ -281,6 +281,24 @@
     "search_now": {
       "name": "Run saved searches now",
       "description": "Runs your saved searches on every site now (they also run daily at the time set on the Auctions page)."
+    },
+    "follow": {
+      "name": "Follow an auction",
+      "description": "Bookmark (GovAuctions) or watch (Mac.bid, eBay) an auction so it gets a full card with booking and alerts; optionally set its max.",
+      "fields": {
+        "auction_id": {
+          "name": "Auction id",
+          "description": "The number in the auction's web address."
+        },
+        "site": {
+          "name": "Site",
+          "description": "Which site it's on."
+        },
+        "limit": {
+          "name": "Max",
+          "description": "Max bids (GovAuctions) or max bid in $ (Mac.bid) to set at the same time."
+        }
+      }
     }
   }
 }

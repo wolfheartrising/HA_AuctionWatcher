@@ -21,7 +21,8 @@ from . import global_settings
 from .const import CONF_SITE, DOMAIN, SITE_GOVAUCTIONS, SITE_MACBID, STORAGE_VERSION
 from .proxy import (ASKED, CANCELLED, CONFIRMED, CONFIRMING, HEADER, OPEN, WATCHING, Person, ProxyRequest, ask_text,
                     confirm_text, gov_ask_text, gov_confirm_text, gov_used, on_agree, on_amount, on_bids, on_decline,
-                    clean_name, on_wish, parse_amount, parse_gov_reply, result_text, to_dict, wants_stop, watch_text)
+                    clean_name, on_wish, parse_amount, parse_gov_reply, result_text, to_dict, wants_stop, watch_text,
+                    AMOUNT, OTHER, PICK, STOP, STOP_ALL, WISH, amount_rows, kb_row, short, watch_rows)
 from .sites import macbid as mb
 from .sites.base import AuthError, SiteError
 
@@ -41,6 +42,8 @@ class ProxyManager:
         self.requests: dict[str, ProxyRequest] = {}   # "site:item id" -> request
         self._unsubs: list[Any] = []
         self._seen: dict[str, str] = {}   # chat id -> name, chats that messaged the bot since HA started (not saved)
+        self._awaiting: dict[str, tuple[str, float]] = {}     # chat -> (request id, until): "Other amount" was tapped
+        self._held_text: dict[str, tuple[str, float]] = {}    # chat -> (text, until): typed with several items open
 
     # ---------------- storage / listening
     async def async_load(self) -> None:
@@ -49,7 +52,8 @@ class ProxyManager:
         self.people = [Person.from_dict(p) for p in d.get("people", [])]
         self.requests = {r.key: r for r in (ProxyRequest.from_dict(v) for v in (d.get("requests") or {}).values())}
         self._unsubs = [self.hass.bus.async_listen("telegram_text", self._on_text),
-                        self.hass.bus.async_listen("telegram_callback", self._on_callback)]
+                        self.hass.bus.async_listen("telegram_callback", self._on_callback),
+                        self.hass.bus.async_listen("telegram_command", self._on_command)]
 
     async def _save(self) -> None:
         for coord in self._coords().values():
@@ -137,7 +141,7 @@ class ProxyManager:
             req.note(f"{person.name} is watching it with you")
             self.requests[key] = req
             await self._save()
-            await self._tg(person.chat_id, watch_text(person.name, st.title, st.url, st.price, site), photo=st.image)
+            await self._tg(person.chat_id, watch_text(person.name, st.title, st.url, st.price, site), watch_rows(req), photo=st.image)
             return
         if site not in (SITE_MACBID, SITE_GOVAUCTIONS):
             raise SiteError("Bidding for someone isn't possible on this site; use \"Just keep them posted\"")
@@ -175,7 +179,9 @@ class ProxyManager:
                                [f"I agree to pay:{AGREE} {req.id}", f"No thanks:{DECLINE} {req.id}"], photo=st.image)
                 return
         await self._save()
-        await self._tg(person.chat_id, ask_text(person.name, st.title, st.url, st.price, int(hard_max), None), photo=st.image)
+        live = await self._live(req)
+        await self._tg(person.chat_id, ask_text(person.name, st.title, st.url, st.price, int(hard_max), None),
+                       amount_rows(req, live["min_next"] if live else None, decline=True), photo=st.image)
 
     async def _ask_gov(self, person: Person, st: Any, key: str, hard_max: int) -> None:
         """GovAuctions: your max is in bids; they say how many bids they'll pay for (win or lose)."""
@@ -206,7 +212,8 @@ class ProxyManager:
                                [f"I agree to pay:{AGREE} {req.id}", f"No thanks:{DECLINE} {req.id}"], photo=st.image)
                 return
         await self._save()
-        await self._tg(person.chat_id, gov_ask_text(person.name, st.title, st.url, st.price, hard_max, cost), photo=st.image)
+        await self._tg(person.chat_id, gov_ask_text(person.name, st.title, st.url, st.price, hard_max, cost),
+                       amount_rows(req, None, decline=True), photo=st.image)
 
     async def async_cancel(self, site: str, lot_id: str) -> None:
         req = self.requests.get(f"{site}:{lot_id}")
@@ -283,13 +290,36 @@ class ProxyManager:
         if person is None:
             return
         text = str(event.data.get("text") or "")
-        mine = sorted((r for r in self.requests.values()
-                       if r.person_id == person.id and r.state in OPEN and not r.stopped
-                       and (r.mode == "bid" or wants_stop(text) or parse_amount(text) is not None)),
-                      key=lambda r: (r.state == CONFIRMED, -r.created))
+        chat = str(person.chat_id)
+        now = time.time()
+        pointed = self._awaiting.pop(chat, None)
+        if pointed and pointed[1] > now:
+            req = next((r for r in self.requests.values() if r.id == pointed[0] and r.state in OPEN), None)
+            if req is not None:
+                await self._handle_text(person, req, text)
+                return
+        mine = [r for r in self._open_for(person) if r.mode == "bid" or wants_stop(text) or parse_amount(text) is not None]
         if not mine:
             return
-        req = mine[0]
+        if len(mine) == 1:
+            await self._handle_text(person, mine[0], text)
+            return
+        # Several items open: never guess which one a number or "stop" is for
+        self._held_text[chat] = (text, now + 600)
+        if wants_stop(text):
+            rows = [kb_row([(f"Stop: {short(r.title)}", f"{STOP} {r.id}")]) for r in mine]
+            rows.append(kb_row([("Stop all", STOP_ALL)]))
+            await self._tg(person.chat_id, "Which one should I stop?", rows)
+        else:
+            rows = [kb_row([(short(r.title, 30), f"{PICK} {r.id}")]) for r in mine]
+            await self._tg(person.chat_id, f"Which item is \"{text.strip()}\" for?", rows)
+
+    def _open_for(self, person: Person) -> list[ProxyRequest]:
+        return sorted((r for r in self.requests.values() if r.person_id == person.id and r.state in OPEN and not r.stopped),
+                      key=lambda r: -r.created)
+
+    async def _handle_text(self, person: Person, req: ProxyRequest, text: str) -> None:
+        """A typed reply (or a tapped amount) for one specific item."""
         if wants_stop(text):
             await self._stop(req, by_them=True)
             return
@@ -399,12 +429,26 @@ class ProxyManager:
         if not self.enabled:
             return
         data = str(event.data.get("data") or "")
-        if not data.startswith((AGREE, DECLINE)):
+        if not data.startswith("/aw_"):
             return
         person = self._person(chat_id=event.data.get("chat_id"))
-        rid = data.split(" ", 1)[1].strip() if " " in data else ""
+        if person is None:
+            return
+        parts = data.split()
+        cmd, rid = parts[0], (parts[1] if len(parts) > 1 else "")
+        if cmd == STOP_ALL:
+            await self._answer(event, "Stopping all")
+            self._held_text.pop(str(person.chat_id), None)
+            for r in self._open_for(person):
+                await self._stop(r, by_them=True)
+            return
         req = next((r for r in self.requests.values() if r.id == rid), None)
-        if person is None or req is None or req.person_id != person.id:
+        if req is None or req.person_id != person.id:
+            await self._answer(event, "That item isn't open anymore")
+            return
+        if cmd not in (AGREE, DECLINE):
+            await self._answer(event, "Got it")
+            await self._on_item_button(person, req, cmd, parts[2:])
             return
         await self._answer(event, "Got it")
         if data.startswith(DECLINE):
@@ -441,6 +485,51 @@ class ProxyManager:
             await self._tg(person.chat_id, f"I couldn't place your bid on {req.title}: {err}")
             self._tell_owner(person, req, f"bid NOT placed: {err}")
         await self._save()
+
+    async def _on_item_button(self, person: Person, req: ProxyRequest, cmd: str, args: list[str]) -> None:
+        chat = str(person.chat_id)
+        if cmd == STOP:
+            await self._stop(req, by_them=True)
+        elif cmd == AMOUNT and args:
+            await self._handle_text(person, req, args[0])
+        elif cmd == OTHER:
+            self._awaiting[chat] = (req.id, time.time() + 600)
+            if req.site == SITE_GOVAUCTIONS:
+                hint = f"how many bids (up to {req.hard_max}), optionally with a max price, e.g. \"40 $25\""
+            elif req.mode == "watch":
+                hint = "the most you'd pay"
+            else:
+                hint = f"your max (up to ${req.hard_max}; Mac.bid's steps: $1 to $100, $5 to $500, $10 to $1,000)"
+            await self._tg(person.chat_id, f"Type {hint} for {req.title}.")
+        elif cmd == PICK:
+            held = self._held_text.pop(chat, None)
+            if held and held[1] > time.time():
+                await self._handle_text(person, req, held[0])
+        elif cmd == WISH and req.mode == "watch":
+            live = await self._live(req) if req.site == SITE_MACBID else None
+            await self._tg(person.chat_id, f"How much would you like me to bid on {req.title}?",
+                           amount_rows(req, live["min_next"] if live else None))
+
+    async def _on_command(self, event: Event) -> None:
+        """/items (or /auctions): your open items, each with its own buttons."""
+        if not self.enabled or str(event.data.get("command") or "").split("@")[0] not in ("/items", "/auctions"):
+            return
+        person = self._person(chat_id=event.data.get("chat_id"))
+        if person is None:
+            return
+        mine = self._open_for(person)
+        if not mine:
+            await self._tg(person.chat_id, "Nothing open for you right now.")
+            return
+        lines, rows = [], []
+        for r in mine:
+            what = ("watching" if r.mode == "watch" else
+                    f"agreed {r.agreed_max} bids" if r.site == SITE_GOVAUCTIONS and r.agreed_max else
+                    f"max ${r.bid_amount}" if r.bid_amount else "waiting for your amount")
+            lines.append(f"• {r.title}: {what}")
+            first = ("I'd like to bid", f"{WISH} {r.id}") if r.mode == "watch" else ("Raise", f"{OTHER} {r.id}")
+            rows.append(kb_row([(f"{first[0]}: {short(r.title, 16)}", first[1]), ("Stop", f"{STOP} {r.id}")]))
+        await self._tg(person.chat_id, "Your items:\n" + "\n".join(lines), rows)
 
     async def _answer(self, event: Event, text: str) -> None:
         try:
@@ -488,8 +577,19 @@ class ProxyManager:
             self._tell_owner(person, req, f"Mac.bid recorded ${d.get('amount')} instead of the ${d.get('sent')} they agreed to "
                                           "(its minimum bid). They've been told.")
         if text:
-            st = self._state(req.site, req.lot_id)
-            self.hass.async_create_task(self._tg(person.chat_id, text, photo=st.image if st is not None and kind in ("won", "ended") else None))
+            self.hass.async_create_task(self._relay_send(person, req, kind, text))
+
+    async def _relay_send(self, person: Person, req: ProxyRequest, kind: str, text: str) -> None:
+        st = self._state(req.site, req.lot_id)
+        rows = None
+        if req.mode == "watch" and kind == "ending_soon":
+            rows = watch_rows(req)
+        elif kind == "outbid" and req.mode == "bid" and not req.stopped:
+            live = await self._live(req)
+            rows = amount_rows(req, live["min_next"] if live else None)
+        elif kind == "bid_limit" and req.site == SITE_GOVAUCTIONS:
+            rows = amount_rows(req, None)
+        await self._tg(person.chat_id, text, rows, photo=st.image if st is not None and kind in ("won", "ended") else None)
 
     def chats(self) -> list[dict[str, str]]:
         """Telegram chats you could add: the bot's allowed chats (Home Assistant's Telegram bot setup)

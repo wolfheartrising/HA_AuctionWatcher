@@ -124,6 +124,11 @@ people on your list are listened to. Bids are placed from **your** account (like
 - **Just keep them posted (any site):** they get a message now, when it's about to end, and when it ends. Nothing is bid.
   If they reply with an amount (`50`, or `40 $25` on GovAuctions), you get an alert and the card shows "🙋 wants you to bid";
   set your max and tap *Ask them to confirm*: they go straight to "I agree to pay" (eBay: you bid by hand).
+- **In Telegram, everything has buttons tied to its item:** amounts (Mac.bid's real steps up to your max, or bid counts
+  on GovAuctions), *Other amount* (the next number they type goes to that item), *No thanks* / *Stop*; outbid messages
+  offer raises; "just watching" messages offer *I'd like to bid* / *Stop updates*. A typed number or "stop" with several
+  items open is never guessed: they're asked which item (or *Stop all*). They can send **/items** to see their open items
+  with *Raise* / *Stop* buttons.
 - **For others tab:** everything you're doing for someone, with a sub-tab per person.
 - eBay only lets approved partners bid through its API, so eBay is "keep them posted" only.
 

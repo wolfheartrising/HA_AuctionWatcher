@@ -77,7 +77,8 @@ class SearchManager:
         self._lock = asyncio.Lock()
         self.running = False
         self.version = 1  # bumped on every change, so the page only downloads results when something changed
-        self._starred: dict[str, bool] = {}  # site:item -> just starred/unstarred here (until the site's list catches up)
+        self._starred: dict[str, bool] = {}
+        self._loaded = False  # nothing is saved until the stored searches/results are read back in  # site:item -> just starred/unstarred here (until the site's list catches up)
 
     # ---------------- storage / schedule
     async def async_load(self) -> None:
@@ -91,9 +92,13 @@ class SearchManager:
         self.run_time = d.get("run_time", DEFAULT_RUN_TIME)
         self.refresh_hours = d.get("refresh_hours", 0) if d.get("refresh_hours", 0) in REFRESH_CHOICES else 0
         self.mb_choice = d.get("mb_choice")
+        self._loaded = True
         self._schedule()
 
     async def _save(self) -> None:
+        if not self._loaded:  # never write an empty start-up state over what's saved
+            _LOGGER.debug("Saved searches not loaded yet; not saving")
+            return
         self.version += 1
         await self._store.async_save({
             "searches": [to_dict(s) for s in self.searches], "seen": self.seen, "results": self.results,
@@ -195,7 +200,7 @@ class SearchManager:
 
     # ---------------- run
     async def async_run(self, only: str | None = None) -> None:
-        if self._lock.locked():
+        if self._lock.locked() or not self._loaded:
             return
         async with self._lock:
             self.running = True
@@ -354,8 +359,9 @@ class SearchManager:
 
     # ---------------- what the page shows
     async def async_view(self) -> dict[str, Any]:
-        await self._refresh_buildings()
-        await self._import()
+        if self._loaded:  # a page that reconnects during start-up gets the view without changing anything
+            await self._refresh_buildings()
+            await self._import()
         coords = self._coordinators()
         merged: dict[str, dict[str, Any]] = {}
         gone = dt_util.utcnow() - timedelta(minutes=5)

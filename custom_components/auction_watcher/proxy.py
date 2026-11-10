@@ -295,3 +295,56 @@ def result_text(kind: str, title: str, d: dict[str, Any], req: ProxyRequest) -> 
     if kind == "ended":
         return f"{title} ended and someone else won it. Your max was ${req.bid_amount}, so you don't owe anything."
     return None
+
+
+# ---------------- Telegram buttons (each one names its item, so replies never land on the wrong one)
+
+AMOUNT, OTHER, STOP, STOP_ALL, PICK, WISH = "/aw_amt", "/aw_other", "/aw_stop", "/aw_stopall", "/aw_pick", "/aw_wish"
+
+
+def short(title: str, n: int = 22) -> str:
+    t = re.sub(r"[:,]", " ", title or "").strip()
+    return t if len(t) <= n else t[: n - 1].rstrip() + "…"
+
+
+def kb_row(buttons: list[tuple[str, str]]) -> str:
+    """One row of Home Assistant telegram_bot inline buttons: "Label:/command, Label:/command"."""
+    return ", ".join(f"{re.sub(r'[:,]', ' ', label)}:{cmd}" for label, cmd in buttons)
+
+
+def amount_options(req: ProxyRequest, min_next: int | None, count: int = 4) -> list[int]:
+    """Amounts to offer as buttons. Mac.bid: its own bid steps from the minimum up to your max (the last
+    button is your max). GovAuctions: bid counts up to your max. Just watching: the next few steps."""
+    from .sites.macbid import next_valid_bid
+    if req.site == "govauctions":
+        cap = req.hard_max or 40
+        opts = [b for b in (5, 10, 20, 40, 60, 100) if b <= cap and b > (req.agreed_max or 0)]
+        if req.hard_max and req.hard_max not in opts and req.hard_max > (req.agreed_max or 0):
+            opts.append(req.hard_max)
+        return opts[-count:] if len(opts) > count else opts
+    if not min_next:
+        return []
+    opts: list[int] = []
+    a = int(min_next)
+    while len(opts) < count - (1 if req.hard_max else 0) and (not req.hard_max or a <= req.hard_max):
+        opts.append(a)
+        a = next_valid_bid(a)
+    if req.hard_max and req.hard_max >= min_next and req.hard_max not in opts:
+        opts.append(req.hard_max)
+    return opts
+
+
+def amount_rows(req: ProxyRequest, min_next: int | None, decline: bool = False) -> list[str]:
+    """Buttons for "how much?": the amounts, then Other amount and No thanks / Stop."""
+    opts = amount_options(req, min_next)
+    unit = (lambda n: f"{n} bids") if req.site == "govauctions" else (lambda n: f"${n}")
+    rows = [kb_row([(unit(n), f"{AMOUNT} {req.id} {n}") for n in opts])] if opts else []
+    rows.append(kb_row([("Other amount", f"{OTHER} {req.id}"),
+                        ("No thanks", f"/aw_no {req.id}") if decline else ("Stop", f"{STOP} {req.id}")]))
+    return rows
+
+
+def watch_rows(req: ProxyRequest) -> list[str]:
+    if req.site == "ebay":
+        return [kb_row([("Stop updates", f"{STOP} {req.id}")])]
+    return [kb_row([("I'd like to bid", f"{WISH} {req.id}"), ("Stop updates", f"{STOP} {req.id}")])]

@@ -123,3 +123,17 @@ def test_live_minimum_names_and_rounding_notice():
     assert now["price"] == 115 and now["winning"] and now["your_max"] == 120 and now["min_next"] == 120 and now["min_next_known"]
     assert mb.lot_now({"current_bid": 115, "bid_increment": 5}, "7")["min_next"] == 120
     assert mb.lot_now({"current_bid": 115, "next_bid": 120}, "7")["min_next_known"]
+
+
+def test_buttons_name_their_item_and_use_real_steps():
+    from aw.proxy import amount_options, amount_rows, kb_row, short, watch_rows
+    r = ProxyRequest(lot_id="1", person_id="p", hard_max=150, title="ROWELL C-key Oboe, case: black")
+    assert amount_options(r, 115) == [115, 120, 125, 150]           # Mac.bid steps, last button = your max
+    assert amount_options(ProxyRequest(lot_id="2", person_id="p", hard_max=118, title="x"), 115) == [115, 118]
+    rows = amount_rows(r, 115, decline=True)
+    assert rows[0].startswith("$115:/aw_amt " + r.id + " 115") and "No thanks:/aw_no " + r.id in rows[1]
+    assert ":" not in short("a: b, c") and kb_row([("x: y", "/c")]) == "x  y:/c"
+    g = ProxyRequest(lot_id="3", person_id="p", hard_max=50, site="govauctions", title="TV")
+    assert amount_options(g, None) == [10, 20, 40, 50]
+    w = ProxyRequest(lot_id="4", person_id="p", hard_max=0, mode="watch", state="watching", title="Lamp")
+    assert "/aw_wish" in watch_rows(w)[0] and amount_options(w, 12) == [12, 13, 14, 15]
