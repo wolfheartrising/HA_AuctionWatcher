@@ -140,7 +140,12 @@ class AuctionWatcherConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 def _num(min_: float, max_: float, step: float, unit: str | None = None) -> NumberSelector:
-    return NumberSelector(NumberSelectorConfig(min=min_, max=max_, step=step, mode=NumberSelectorMode.BOX, unit_of_measurement=unit))
+    # Leave unit_of_measurement out entirely when there's none: Home Assistant
+    # rejects a None unit, which shows up as "Config flow could not be loaded: 400".
+    config = NumberSelectorConfig(min=min_, max=max_, step=step, mode=NumberSelectorMode.BOX)
+    if unit:
+        config["unit_of_measurement"] = unit
+    return NumberSelector(config)
 
 
 class AuctionWatcherOptionsFlow(OptionsFlow):
