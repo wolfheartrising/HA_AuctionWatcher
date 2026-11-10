@@ -351,6 +351,36 @@ class GovAuctionsClient:
 
     # ---- point-pack scanner (read-only)
 
+    async def search(self, query: str, now: float | None = None) -> list[dict[str, Any]]:
+        """The site's search (same as its search box), then titles and live prices."""
+        data = await self._get("/api/v1/search-ids-only", params={"q": query})
+        ids = [str(i) for i in data][:60] if isinstance(data, list) else []
+        if not ids:
+            return []
+        static = await self.static(ids)
+        live, _ = await self.live(ids, now)
+        t = time.time() if now is None else now
+        out = []
+        for aid in ids:
+            s, l = static.get(aid) or {}, live.get(aid) or {}
+            starts = s.get("starts_at")
+            if l.get("live") and l.get("clock_seconds") is not None:
+                ends = datetime.fromtimestamp(t + l["clock_seconds"], timezone.utc)
+            else:
+                ends = starts
+                if not starts or starts.timestamp() < t - 60:
+                    continue  # finished (search also returns past auctions)
+            notes = list(s.get("labels", []))
+            if l.get("closed_to_new"):
+                notes.insert(0, "Closed to new bidders")
+            out.append({
+                "item_id": aid, "title": s.get("title") or f"GovAuctions {aid}", "url": f"{BASE_URL}/auction/{aid}",
+                "price": l.get("price"), "ends_at": ends.isoformat() if ends else None,
+                "location": None, "image": s.get("image"), "condition": ", ".join(notes) or None,
+                "bids": None,
+            })
+        return out
+
     async def browse_category(self, category_id: int) -> list[str]:
         """Same list as the site's category filter (Packs = 7): live and upcoming auction ids."""
         data = await self._get("/api/v1/browse", params={"cat": str(category_id)})

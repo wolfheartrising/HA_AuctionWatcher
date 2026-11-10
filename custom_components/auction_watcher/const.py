@@ -1,7 +1,7 @@
 """Constants for Auction Watcher."""
 
 DOMAIN = "auction_watcher"
-VERSION = "0.9.5"  # keep in sync with manifest.json (a test checks this)
+VERSION = "1.0.0"  # keep in sync with manifest.json (a test checks this)
 
 CONF_SITE = "site"
 CONF_COOKIE = "cookie"
@@ -25,7 +25,7 @@ CONF_STABLE_SECONDS = "stable_seconds"        # must stay at <= N bidders this l
 DEFAULT_ACTIVE_WINDOW = 3
 DEFAULT_STABLE_SECONDS = 0
 DEFAULT_ALERT_KINDS = ["opportunity", "bid_limit", "ended", "won", "booking",
-                       "outbid", "ending_soon", "over_max", "pickup", "pack", "budget"]
+                       "outbid", "ending_soon", "over_max", "pickup", "pack", "budget", "search"]
 
 DEFAULT_FAST_INTERVAL = 10       # seconds, while something you follow is live
 DEFAULT_IDLE_INTERVAL = 45       # minutes, when nothing is live (keeps the login fresh)
@@ -51,6 +51,7 @@ EVENT_ENDING_SOON = f"{DOMAIN}_ending_soon"
 EVENT_OVER_MAX = f"{DOMAIN}_over_max"
 EVENT_PICKUP = f"{DOMAIN}_pickup_reminder"
 EVENT_PACK = f"{DOMAIN}_good_point_pack"
+EVENT_SEARCH = f"{DOMAIN}_search_matches"
 EVENT_BUDGET = f"{DOMAIN}_budget_reached"
 CONF_PACKS_ENABLED = "scan_point_packs"
 CONF_WEEKLY_BUDGET = "weekly_budget_points"  # 0 = no budget

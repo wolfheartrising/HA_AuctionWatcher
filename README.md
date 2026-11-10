@@ -4,9 +4,10 @@ Follow the online auctions you're bidding on or watching, with a dashboard,
 phone alerts and spending limits. **Supports GovAuctions, Mac.bid and eBay**; more sites
 (GovDeals, ...) are planned, one handler per site.
 
-Auction Watcher reads your auctions. It only **books or cancels bids** when you
-press a button, call a service, or turn on auto-booking for a specific auction,
-and never past the bid limit you set for that auction.
+Auction Watcher reads your auctions. It only **books, cancels or places bids**
+(GovAuctions booked bids, Mac.bid max bids) when you press a button, call a
+service, or turn on auto-booking / auto-bidding for a specific auction, and never
+past the limit you set for that auction.
 
 ## What it does (GovAuctions)
 
@@ -14,7 +15,8 @@ and never past the bid limit you set for that auction.
 - **Follows everything you're in**: your My Bids list, your watch list (favorites), plus any extra auction IDs you add.
 - **One sensor per auction**: state is the price. Attributes hold the clock, leader, **other active bidders** (everyone except you seen bidding in the last 3 minutes, configurable, so people who pause and jump back in still count), whether it's closed to new bidders, your bids and what they cost, booked bids left, labels (1¢, Win-Win, ...), entry limit, Buy It Now, and **what winning right now would cost you**.
 - **Price history**: past wins of the same product, with median final price, the median number of bids winners used, and the site's own cost estimate.
-- **Polls only as fast as needed**: every 10 s while something you follow is live, every minute shortly before one starts, every 45 min otherwise. The slow check also keeps the login fresh, and refreshed cookies are saved automatically.
+- **Polls only as fast as needed**: every 10 s while something you follow is live, every minute shortly before one starts, every 45 min otherwise. The slow check also keeps the login fresh, and refreshed cookies are saved automatically. While the Auctions page is open and visible and a penny auction is in its 5-second phase, it checks every 3 s.
+- **Original end and overtime**: the card shows when the first countdown ran out (the site's own start time) and a live **overtime** counter after that (also an `overtime_seconds` attribute).
 - **Alerts**, each sent once (not every poll):
   - **Few bidders left**: down to ≤ N *other* bidders (default 1: you against one person), in the real 5-second phase (not during the long first countdown), under your max price, and you're allowed to bid. Optionally only after it has stayed that low for N seconds (default 0: right away, since 2 bidders can end an auction in seconds).
   - **Bid limit reached**: you've spent your limit on an auction.
@@ -47,10 +49,10 @@ Timed liquidation auctions: you pay what you bid, plus fees, and pick up in pers
 
 - **Login**: your Mac.bid email and password (recommended; the first time, Mac.bid texts or emails a verification code, which the setup asks for), or your browser's saved login (`mac_auths` + `device_id` from the browser's Local Storage). Mac.bid's login lasts 30 minutes and is renewed automatically; the renewal chain lasts 60 days and extends itself, and with email + password it can always log in fresh. Mac.bid hands out a new renewal token every time, so a pasted browser login is taken over by Home Assistant: log in again in your browser afterwards.
 - **Follows** your watchlist and the lots in your recent bid history (plus any extra lot IDs you add). Each lot is checked only as often as it needs: every check in its last 15 minutes, every 2 minutes in its last 2 hours, every 15 minutes otherwise. If Mac.bid says "too many requests", the last known data is kept and it backs off.
-- **Cards** show a real countdown to the end (with an *extended* badge when late bids push it back), **you're winning / outbid**, other bidders, watchers, retail and Buy Now prices, and **what winning costs**: the bid plus Mac.bid's 15% buyer's premium and $3 lot fee (before tax).
-- **Condition notes** like the item page: 🟩 TESTED, 🟥 DAMAGED, 🟨 PARTIAL with the inspector's note, and the full description in a sub-menu.
-- **Location**: pickup spot with address and hours, and a **Transfers** sub-menu (whether the item can be moved, and to which locations). "If you win" includes that building's sales tax.
-- **Bidding**, like the site: type your **Max bid** and press **Bid now**. Mac.bid raises your bid for you up to that max ("set your max and done"). It shows the minimum next bid, asks you to confirm (with what a win at your max costs including fees and tax), then offers **Buyer's Assurance with its price** (5-business-day return guarantee). Each bid is checked against Mac.bid's own data before it counts as placed.
+- **Cards** show a real countdown to the end (with an *extended* badge when late bids push it back, and the original end time), **you're winning / outbid**, other bidders, watchers, retail and Buy Now prices, and **what winning costs**: the bid plus Mac.bid's 15% buyer's premium, $3 lot fee and the pickup building's sales tax.
+- **Condition notes** like the item page: 🟩 TESTED, 🟥 DAMAGED, 🟨 PARTIAL with the inspector's note, the full description in a sub-menu, and what the condition label means (Like New / Open Box / Damaged, from Mac.bid's FAQ).
+- **Location**: pickup spot with address and hours, the pickup window (3 business days after it closes), and a **Transfers** sub-menu: whether the item can be moved, and to which locations, each marked **free (pickup outpost)** or **$10** (free for Buyers Club members; up to 7 days to arrive, then 7 days to pick up).
+- **Bidding**, like the site: type your **Max bid** and press **Bid now**. Mac.bid raises your bid for you up to that max ("set your max and done"). It shows the minimum next bid, asks you to confirm (with what a win at your max costs including fees and tax, and a reminder that bids can't be cancelled), then offers **Buyer's Assurance with its price** (return guarantee; not offered on Damaged items, per Mac.bid's FAQ). Each bid is checked against Mac.bid's own data before it counts as placed.
   - **Auto-bid (optional)**: place your max automatically N minutes before the end (default 3), optionally with Buyer's Assurance. Never past your max, and no further bids once someone's max beats yours.
   - **Mac.bid budget** (setting): the most dollars tied up in max bids at once (placed bids still live + scheduled late bids).
 - **Pause switch** (*Auto-bidding*) and an alert for every bid placed or failed.
@@ -68,6 +70,25 @@ Uses eBay's **official APIs** only (no page scraping, which eBay blocks and its 
 - **Alerts**: outbid, ending soon, price passed your max, won, ended. Checks every 10 s in an item's last 15 minutes, every 2 minutes in its last 2 hours, otherwise every 15 minutes.
 - **No bidding**: eBay only lets approved apps bid through its API. Use eBay's own max bid.
 - *Status*: built from eBay's documented formats and tested on sample data; not yet run against live eBay.
+
+## Saved searches
+
+The **Saved searches** tab looks for keywords on every site you've set up, once a day
+(8:00 AM by default; change the time on the tab) or when you tap **Search now**. It uses each
+site's own search: what typing in its search box does.
+
+- **Add** a keyword, pick the sites, optionally a max price. Tick *Also save to my Mac.bid alerts* to add it there too.
+- Your **Mac.bid keyword alerts** (Account → Notifications) come in automatically. Colored dots show where a search
+  is also saved: red GovAuctions, green Mac.bid, blue eBay. The same keyword from two places is one search.
+- **Deleting** a search here also deletes it on Mac.bid (same as the trash can on its Notifications page).
+- **Results** from all sites are in one list, soonest-ending first, with **NEW** on matches since the last run.
+  Filter by search, by site, or new only. Each new match is alerted once (alert type *New matches for saved searches*).
+  A search's first run only records what's already listed, so you don't get alerts for everything at once.
+- **Mac.bid pickup locations**: a sub-menu of toggles, starting from the locations on your Mac.bid account.
+  Results include items at those buildings or transferable to them ("transfer needed"); the tab notes how many results
+  the location filter excluded. Changing a toggle searches again a few seconds later.
+- GovAuctions results skip finished auctions and flag ones already **closed to new bidders**.
+- Automations: the action `auction_watcher.search_now`, and the event `auction_watcher_search_matches` (with the new items).
 
 ## Money overview and budgets
 
@@ -101,9 +122,14 @@ This is automated use of your account. Check the site's terms and decide for you
 1. Copy `custom_components/auction_watcher` into `/config/custom_components/` (or add this repo to HACS as a custom repository).
 2. Restart Home Assistant.
 3. Settings → Devices & services → **Add integration** → *Auction Watcher*.
-4. Pick the site and upload or paste your cookies (see below).
-5. Click the ⚙️ on the account: one page with alert rules, where alerts go (phone, Telegram, Alexa) and timing.
+4. Pick the site, then log in:
+   - **GovAuctions**: upload or paste your cookies (see below).
+   - **Mac.bid**: email and password; the first time, type in the code Mac.bid texts or emails you. (Or paste the browser's saved login.)
+   - **eBay**: your developer App ID + Cert ID, plus your RuName to sign in to your account (see the eBay section).
+5. Click the ⚙️ on the account: one page per site with alert rules, where alerts go (phone, Telegram, Alexa), budgets and timing.
 6. Open **Auctions** in the sidebar. (A YAML dashboard is also in `dashboards/` if you prefer building your own.)
+
+**After every update**: restart Home Assistant if the release changed Python code, then hard-refresh the Auctions page (Ctrl+F5; in the phone app: Settings → Companion app → Troubleshooting → Reset frontend cache). Browsers sometimes keep the old page.
 
 ### Getting the cookies
 
@@ -119,20 +145,44 @@ The cookies are stored in your Home Assistant config like any other integration'
 
 ## Options
 
-| Option | Default |
+Each site's ⚙️ shows only its own settings.
+
+| GovAuctions | Default |
 |---|---|
-| Alert when active bidders are at most | 2 |
+| Check point packs hourly | on |
+| Alert when *other* active bidders are at most | 1 (you against one) |
+| Count anyone who bid within the last N minutes | 3 |
+| …only after it stays that low for N seconds | 0 (right away) |
 | Only alert below this price (0 = any) | 0 |
-| Default bid limit per auction (0 = none) | 0 |
+| Default max bids per auction (0 = none) | 0 |
+| Weekly budget in points (0 = none) | 0 |
 | What one point costs | $0.13 |
-| Fast check interval | 10 s |
-| Idle check interval | 45 min |
-| Extra auction IDs | none |
+| Check every N s while live / every N min when idle | 10 s / 45 min |
+| Keep ended auctions | 3 days |
+
+| Mac.bid | Default |
+|---|---|
+| Ending-soon alert | 10 min before |
+| Pickup reminder | 24 h before the deadline |
+| Default max bid ($, 0 = none) | 0 |
+| Most dollars tied up in max bids (0 = no limit) | 0 |
+| Check every N s in an item's last 15 min / idle | 10 s / 45 min (max 15) |
+| Keep ended auctions | 3 days |
+
+| eBay | Default |
+|---|---|
+| Ending-soon alert | 10 min before |
+| Default max price ($, 0 = none) | 0 |
+| Check every N s in an item's last 15 min / idle | 10 s / 45 min |
+| Keep ended auctions | 3 days |
+
+All sites: where alerts go, which alerts to send, extra auction IDs to follow.
 
 ## Notes and limits
 
-- "Active bidders" counts distinct names in the last 60 s among the last 9 bids the site exposes, so it tops out at 9.
-- People with booked bids only show up once their bids actually fire.
+- GovAuctions "other bidders" counts everyone except you seen bidding within the window (3 minutes by default). The site only shows the last 9 bids, so the integration remembers names across checks.
+- People with booked bids only show up once their bids actually fire; anyone who bid before the entry limit can come back (except in No Re-Entry auctions).
+- Mac.bid accepts a bid request first and processes it after, so a bid only counts as placed once Mac.bid's own data shows you as a bidder.
 - Respect each site's terms. Auction Watcher identifies itself in its user agent and polls modestly; it does not try to look like a person.
 
 ## Development
@@ -140,6 +190,8 @@ The cookies are stored in your Home Assistant config like any other integration'
 The site handlers and alert logic don't depend on Home Assistant:
 
 ```bash
-python -m pytest tests
-python tools/live_check.py path/to/cookies.txt   # read-only check of your real account
+python -m pytest tests                              # includes a pyflakes check of every file for undefined names
+python tools/live_check.py path/to/cookies.txt      # read-only check of your real GovAuctions account
 ```
+
+The Home Assistant parts (`coordinator.py`, `config_flow.py`, ...) can't be imported without Home Assistant, so the pyflakes test is what catches a missing import before it reaches a real install.

@@ -144,6 +144,11 @@ def format_alert(kind: str, d: dict[str, Any]) -> tuple[str, str, str]:
         title = f"Booking problem: {name}"
         msg = f"{d.get('reason') or 'The site refused.'} Check the auction on the site."
         spoken = f"Booking problem on {name}. Check your phone."
+    elif kind == "search":
+        n = d.get("count") or 0
+        title = f"{n} new match{'' if n == 1 else 'es'} for your saved searches"
+        msg = "; ".join(d.get("lines") or [])
+        spoken = f"{n} new auction match{'' if n == 1 else 'es'} for your saved searches."
     else:  # won
         title = f"You won: {name}"
         msg = "Open the site to pay or exchange it."
@@ -176,7 +181,7 @@ def build_calls(
                 "message": msg,
                 "data": {
                     "url": url, "clickAction": url,
-                    "tag": f"auction-{data.get('auction_id')}",
+                    "tag": f"auction-{data.get('auction_id') or kind}",
                     "priority": "high", "ttl": 0,
                 },
             }))

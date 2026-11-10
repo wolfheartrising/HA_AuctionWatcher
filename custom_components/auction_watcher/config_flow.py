@@ -378,12 +378,13 @@ ALERT_KIND_OPTIONS = [
     {"value": "pickup", "label": "Pickup deadline reminder (Mac.bid)"},
     {"value": "pack", "label": "Good point pack open to join (GovAuctions)"},
     {"value": "budget", "label": "Weekly budget used up (GovAuctions)"},
+    {"value": "search", "label": "New matches for saved searches (daily)"},
 ]
 
 
-GOV_KINDS = {"opportunity", "bid_limit", "ended", "won", "booking", "pack", "budget"}
-MACBID_KINDS = {"outbid", "ending_soon", "over_max", "won", "ended", "pickup", "booking"}
-EBAY_KINDS = {"outbid", "ending_soon", "over_max", "won", "ended"}
+GOV_KINDS = {"opportunity", "bid_limit", "ended", "won", "booking", "pack", "budget", "search"}
+MACBID_KINDS = {"outbid", "ending_soon", "over_max", "won", "ended", "pickup", "booking", "search"}
+EBAY_KINDS = {"outbid", "ending_soon", "over_max", "won", "ended", "search"}
 
 
 class AuctionWatcherOptionsFlow(OptionsFlow):

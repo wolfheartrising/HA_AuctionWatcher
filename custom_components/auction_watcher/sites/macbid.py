@@ -39,6 +39,13 @@ WEB = "https://www.mac.bid"
 USER_AGENT = "Mozilla/5.0 (compatible; HA-AuctionWatcher; +https://github.com/wolfheartrising/HA_AuctionWatcher)"
 RENEW_EARLY_SECONDS = 120  # renew the 30-minute key this long before it expires
 
+# Mac.bid's search box queries a separate search server with this public, search-only key
+# (it's in the mac.bid web page for every visitor). Used once a day per saved search, with
+# the owner's approval, exactly like typing in the search box.
+SEARCH_URL = "https://search.mac.bid/multi_search"
+SEARCH_KEY = "jxX8RU6YVOkm9esgd9buaYjulIWv6N52"
+SEARCH_COLLECTION = "prod_macdiscount_alias"
+
 
 class RateLimited(SiteError):
     """Mac.bid answered 429: slow down."""
@@ -276,6 +283,61 @@ def parse_details(d: dict[str, Any]) -> dict[str, Any]:
         "buyers_assurance_cost": _num(d.get("buyers_assurance_cost")),
         "auction_type": d.get("auction_type"),
     }
+
+
+def search_hits(data: dict[str, Any], buildings: list[str] | None = None) -> list[dict[str, Any]]:
+    """Search-server results -> plain dicts (turned into Hit objects by the search manager).
+    With your buildings given, items sitting elsewhere but transferable to you say where from."""
+    mine = set(buildings or [])
+    out = []
+    for res in (data or {}).get("results") or []:
+        for h in res.get("hits") or []:
+            d = h.get("document") or {}
+            lot_id = str(d.get("lot_id") or d.get("id") or "")
+            if not lot_id:
+                continue
+            out.append({
+                "item_id": lot_id,
+                "title": d.get("product_name") or d.get("auction_title") or f"Mac.bid lot {lot_id}",
+                "url": item_url(d.get("auction_id"), d.get("lot_number")),
+                "price": _num(d.get("current_bid")),
+                "ends_at": _closing_iso(d.get("expected_closing_utc") or d.get("expected_close_date")),
+                "location": d.get("auction_location"),
+                "image": d.get("image_url"),
+                "condition": d.get("condition"),
+                "bids": _int(d.get("total_bids")),
+                "transfer": (d.get("auction_location") if mine and d.get("auction_location") not in mine else None),
+            })
+    return out
+
+
+def search_total(data: dict[str, Any]) -> int:
+    return int((((data or {}).get("results") or [{}])[0]).get("found") or 0)
+
+
+def keywords_from_profile(data: Any) -> list[str]:
+    """Your keyword alerts live on your profile as one comma-separated text ("greenhouse,shed")."""
+    user = data.get("user") if isinstance(data, dict) and isinstance(data.get("user"), dict) else data
+    raw = (user or {}).get("keywords") if isinstance(user, dict) else None
+    return [k.strip() for k in str(raw or "").split(",") if k.strip()]
+
+
+def keywords_without(current: list[str], keyword: str) -> list[str]:
+    k = keyword.strip().lower()
+    return [x for x in current if x.strip().lower() != k]
+
+
+def keywords_with(current: list[str], keyword: str) -> list[str]:
+    return current if any(x.strip().lower() == keyword.strip().lower() for x in current) else [*current, keyword.strip()]
+
+
+def _closing_iso(v: Any) -> str | None:
+    if v in (None, ""):
+        return None
+    if isinstance(v, (int, float)):
+        return datetime.fromtimestamp(v / 1000 if v > 1e12 else v, timezone.utc).isoformat()
+    d = _dt(v)
+    return d.isoformat() if d else str(v)
 
 
 def item_url(auction_id: Any, lot_number: Any) -> str:
@@ -530,6 +592,70 @@ class MacBidClient:
         status = data.pop("_status", 200) if isinstance(data, dict) else 200
         if status >= 400:
             raise SiteError(f"Mac.bid refused Buyer's Assurance: {short_answer(data)}")
+
+    async def _search_call(self, query: str, filter_by: str, per_page: int, page: int = 1) -> dict[str, Any]:
+        body = {"searches": [{"collection": SEARCH_COLLECTION, "q": query,
+                              "query_by": "product_name,description,keywords,auction_title",
+                              "filter_by": filter_by, "per_page": per_page, "page": page}]}
+        try:
+            async with self._session.post(SEARCH_URL, params={"x-typesense-api-key": SEARCH_KEY}, json=body,
+                                          headers={"User-Agent": USER_AGENT, "Origin": WEB, "Content-Type": "application/json"},
+                                          timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                if resp.status == 429:
+                    raise RateLimited("Mac.bid search says too many requests")
+                if resp.status >= 400:
+                    raise SiteError(f"Mac.bid search answered {resp.status}")
+                return await resp.json(content_type=None) or {}
+        except aiohttp.ClientError as err:
+            raise SiteError(f"Couldn't reach Mac.bid search: {err}") from err
+
+    async def search(self, query: str, buildings: list[str] | None = None, pages: int = 2) -> tuple[list[dict[str, Any]], int]:
+        """Search live Mac.bid lots like the site's search box. With buildings (e.g. ["Akron"]),
+        only items at them or transferable to them, like the site's location filter.
+        Returns (hits, how many live lots the location filter left out)."""
+        live = "lot_status:!=[BUFFER,CLOSED]"
+        flt = live
+        if buildings:
+            names = ",".join("`" + n.replace("`", "") + "`" for n in buildings)
+            flt = f"{live} && (auction_location:=[{names}] || transfer_locations:=[{names}])"
+        hits: list[dict[str, Any]] = []
+        found = 0
+        for page in range(1, pages + 1):
+            data = await self._search_call(query, flt, 100, page)
+            got = search_hits(data, buildings)
+            hits += got
+            found = search_total(data)
+            if len(got) < 100 or len(hits) >= found:
+                break
+        if not buildings:
+            return hits, 0
+        nationwide = search_total(await self._search_call(query, live, 1))
+        return hits, max(0, nationwide - found)
+
+    async def buildings(self) -> list[dict[str, Any]]:
+        """Public list of Mac.bid buildings (pickup sites): [{"id", "name", "outpost"}]."""
+        blds = await self._call("GET", "/buildings", auth=False)
+        return [{"id": str(b.get("id")), "name": b.get("name"),
+                 "outpost": str(b.get("is_pickup_outpost") or "0") not in ("0", "", "False", "false")}
+                for b in blds or [] if isinstance(b, dict) and b.get("name")]
+
+    async def my_building_ids(self) -> list[str]:
+        """The pickup locations chosen on your account (the site's location picker)."""
+        data = await self.get(f"/user/{self.user_id}/firebase/locations")
+        if isinstance(data, dict):
+            data = data.get("locations") or data.get("hits") or []
+        return [str(x) for x in data or []]
+
+    async def keywords(self) -> list[str]:
+        """Your keyword alerts (Account -> Notifications)."""
+        return keywords_from_profile(await self.get("/user/me?updated=true"))
+
+    async def save_keywords(self, keywords: list[str]) -> None:
+        """Save the keyword list: the same profile update the site's Notifications page sends
+        when you add a keyword or tap the trash can."""
+        await self.ensure_fresh()
+        await self._call("PUT", f"/user/{self.user_id}",
+                         {"keywords": ",".join(k.strip() for k in keywords if k.strip()), "verify_phone_enabled": True})
 
     async def lot(self, lot_id: str) -> dict[str, Any]:
         return await self.get(f"/map-bid/ddb/lot/{lot_id}")

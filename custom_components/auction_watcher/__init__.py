@@ -44,6 +44,8 @@ from .sites import macbid as mb
 from .logic import AutoSettings, MacBidSettings
 from .sites.base import SiteError
 from .panel import async_register_panel, async_remove_panel
+from .search_manager import DATA_KEY as SEARCHES_KEY
+from .search_manager import SearchManager, async_register_ws
 from .sites import govauctions as ga
 
 PLATFORMS = [Platform.SENSOR, Platform.SWITCH]
@@ -197,6 +199,16 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         }),
     )
     hass.services.async_register(DOMAIN, SERVICE_REFRESH, refresh, schema=vol.Schema({vol.Optional("site"): cv.string}))
+
+    async def search_now(call: ServiceCall) -> None:
+        """Run the saved searches now (they also run daily at the time set on the Auctions page)."""
+        manager: SearchManager | None = hass.data.get(SEARCHES_KEY)
+        if manager is None:
+            raise ServiceValidationError("Auction Watcher isn't set up yet")
+        await manager.async_run()
+
+    hass.services.async_register(DOMAIN, "search_now", search_now)
+    async_register_ws(hass)
     return True
 
 
@@ -223,6 +235,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: AuctionWatcherConfigEntr
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_entry_updated))
     await async_register_panel(hass)
+    if SEARCHES_KEY not in hass.data:
+        manager = SearchManager(hass)
+        hass.data[SEARCHES_KEY] = manager
+        await manager.async_load()
     return True
 
 
@@ -241,4 +257,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: AuctionWatcherConfigEnt
     )
     if unloaded and not others_loaded:
         async_remove_panel(hass)
+        manager = hass.data.pop(SEARCHES_KEY, None)
+        if manager is not None:
+            manager.stop()
     return unloaded

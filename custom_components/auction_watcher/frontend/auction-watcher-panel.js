@@ -13,6 +13,9 @@
 const SITE_NAMES = { govauctions: "GovAuctions", macbid: "Mac.bid", ebay: "eBay" };
 // What the per-auction spending cap is called on each site
 const LIMIT_LABEL = { govauctions: "Max bids", macbid: "Max bid ($)", ebay: "Max price ($)" };
+const SITE_COLORS = { govauctions: "#e53935", macbid: "#43a047", ebay: "#1e88e5" };
+const siteDot = (site, title) =>
+  `<span class="dot" style="background:${SITE_COLORS[site] || "#888"}" title="${esc(title || SITE_NAMES[site] || site)}"></span>`;
 const SHORT_CLOCK = 15; // seconds; same as FINAL_PHASE_MAX_CLOCK in logic.py
 
 const SORTS = {
@@ -65,6 +68,9 @@ class AuctionWatcherPanel extends HTMLElement {
     this._saved = {};   // short "Saved" messages, by key
     this._open = {};    // which "Booking & auto" sections are open
     this._drafts = {};  // unsaved field values: {auctionId: {fieldName: value}}
+    this._sd = null;    // saved searches + results (fetched from Home Assistant when that tab is open)
+    this._sform = { keyword: "", max_price: "", sites: null, save_to_macbid: false };
+    this._sfilter = { search: null, site: null, newOnly: false };
   }
 
   set hass(hass) {
@@ -86,7 +92,7 @@ class AuctionWatcherPanel extends HTMLElement {
     this._live = setInterval(() => this._liveRefresh(), 3000);
     this._maybeRender(true);
   }
-  disconnectedCallback() { clearInterval(this._timer); clearInterval(this._live); }
+  disconnectedCallback() { clearInterval(this._timer); clearInterval(this._live); clearInterval(this._sTimer); this._sTimer = null; }
 
   _liveRefresh() {
     if (!this._hass || document.visibilityState !== "visible") return;
@@ -181,10 +187,15 @@ class AuctionWatcherPanel extends HTMLElement {
     const sites = [...new Set(auctions.map((a) => a.site).filter(Boolean))].sort();
     return [
       { id: "active", label: "Active", filter: (a) => a.category === "bidding" && (a.status === "live" || a.status === "upcoming") },
+      { id: "winning", label: "Winning", filter: (a) => a.status === "live" && !!a.winning },
+      { id: "outbid", label: "Outbid", filter: (a) => a.status === "live" && !a.winning
+          && (a.site === "govauctions" ? Number(a.your_bids || 0) > 0 : !!a.you_are_bidding) },
+      { id: "auto", label: "Auto-bidding", filter: (a) => a.status !== "ended" && a.status !== "awaiting_pickup"
+          && (!!a.auto_cancel || !!a.auto_rebook || a.mb_mode === "late") },
       { id: "watching", label: "Watching", filter: (a) => a.category === "watching" && a.status !== "ended" },
-      { id: "ended", label: "Ended", filter: (a) => a.status === "ended" },
       { id: "pickup", label: "Awaiting pickup", filter: (a) => a.status === "awaiting_pickup" },
-      ...(this._packs() ? [{ id: "packs", label: "Point packs", filter: () => false, packs: true }] : []),
+      { id: "ended", label: "Ended", filter: (a) => a.status === "ended" },
+      { id: "searches", label: "Saved searches", filter: () => false, searches: true },
       ...sites.map((site) => ({ id: "site-" + site, label: SITE_NAMES[site] || site, filter: (a) => a.site === site })),
     ];
   }
@@ -207,10 +218,10 @@ class AuctionWatcherPanel extends HTMLElement {
     }
     const auctions = this._auctions();
     const accounts = this._accounts();
-    const signature = JSON.stringify([this._tab, this._sort, auctions.map((a) => [a.entity_id, a.price, a.updated, a.bid_limit,
+    const signature = JSON.stringify([this._tab, this._subtab, this._sort, auctions.map((a) => [a.entity_id, a.price, a.updated, a.bid_limit,
       a.auto_cancel, a.auto_rebook, a.rebook_mode, a.rebook_amount, a.max_price, a.auto_status, a.your_booked_left,
       a.mb_mode, a.mb_placed, a.mb_status, a.winning, a.has_assurance, a.mb_assurance, (a.condition_notes || []).length]),
-      accounts, this._saved, this._tab === "packs" ? this._packs() : null, this._autoSwitch()?.state, this._autoSwitch("macbid")?.state]);
+      accounts, this._saved, this._subtab === "packs" ? this._packs() : null, this._tab === "searches" ? [this._sd, this._sfilter, this._serr, this._sbusy] : null, this._autoSwitch()?.state, this._autoSwitch("macbid")?.state]);
     if (!force && signature === this._signature) return;
     this._signature = signature;
     this._pending = false;
@@ -245,14 +256,19 @@ class AuctionWatcherPanel extends HTMLElement {
       </div>
       <div class="tabs" role="tablist">
         ${tabs.map((t) => {
-          const n = t.packs ? (this._packs()?.list || []).filter((p) => p.grade === "green" && p.open).length : auctions.filter(t.filter).length;
+          const n = t.searches ? (this._sd ? this._sd.results.filter((h) => h.new).length || this._sd.results.length : "…") : auctions.filter(t.filter).length;
           return `<button role="tab" class="tab ${t.id === this._tab ? "on" : ""}" data-tab="${esc(t.id)}">${esc(t.label)} <span class="count">${n}</span></button>`;
         }).join("")}
       </div>
       ${tab.id === "active" ? this._tally(accounts) : ""}
-      <div class="grid">
-        ${tab.packs ? this._packsView() : shown.length ? shown.map((a) => this._safeCard(a)).join("") : `<div class="empty">Nothing here right now.</div>`}
-      </div>`;
+      ${tab.id === "site-govauctions" && this._packs() ? `<div class="subtabs">
+        <button class="subtab ${this._subtab !== "packs" ? "on" : ""}" data-subtab="following">Following <span class="count">${shown.length}</span></button>
+        <button class="subtab ${this._subtab === "packs" ? "on" : ""}" data-subtab="packs">Point packs
+          <span class="count">${(this._packs()?.list || []).filter((p) => p.stars >= 3 && p.open && p.affordable).length}</span></button>
+        <span class="muted">Point packs aren't auctions you're in: they're "if you're interested" picks.</span></div>` : ""}
+      ${tab.searches ? this._searchesView() : `<div class="grid">
+        ${tab.id === "site-govauctions" && this._subtab === "packs" && this._packs() ? this._packsView() : shown.length ? shown.map((a) => this._safeCard(a)).join("") : `<div class="empty">Nothing here right now.</div>`}
+      </div>`}`;
 
     const slot = this.shadowRoot.querySelector(".menu");
     this._menuButton = document.createElement("ha-menu-button");
@@ -261,6 +277,8 @@ class AuctionWatcherPanel extends HTMLElement {
     slot.appendChild(this._menuButton);
 
     const root = this.shadowRoot;
+    root.querySelectorAll("[data-subtab]").forEach((b) =>
+      b.addEventListener("click", () => { this._subtab = b.dataset.subtab; this._maybeRender(true); }));
     root.querySelectorAll("[data-tab]").forEach((b) =>
       b.addEventListener("click", () => { this._tab = b.dataset.tab; this._maybeRender(true); }));
     root.querySelector("[data-action=refresh]").addEventListener("click", () =>
@@ -291,7 +309,174 @@ class AuctionWatcherPanel extends HTMLElement {
       d.addEventListener("toggle", () => { this._open[d.dataset.id] = d.open; }));
     root.querySelectorAll("[data-act]").forEach((b) =>
       b.addEventListener("click", () => this._action(b.dataset.act, b.dataset.id)));
+    if (tab.searches) this._bindSearches(root);
     this._tick();
+  }
+
+  // ---------------------------------------------------------------- saved searches
+
+  async _loadSearches() {
+    if (this._tab !== "searches") { clearInterval(this._sTimer); this._sTimer = null; return; }
+    if ((this._sd && document.visibilityState !== "visible") || this._sbusy) return;
+    try {
+      this._sd = await this._hass.callWS({ type: "auction_watcher/searches" });
+      this._serr = null;
+    } catch (e) { this._serr = e?.message || String(e); }
+    this._maybeRender();
+  }
+
+  async _searchChange(payload) {
+    this._sbusy = true; this._maybeRender(true);
+    try {
+      this._sd = await this._hass.callWS({ type: "auction_watcher/searches/change", ...payload });
+      this._serr = null;
+    } catch (e) { this._serr = e?.message || String(e); }
+    this._sbusy = false; this._maybeRender(true);
+  }
+
+  _searchesView() {
+    if (!this._sTimer) {
+      this._sTimer = setInterval(() => this._loadSearches(), 5000);
+      setTimeout(() => this._loadSearches(), 0);
+    }
+    const d = this._sd;
+    if (!d) return `<div class="sv"><div class="empty">${this._serr ? `<span class="warn">${esc(this._serr)}</span>` : "Loading saved searches…"}</div></div>`;
+    const f = this._sform, flt = this._sfilter;
+    const formSites = f.sites || d.sites;
+    const byId = Object.fromEntries(d.searches.map((x) => [x.id, x]));
+    const when = (t) => (t ? new Date(t * 1000).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }) : "never");
+    let results = d.results;
+    if (flt.search) results = results.filter((h) => h.searches.includes(flt.search));
+    if (flt.site) results = results.filter((h) => h.site === flt.site);
+    if (flt.newOnly) results = results.filter((h) => h.new);
+    const resultSites = [...new Set(d.results.map((h) => h.site))];
+    const onCount = d.macbid_buildings.filter((b) => b.on).length;
+    const excl = flt.search ? (byId[flt.search]?.excluded || 0) : d.excluded_total;
+
+    return `<div class="sv">
+      <div class="sbar">
+        <label>Search every day at <input type="time" data-sform="run_time" value="${esc(d.run_time)}"></label>
+        <button data-sact="run" ${d.running || this._sbusy ? "disabled" : ""}>${d.running ? "Searching…" : "Search now"}</button>
+        <span class="muted">Last run ${esc(when(d.last_run))} · next ${esc(new Date(d.next_run).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }))}</span>
+      </div>
+      ${this._serr ? `<div class="warn">${esc(this._serr)}</div>` : ""}
+      ${Object.entries(d.errors || {}).map(([site, msg]) => `<div class="warn">${siteDot(site)} ${esc(SITE_NAMES[site] || site)}: ${esc(msg)}</div>`).join("")}
+
+      <div class="sadd">
+        <input type="text" placeholder="Keyword, e.g. greenhouse" data-sform="keyword" value="${esc(f.keyword)}">
+        ${d.sites.map((site) => `<label class="chk">${siteDot(site)}<input type="checkbox" data-sform-site="${site}" ${formSites.includes(site) ? "checked" : ""}> ${esc(SITE_NAMES[site])}</label>`).join("")}
+        <label class="chk">Max $ <input type="number" min="0" step="1" class="small" data-sform="max_price" value="${esc(f.max_price)}" placeholder="any"></label>
+        ${d.sites.includes("macbid") ? `<label class="chk"><input type="checkbox" data-sform="save_to_macbid" ${f.save_to_macbid ? "checked" : ""}> Also save to my Mac.bid alerts</label>` : ""}
+        <button data-sact="add" ${this._sbusy ? "disabled" : ""}>Add</button>
+      </div>
+
+      <div class="schips">
+        <button class="schip ${!flt.search ? "on" : ""}" data-sfilter-search="">All searches <span class="count">${d.results.length}</span></button>
+        ${d.searches.map((x) => `<span class="schip ${flt.search === x.id ? "on" : ""}">
+          <button class="schip-main" data-sfilter-search="${esc(x.id)}" title="Searches ${esc(x.sites.map((k) => SITE_NAMES[k] || k).join(", "))}${x.max_price ? ` · max $${x.max_price}` : ""}${x.excluded ? ` · ${x.excluded} Mac.bid results outside your locations` : ""}">
+            ${Object.keys(x.sources || {}).map((k) => siteDot(k, "Saved on " + (SITE_NAMES[k] || k))).join("")}
+            ${esc(x.keyword)} <span class="count">${x.count}</span>${x.new ? `<span class="badge on">${x.new} new</span>` : ""}
+          </button>
+          <button class="schip-x" data-sact="remove" data-sid="${esc(x.id)}" title="Delete this search${x.sources?.macbid ? " (also from your Mac.bid alerts)" : ""}">×</button>
+        </span>`).join("")}
+      </div>
+      <div class="note">Colored dots show where a search is also saved: ${siteDot("govauctions")} GovAuctions ${siteDot("macbid")} Mac.bid ${siteDot("ebay")} eBay. Deleting one here deletes it there too.</div>
+
+      ${d.sites.includes("macbid") ? `<details class="locs" ${this._locsOpen ? "open" : ""}>
+        <summary>Mac.bid pickup locations: ${onCount ? `${onCount} on` : "all (no filter)"} ${d.macbid_from_account ? `<span class="muted">· from your Mac.bid account</span>` : `<span class="muted">· your own choice</span>`}</summary>
+        <div class="note">Results show items at these buildings, or ones that can be transferred to them (marked "transfer needed").</div>
+        <div class="locgrid">
+          ${d.macbid_buildings.map((b) => `<label class="chk loc"><input type="checkbox" data-sloc="${esc(b.name)}" ${b.on ? "checked" : ""}> ${esc(b.name)}
+            ${b.account ? `<span class="badge">your account</span>` : ""}${b.outpost ? `<span class="badge">outpost</span>` : ""}</label>`).join("") || `<span class="muted">Loading locations…</span>`}
+        </div>
+        ${d.macbid_from_account ? "" : `<button class="secondary" data-sact="use-account">Use my Mac.bid account's locations</button>`}
+      </details>` : ""}
+
+      <div class="sfilters">
+        <button class="subtab ${!flt.site ? "on" : ""}" data-sfilter-site="">All sites</button>
+        ${resultSites.map((site) => `<button class="subtab ${flt.site === site ? "on" : ""}" data-sfilter-site="${site}">${siteDot(site)} ${esc(SITE_NAMES[site] || site)}</button>`).join("")}
+        <label class="chk"><input type="checkbox" data-sfilter-new ${flt.newOnly ? "checked" : ""}> New only</label>
+        <span class="muted">${results.length} shown</span>
+        ${excl && (!flt.site || flt.site === "macbid") ? `<span class="muted">Excluded ${num(excl)} Mac.bid result${excl === 1 ? "" : "s"} by location filters</span>` : ""}
+      </div>
+
+      <div class="hits">
+        ${results.length ? results.map((h) => this._hitRow(h, byId)).join("") : `<div class="empty">${d.searches.length ? (d.last_run ? "No matches." : "Searches run at the time above, or tap Search now.") : "Add a keyword to start. Your Mac.bid keyword alerts are brought in automatically."}</div>`}
+      </div>
+    </div>`;
+  }
+
+  _hitRow(h, byId) {
+    const left = h.ends_at ? (Date.parse(h.ends_at) - Date.now()) / 1000 : null;
+    const where = h.transfer ? `at ${h.transfer} · transfer needed` : h.location || "";
+    return `<div class="hit">
+      ${safeUrl(h.image) ? `<img src="${safeUrl(h.image)}" alt="" loading="lazy">` : `<div class="noimg"></div>`}
+      <div class="hbody">
+        <div class="htitle">${siteDot(h.site)} ${h.new ? `<span class="badge on">NEW</span>` : ""}
+          <a href="${safeUrl(h.url)}" target="_blank" rel="noreferrer">${esc(h.title)}</a></div>
+        <div class="hmeta">
+          <b>${money(h.price)}</b>
+          ${left !== null ? `<span>${left > 0 ? "ends in " + fmtDuration(left) : "ending"}</span>` : ""}
+          ${h.bids !== null && h.bids !== undefined ? `<span>${num(h.bids)} bid${Number(h.bids) === 1 ? "" : "s"}</span>` : ""}
+          ${where ? `<span>${esc(where)}</span>` : ""}
+          ${h.condition ? `<span class="muted">${esc(h.condition)}</span>` : ""}
+        </div>
+        <div class="hkw">${h.searches.map((id) => `<span class="kw">${esc(byId[id]?.keyword || "")}</span>`).join("")}</div>
+      </div>
+    </div>`;
+  }
+
+  _bindSearches(root) {
+    const f = this._sform;
+    root.querySelectorAll("[data-sform]").forEach((el) => {
+      const k = el.dataset.sform;
+      if (k === "run_time") {
+        el.addEventListener("change", () => this._searchChange({ action: "settings", run_time: el.value }));
+        return;
+      }
+      el.addEventListener(el.type === "checkbox" ? "change" : "input", () => { f[k] = el.type === "checkbox" ? el.checked : el.value; });
+      el.addEventListener("blur", () => { if (this._pending) setTimeout(() => this._maybeRender(), 0); });
+      if (k === "keyword") el.addEventListener("keydown", (ev) => { if (ev.key === "Enter") root.querySelector("[data-sact=add]")?.click(); });
+    });
+    root.querySelectorAll("[data-sform-site]").forEach((el) => el.addEventListener("change", () => {
+      const cur = new Set(f.sites || this._sd.sites);
+      el.checked ? cur.add(el.dataset.sformSite) : cur.delete(el.dataset.sformSite);
+      f.sites = [...cur];
+    }));
+    root.querySelectorAll("[data-sact]").forEach((b) => b.addEventListener("click", async () => {
+      const act = b.dataset.sact;
+      if (act === "run") return this._searchChange({ action: "run" });
+      if (act === "use-account") return this._searchChange({ action: "settings", use_account: true });
+      if (act === "remove") {
+        const x = this._sd.searches.find((y) => y.id === b.dataset.sid);
+        if (!x || !confirm(`Delete the saved search "${x.keyword}"?` + (x.sources?.macbid ? "\nIt's also removed from your Mac.bid alerts." : ""))) return;
+        if (this._sfilter.search === x.id) this._sfilter.search = null;
+        return this._searchChange({ action: "remove", search_id: x.id });
+      }
+      if (act === "add") {
+        const keyword = (f.keyword || "").trim();
+        if (!keyword) { this._serr = "Type a keyword first"; return this._maybeRender(true); }
+        const payload = { action: "add", keyword, sites: f.sites || this._sd.sites, save_to_macbid: !!f.save_to_macbid };
+        if (f.max_price !== "" && !isNaN(Number(f.max_price))) payload.max_price = Number(f.max_price);
+        this._sform = { keyword: "", max_price: "", sites: null, save_to_macbid: false };
+        await this._searchChange(payload);
+        setTimeout(() => this._loadSearches(), 4000);
+      }
+    }));
+    root.querySelectorAll("[data-sloc]").forEach((el) => el.addEventListener("change", () => {
+      this._locsOpen = true;
+      this._searchChange({ action: "settings", building: el.dataset.sloc, on: el.checked });
+    }));
+    root.querySelector("details.locs")?.addEventListener("toggle", (ev) => { this._locsOpen = ev.target.open; });
+    root.querySelectorAll("[data-sfilter-search]").forEach((b) => b.addEventListener("click", () => {
+      this._sfilter.search = b.dataset.sfilterSearch || null; this._maybeRender(true);
+    }));
+    root.querySelectorAll("[data-sfilter-site]").forEach((b) => b.addEventListener("click", () => {
+      this._sfilter.site = b.dataset.sfilterSite || null; this._maybeRender(true);
+    }));
+    root.querySelector("[data-sfilter-new]")?.addEventListener("change", (ev) => {
+      this._sfilter.newOnly = ev.target.checked; this._maybeRender(true);
+    });
   }
 
   _safeCard(a) {
@@ -463,9 +648,10 @@ class AuctionWatcherPanel extends HTMLElement {
           <div class="head">
             <a class="name" href="${url}" target="_blank" rel="noopener">${esc(a.title)}</a>
             <div class="sub">${esc(SITE_NAMES[a.site] || a.site)} · <span class="status ${esc(a.status)}">${esc(status)}</span> ${badge}</div>
-            ${(a.labels || []).length ? `<div class="labels">${a.labels.map((l) => `<span class="tag">${esc(l)}</span>`).join(" ")}</div>` : ""}
+            ${(a.labels || []).length ? `<div class="labels">${a.labels.map((l) => `<span class="tag cond-label ${esc(String(l).toLowerCase().replace(/\s+/g, "-"))}">${esc(l)}</span>`).join(" ")}</div>` : ""}
           </div>
-        </div>`;
+        </div>
+        ${this._conditionBlock(a)}`;
     const clock = `<div><div class="k">${c.label}</div><div class="v timer" data-deadline="${c.deadline ?? ""}">–</div></div>`;
     if (pickup) {
       return `<div class="card ${a.overdue ? "capped" : ""}">${head}
@@ -517,12 +703,19 @@ class AuctionWatcherPanel extends HTMLElement {
       </div>`;
   }
 
+  // Colored TESTED / DAMAGED / PARTIAL boxes (as on the item page) + what the condition means
+  _conditionBlock(a) {
+    if (a.site !== "macbid") return "";
+    const notes = (a.condition_notes || []).map((n) => `<div class="cond ${esc(n.kind)}">
+        <span class="cond-tag">${esc(n.label)}</span>${n.note ? `<div>${esc(n.note)}</div>` : ""}</div>`).join("");
+    const explained = a.condition_explained
+      ? `<div class="note"><b>${esc((a.labels || [])[0] || "Condition")}:</b> ${esc(a.condition_explained)}</div>` : "";
+    return notes || explained ? `<div class="cond-block">${notes}${explained}</div>` : "";
+  }
+
   _macbidExtras(a) {
     const id = esc(a.auction_id);
     const aid = a.auction_id;
-    const notes = (a.condition_notes || []).map((n) => `<div class="cond ${esc(n.kind)}">
-        <span class="cond-tag">${esc(n.label)}</span>${n.note ? `<div>${esc(n.note)}</div>` : ""}</div>`).join("");
-    const condNote = a.condition_explained ? `<div class="note"><b>${esc((a.labels || [])[0] || "Condition")}:</b> ${esc(a.condition_explained)}</div>` : "";
     const desc = a.description ? `<details class="sub-menu"><summary>Description</summary><div class="pre">${esc(a.description)}</div></details>` : "";
     const loc = a.location ? `<div class="line">📍 <b>${esc(a.location)}</b>${a.location_city ? ` · ${esc(a.location_city)}` : ""}
         ${a.location_address ? `<span class="muted"> · ${esc(a.location_address)}</span>` : ""}</div>` : "";
@@ -536,11 +729,11 @@ class AuctionWatcherPanel extends HTMLElement {
           : `<div class="note">Pick up at ${esc(a.location)}. You can also pay Mac.bid to hold it 7 more days.</div>`}</details>` : "";
     const pickupRule = a.status === "live" && a.location
       ? `<div class="note">If you win: pick up within <b>3 business days</b> at ${esc(a.location)}, or transfer / pay to hold it.</div>` : "";
-    if (a.status === "ended" || a.status === "awaiting_pickup") return notes + condNote + desc + loc + hours + transfers;
+    if (a.status === "ended" || a.status === "awaiting_pickup") return desc + loc + hours + transfers;
     const late = String(this._val(aid, "mb_late", a.mb_mode === "late")) === "true";
     const lateMin = this._val(aid, "mb_late_min", Math.round((a.mb_late_seconds || 180) / 60));
     const assure = String(this._val(aid, "mb_assure", !!a.mb_assurance)) === "true";
-    return `${notes}${condNote}${desc}${loc}${pickupRule}${hours}${transfers}
+    return `${desc}${loc}${pickupRule}${hours}${transfers}
       <details class="booking" ${late || this._open[aid] ? "open" : ""} data-id="${id}">
         <summary>Auto-bid ${late ? `<span class="badge on">late bid set</span>` : ""}${a.mb_placed ? ` <span class="badge">your max $${num(a.mb_placed)}</span>` : ""}</summary>
         <label class="bk-check"><input data-id="${id}" data-field="mb_late" type="checkbox" ${late ? "checked" : ""}>
@@ -795,6 +988,39 @@ const STYLE = `
                  color: var(--primary-text-color); }
   .tabs { display: flex; gap: 4px; padding: 12px 16px 0; overflow-x: auto; scrollbar-width: none; border-bottom: 1px solid var(--divider-color); }
   .tabs::-webkit-scrollbar { display: none; }
+  .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 3px; vertical-align: middle; }
+  .sv { padding: 16px; display: flex; flex-direction: column; gap: 12px; max-width: 1100px; }
+  .sbar, .sadd, .sfilters { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; }
+  .sadd { background: var(--card-background-color); border: 1px solid var(--divider-color); border-radius: 12px; padding: 12px; }
+  .sv input[type=text], .sv input[type=number], .sv input[type=time] { padding: 6px 8px; border-radius: 6px; border: 1px solid var(--divider-color);
+     background: var(--card-background-color); color: var(--primary-text-color); }
+  .sv input[type=text] { flex: 1 1 200px; min-width: 0; }
+  .sv input.small { width: 70px; }
+  .chk { display: inline-flex; align-items: center; gap: 4px; font-size: 14px; }
+  .schips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .schip { display: inline-flex; align-items: center; border: 1px solid var(--divider-color); border-radius: 16px;
+           background: var(--card-background-color); color: var(--primary-text-color); padding: 0; overflow: hidden; }
+  button.schip { padding: 5px 12px; }
+  .schip.on { border-color: var(--primary-color); box-shadow: 0 0 0 1px var(--primary-color); }
+  .schip-main, .schip-x { background: none; color: inherit; border-radius: 0; padding: 5px 8px 5px 12px; display: inline-flex; align-items: center; gap: 4px; }
+  .schip-x { padding: 5px 10px; border-left: 1px solid var(--divider-color); font-size: 16px; line-height: 1; }
+  .schip-x:hover { background: var(--error-color, #db4437); color: #fff; }
+  details.locs { background: var(--card-background-color); border: 1px solid var(--divider-color); border-radius: 12px; padding: 10px 12px; }
+  details.locs summary { cursor: pointer; font-weight: 500; }
+  .locgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 6px; margin: 10px 0; }
+  .hits { display: flex; flex-direction: column; gap: 8px; }
+  .hit { display: flex; gap: 12px; background: var(--card-background-color); border: 1px solid var(--divider-color); border-radius: 12px; padding: 10px; }
+  .hit img, .hit .noimg { width: 64px; height: 64px; object-fit: cover; border-radius: 8px; flex: none; background: var(--secondary-background-color); }
+  .hbody { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+  .htitle a { color: var(--primary-text-color); text-decoration: none; font-weight: 500; }
+  .htitle a:hover { text-decoration: underline; }
+  .hmeta { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 13px; }
+  .kw { font-size: 11px; background: var(--secondary-background-color); border-radius: 8px; padding: 1px 7px; margin-right: 4px; }
+  @media (max-width: 600px) { .sv { padding: 12px; } .hit img, .hit .noimg { width: 48px; height: 48px; } }
+  .subtabs { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 12px 16px 0; font-size: 13px; }
+  .subtab { background: var(--secondary-background-color); color: var(--primary-text-color); border: 1px solid var(--divider-color);
+            border-radius: 16px; padding: 5px 12px; }
+  .subtab.on { background: var(--primary-color); color: var(--text-primary-color, #fff); border-color: var(--primary-color); }
   .tab { background: none; border: 0; border-bottom: 2px solid transparent; color: var(--secondary-text-color); padding: 10px 14px;
          font-size: 15px; cursor: pointer; white-space: nowrap; }
   .tab.on { color: var(--primary-color); border-bottom-color: var(--primary-color); }
@@ -855,6 +1081,10 @@ const STYLE = `
   .warn { color: var(--error-color, #db4437); }
   .sub-menu { font-size: 13px; }
   button.bid-now { background: #7cb02d; font-weight: 600; }
+  .cond-block { display: flex; flex-direction: column; gap: 6px; }
+  .tag.cond-label.damaged { background: #ff455b; color: #fff; border-color: #ff455b; }
+  .tag.cond-label.like-new { background: #7cb02d; color: #fff; border-color: #7cb02d; }
+  .tag.cond-label.open-box { background: var(--secondary-background-color); }
   .cond { border-radius: 10px; padding: 8px 10px; font-size: 13px; border: 1px solid; }
   .cond.tested { background: rgba(124, 176, 45, 0.12); border-color: #7cb02d; }
   .cond.damaged { background: rgba(255, 69, 91, 0.10); border-color: #ff455b; }

@@ -25,6 +25,8 @@ refresh:
             - govauctions
             - macbid
 
+search_now: {}
+
 book_bids:
   fields:
     auction_id:

@@ -273,6 +273,10 @@
           "description": "Adds it when the late bid is placed."
         }
       }
+    },
+    "search_now": {
+      "name": "Run saved searches now",
+      "description": "Runs your saved searches on every site now (they also run daily at the time set on the Auctions page)."
     }
   }
 }

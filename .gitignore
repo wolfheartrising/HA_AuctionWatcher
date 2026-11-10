@@ -9,3 +9,6 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .venv/
+
+# Local notes for Claude Code (not shared)
+CLAUDE.md

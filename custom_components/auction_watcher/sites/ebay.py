@@ -275,6 +275,37 @@ class EbayClient:
         except aiohttp.ClientError as err:
             raise SiteError(f"Couldn't reach eBay: {err}") from err
 
+    async def search(self, query: str, limit: int = 50) -> list[dict[str, Any]]:
+        """Browse API search (auctions and buy-it-now), newest-ending first."""
+        token = await self.app_token()
+        try:
+            async with self._session.get(
+                API + "/buy/browse/v1/item_summary/search",
+                params={"q": query, "limit": str(limit), "sort": "endingSoonest"},
+                headers={"Authorization": f"Bearer {token}", "X-EBAY-C-MARKETPLACE-ID": MARKETPLACE},
+                timeout=aiohttp.ClientTimeout(total=20),
+            ) as resp:
+                if resp.status == 429:
+                    raise RateLimited("eBay says too many requests")
+                if resp.status >= 400:
+                    raise SiteError(f"eBay search answered {resp.status}")
+                data = await resp.json(content_type=None)
+        except aiohttp.ClientError as err:
+            raise SiteError(f"Couldn't reach eBay: {err}") from err
+        out = []
+        for it in (data or {}).get("itemSummaries") or []:
+            legacy = str(it.get("legacyItemId") or it.get("itemId") or "")
+            price = (it.get("currentBidPrice") or it.get("price") or {}).get("value")
+            out.append({
+                "item_id": legacy, "title": it.get("title") or f"eBay item {legacy}",
+                "url": it.get("itemWebUrl") or f"https://www.ebay.com/itm/{legacy}",
+                "price": _num(price), "ends_at": it.get("itemEndDate"),
+                "location": (it.get("itemLocation") or {}).get("postalCode"),
+                "image": (it.get("image") or {}).get("imageUrl"), "condition": it.get("condition"),
+                "bids": _int(it.get("bidCount")),
+            })
+        return out
+
     async def _trading(self, call: str, body: str) -> str:
         token = await self.user_token()
         xml = (f'<?xml version="1.0" encoding="utf-8"?><{call}Request xmlns="urn:ebay:apis:eBLBaseComponents">'

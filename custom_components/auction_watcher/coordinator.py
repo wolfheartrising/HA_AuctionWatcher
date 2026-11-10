@@ -594,6 +594,8 @@ class AuctionWatcherCoordinator(DataUpdateCoordinator[dict[str, AuctionState]]):
                 others = [u for u in active if u != self.username]
                 st.active_bidders, st.recent_bidders = len(others), others
                 st.extra["you_are_bidding"] = self.username in active
+            if self.username:
+                st.extra["winning"] = st.status == STATUS_LIVE and st.leader == self.username
             st.extra["active_window_minutes"] = window_min
             st.extra["point_cost"] = point_cost
             states[aid] = st
@@ -859,7 +861,7 @@ class MacBidCoordinator(AuctionWatcherCoordinator):
                     self._backoff_until = now + 60
                     break
                 except SiteError as err:
-                    _LOGGER.debug("Mac.bid details for %s not loaded: %s", lot_id, err)
+                    _LOGGER.info("Mac.bid details (condition notes) for lot %s not loaded: %s", lot_id, err)
         self._details = {k: v for k, v in self._details.items() if k in tracked}
 
         states: dict[str, AuctionState] = {}
