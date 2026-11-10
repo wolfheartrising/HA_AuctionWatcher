@@ -233,3 +233,12 @@ def test_original_end_is_first_countdown_end():
     s = _states()["17782125"]
     assert s.original_end == ga.parse_static(STATIC)["17782125"]["starts_at"]
     assert s.as_attributes()["original_end"].startswith("20")
+
+
+def test_panel_version_matches_const():
+    import re
+    from pathlib import Path
+
+    from aw.const import VERSION
+    js = (Path(__file__).parent.parent / "custom_components/auction_watcher/frontend/auction-watcher-panel.js").read_text(encoding="utf-8")
+    assert re.search(r'PANEL_VERSION = "([^"]+)"', js).group(1) == VERSION

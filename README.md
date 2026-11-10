@@ -98,7 +98,8 @@ site's own search: what typing in its search box does.
 
 ## For others (household bidding, opt-in)
 
-Off unless you switch on **Bid for others** on the ⚙ Settings tab and add people (name + Telegram chat id). Needs Home
+Off unless you switch it on under **For others** on the ⚙ Settings tab and add people: pick from your Telegram bot's allowed
+chats (or anyone who messaged the bot since HA started), or type a chat id. Needs Home
 Assistant's **Telegram bot** integration; each person must have pressed /start with your bot and be an allowed chat. Only
 people on your list are listened to. Bids are placed from **your** account (like a household account).
 
@@ -107,6 +108,15 @@ people on your list are listened to. Bids are placed from **your** account (like
   (the message shows the estimate with the 15% premium, $3 lot fee and tax). Only then is a max bid placed: the lower of their
   max and yours. Your budgets and spending cap still apply. They hear when they're outbid (and can reply with a higher max,
   which needs a new "I agree"), when it ends soon, and how it ends. Every step is logged on the card.
+- **Bid for them (GovAuctions):** you set the most **bids** you'll spend for them. They reply with how many bids they'll pay
+  for (e.g. `40`, or `40 $25` with a max price) and tap **I agree to pay**: the bids used (at your point cost) **win or lose**,
+  plus the final price if they win. Then their bids are booked from your account with that max price (or, if auto-booking
+  is on for that auction, it spends them when it's worth it). The bid limit becomes your bids before they agreed + theirs.
+  They hear when their bids run out (reply with a higher total to add more) and how it ends, with the bids used and cost.
+- **Stopping:** *Cancel request* on the card, or they reply **stop**. Before they agree: nothing was bid. GovAuctions after
+  agreeing: their booked bids are cancelled (unused points come back), the limit is set to what's used, and they're told
+  how many of their bids were used (what they owe). Mac.bid after agreeing: the max bid can't be withdrawn there, so it
+  stays, with no more raises, and they still hear how it ends. Removing a person stops all their requests the same way.
 - **Just keep them posted (any site):** they get a message now, when it's about to end, and when it ends. Nothing is bid.
 - **For others tab:** everything you're doing for someone, with a sub-tab per person.
 - eBay only lets approved partners bid through its API, so eBay is "keep them posted" only.
@@ -159,7 +169,12 @@ This is automated use of your account. Check the site's terms and decide for you
 5. Open the **Auctions** page in the sidebar → **⚙ Settings** to choose where alerts go (phone, Telegram, Alexa) and which ones; each site's tab → ⚙ Settings for its rules, budgets and timing.
 6. Open **Auctions** in the sidebar. (A YAML dashboard is also in `dashboards/` if you prefer building your own.)
 
-**After every update**: restart Home Assistant if the release changed Python code, then hard-refresh the Auctions page (Ctrl+F5; in the phone app: Settings → Companion app → Troubleshooting → Reset frontend cache). Browsers sometimes keep the old page.
+**After every update**: restart Home Assistant if the release changed Python code. A page that was already open keeps
+running the old version; it shows an **"Auction Watcher was updated: Reload"** banner, so tap Reload. Otherwise:
+- **Computer:** Ctrl+F5 (Cmd+Shift+R on a Mac).
+- **Android app:** close the app fully (swipe it away from recent apps) and reopen it; if that's not enough,
+  Settings → Companion app → Troubleshooting → **Reset frontend cache**.
+- **iPhone/iPad app:** Settings → Companion App → Debugging → **Reset frontend cache**.
 
 ### Getting the cookies
 

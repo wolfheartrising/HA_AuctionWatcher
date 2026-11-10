@@ -10,6 +10,7 @@
  * until you save it, and the page re-draws from those drafts.
  */
 
+const PANEL_VERSION = "1.3.3";  // must match const.py VERSION (a test checks)
 const SITE_NAMES = { govauctions: "GovAuctions", macbid: "Mac.bid", ebay: "eBay" };
 // What the per-auction spending cap is called on each site
 const LIMIT_LABEL = { govauctions: "Max bids", macbid: "Max bid ($)", ebay: "Max price ($)" };
@@ -112,7 +113,12 @@ class AuctionWatcherPanel extends HTMLElement {
   }
 
   _entryBanner() {
-    return (this._badEntries || []).map((e) => {
+    // An app or tab left open across an update still runs the old page code: offer a one-tap reload
+    const backend = this._accounts().map((a) => a.integration_version).find(Boolean);
+    const stale = backend && backend !== PANEL_VERSION
+      ? `<div class="banner update"><b>Auction Watcher was updated</b> <span class="muted">(this page is ${esc(PANEL_VERSION)}, Home Assistant runs ${esc(backend)})</span>
+          <button class="btn" data-action="reload">Reload</button></div>` : "";
+    return stale + (this._badEntries || []).map((e) => {
       const login = e.state === "setup_error" || /sign in|log ?in|auth|refused the login|token/i.test(e.reason || "");
       return `<div class="banner">
         <b>${esc(e.title)}</b> ${login ? "needs you to sign in again." : "isn't working right now."}
@@ -356,6 +362,7 @@ class AuctionWatcherPanel extends HTMLElement {
         }
         this._tab = b.dataset.tab; if (this._tab !== "searches") this._stopSearchWatch(); this._maybeRender(true);
       }));
+    root.querySelector("[data-action=reload]")?.addEventListener("click", () => location.reload());
     root.querySelector("[data-action=refresh]").addEventListener("click", () =>
       this._hass.callService("auction_watcher", "refresh", {}));
     root.querySelector("[data-action=packs-locked]")?.addEventListener("click", () => {
@@ -472,7 +479,8 @@ class AuctionWatcherPanel extends HTMLElement {
       }
       if (act === "add") {
         const name = slot.querySelector("[data-pform=name]").value.trim();
-        const chat = slot.querySelector("[data-pform=chat_id]").value.trim();
+        const picked = slot.querySelector("[data-pform=chat]")?.value || "";
+        const chat = picked || slot.querySelector("[data-pform=chat_id]").value.trim();
         if (!name || !/^-?\d+$/.test(chat)) { this._gmsg = { warn: true, text: "A person needs a name and their numeric Telegram chat id" }; this._gsSig = null; return this._maybeRender(true); }
         msg.add = { name, chat_id: chat };
       }
@@ -480,6 +488,13 @@ class AuctionWatcherPanel extends HTMLElement {
       catch (e) { this._gmsg = { warn: true, text: e?.message || String(e) }; }
       this._gsSig = null; this._maybeRender(true);
     }));
+    slot.querySelector("[data-pform=chat]")?.addEventListener("change", (ev) => {
+      const opt = ev.target.selectedOptions[0];
+      const typed = slot.querySelector("[data-pform=chat_id]");
+      typed.style.display = ev.target.value ? "none" : "";
+      if (ev.target.value) slot.querySelector("[data-pform=name]").value = opt.dataset.name || "";
+      else typed.focus();
+    });
     slot.querySelectorAll("[data-gcap]").forEach((el) => el.addEventListener(el.type === "number" ? "input" : "change", () => {
       if (el.type === "radio" && !el.checked) return;
       d()[el.dataset.gcap] = el.type === "number" ? Number(el.value || 0) : el.value;
@@ -505,23 +520,29 @@ class AuctionWatcherPanel extends HTMLElement {
 
   _proxySettings() {
     const v = this._pv;
-    if (!v) return `<section class="gs-sec"><h3>Bid for others (Mac.bid)</h3><div class="muted">Loading…</div></section>`;
-    return `<section class="gs-sec"><h3>Bid for others (Mac.bid)</h3>
-      <label class="chk"><input type="checkbox" data-pact="enable" ${v.enabled ? "checked" : ""}> Let me bid on Mac.bid items for people on this list</label>
+    if (!v) return `<section class="gs-sec"><h3>For others</h3><div class="muted">Loading…</div></section>`;
+    const chats = v.chats || [];
+    return `<section class="gs-sec"><h3>For others</h3>
+      <label class="chk"><input type="checkbox" data-pact="enable" ${v.enabled ? "checked" : ""}> Let me bid for people on this list
+        (Mac.bid and GovAuctions, from my account) or keep them posted on any item</label>
       ${v.enabled && !v.telegram_ready ? `<div class="warn">Needs Home Assistant's Telegram bot integration (telegram_bot) for the questions and "I agree" buttons.</div>` : ""}
       ${v.enabled ? `<div class="gs-list">${v.people.map((p) => `<span class="chk gs-item">💬 ${esc(p.name)} <span class="muted">${esc(p.chat_id)}</span>
           <button class="schip-x" data-pact="remove" data-pid="${esc(p.id)}" title="Remove ${esc(p.name)}">×</button></span>`).join("")
           || `<span class="muted">Nobody yet.</span>`}</div>
         <div class="sadd" style="border:0;padding:0">
-          <input type="text" placeholder="Name" data-pform="name" style="flex:0 1 160px">
-          <input type="text" placeholder="Telegram chat id" data-pform="chat_id" style="flex:0 1 180px">
+          <select data-pform="chat">
+            ${chats.map((c) => `<option value="${esc(c.chat_id)}" data-name="${esc(c.name)}">${esc(c.name)} (${esc(c.source)})</option>`).join("")}
+            <option value="">Other: type a chat id…</option>
+          </select>
+          <input type="text" placeholder="Name" data-pform="name" value="${esc(chats[0]?.name || "")}" style="flex:0 1 160px" autocomplete="off">
+          <input type="text" placeholder="Telegram chat id" data-pform="chat_id" style="flex:0 1 180px; ${chats.length ? "display:none" : ""}"
+            autocomplete="off" inputmode="numeric" data-lpignore="true" data-1p-ignore>
           <button data-pact="add">Add person</button>
         </div>
-        <div class="note">They must have pressed /start with your Home Assistant Telegram bot, and their chat must be allowed in the
-          bot's setup. Their chat id is the number HA shows in the <i>telegram_text</i> event when they message the bot
-          (Developer tools → Events → listen to telegram_text). Only these people are listened to. On a Mac.bid item, open
-          "Bid for someone", set your max and tap "Ask them". Nothing is bid until they name a max and tap "I agree to pay";
-          the bid is the lower of their max and yours, and your budgets and spending cap still apply.</div>
+        <div class="note">The list shows your Telegram bot's allowed chats, and anyone who messaged the bot since Home Assistant
+          started. They must have pressed /start with the bot. Only people you add here are listened to. On an item, open
+          "Bid for someone" (Mac.bid, GovAuctions) or "Keep someone posted" (any site). Nothing is bid until they say how much
+          and tap "I agree to pay"; your budgets and spending cap still apply.</div>
         ${v.requests.length ? `<div class="k">Recent requests</div><div class="note">${v.requests.slice(0, 8).map((r) =>
           `${esc(r.person)} · ${esc(r.title)} · ${esc(r.state)}${r.agreed_max ? ` · agreed $${num(r.agreed_max)}` : ""}`).join("<br>")}</div>` : ""}` : ""}
     </section>`;
@@ -1158,7 +1179,9 @@ class AuctionWatcherPanel extends HTMLElement {
     const p = a.proxy;
     const people = this._pv?.people || [];
     if (!this._pv && !this._pvLoading) this._loadProxy();
-    const canBid = a.site === "macbid";
+    const canBid = a.site === "macbid" || a.site === "govauctions";
+    const gov = a.site === "govauctions";
+    const amt = (n) => (gov ? `${num(n)} bids` : `$${num(n)}`);
     const mode = this._val(aid, "proxy_mode", p?.mode || (canBid ? "bid" : "watch"));
     const stateText = {
       watching: "gets updates on this item (nothing is bid)",
@@ -1168,22 +1191,25 @@ class AuctionWatcherPanel extends HTMLElement {
       declined: "said no thanks",
       cancelled: "cancelled",
     };
-    const open = p && ["asked", "confirming", "confirmed", "watching"].includes(p.state);
-    const head = p ? `<span class="badge ${p.state === "confirmed" || p.state === "watching" ? "on" : open ? "hot" : ""}">${p.mode === "watch" ? "👀 " : "for "}${esc(p.person)}${p.bid ? ` · $${num(p.bid)} max` : ""}</span>` : "";
+    const open = p && !p.stopped && ["asked", "confirming", "confirmed", "watching"].includes(p.state);
+    const head = p ? `<span class="badge ${p.state === "confirmed" || p.state === "watching" ? "on" : open ? "hot" : ""}">${p.mode === "watch" ? "👀 " : "for "}${esc(p.person)}${p.bid ? ` · ${amt(p.bid)} max` : ""}</span>` : "";
     return `<details class="booking proxy" ${open || this._open["proxy:" + aid] ? "open" : ""} data-id="proxy:${id}">
       <summary>${canBid ? "Bid for someone" : "Keep someone posted"} ${head}</summary>
-      ${p ? `<div class="line"><b>${esc(p.person)}</b>: ${esc(stateText[p.state] || p.state)}</div>
-        ${p.mode === "watch" ? "" : `<div class="line"><span class="k">Your max</span> $${num(p.hard_max)}
-          ${p.their_max ? ` · <span class="k">their max</span> $${num(p.their_max)}` : ""}
-          ${p.agreed_max ? ` · <span class="k">agreed to pay up to</span> $${num(p.agreed_max)}${p.estimate ? ` (≈ ${money(p.estimate)} with fees)` : ""}` : ""}
-          ${p.bid ? ` · <b>bid $${num(p.bid)}</b>` : ""}</div>`}
+      ${p ? `<div class="line"><b>${esc(p.person)}</b>: ${esc(p.stopped ? "stopped; the max bid already placed stays (Mac.bid bids can't be withdrawn)" : stateText[p.state] || p.state)}</div>
+        ${p.mode === "watch" ? "" : `<div class="line"><span class="k">Your max</span> ${amt(p.hard_max)}
+          ${p.their_max ? ` · <span class="k">they offered</span> ${amt(p.their_max)}` : ""}
+          ${p.agreed_max ? ` · <span class="k">agreed to pay</span> ${gov
+            ? `for up to ${num(p.agreed_max)} bids (${money(p.agreed_max * (p.point_cost || 0.13))}, win or lose)${p.agreed_price ? `, max price ${money(p.agreed_price)}` : ""}`
+            : `up to $${num(p.agreed_max)}${p.estimate ? ` (≈ ${money(p.estimate)} with fees)` : ""}`}` : ""}
+          ${p.bid && !gov ? ` · <b>bid $${num(p.bid)}</b>` : ""}
+          ${gov && p.agreed_max ? ` · <b>${num(Math.max(0, Math.min(p.agreed_max, (a.your_bids || 0) - (p.start_bids || 0))))} of theirs used</b>` : ""}</div>`}
         <div class="note">${(p.log || []).map(([t, txt]) => `${esc(new Date(t * 1000).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }))}: ${esc(txt)}`).join("<br>")}</div>` : ""}
       ${a.status === "live" || a.status === "upcoming" ? `<div class="bk-row">
         ${canBid ? `<select data-id="${id}" data-field="proxy_mode">
           <option value="bid" ${mode === "bid" ? "selected" : ""}>Bid for them (they confirm)</option>
           <option value="watch" ${mode === "watch" ? "selected" : ""}>Just keep them posted</option></select>` : ""}
         <select data-id="${id}" data-field="proxy_person">${people.map((x) => `<option value="${esc(x.id)}" ${this._val(aid, "proxy_person", p?.person_id || people[0]?.id) === x.id ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select>
-        ${mode === "bid" ? `<label>my max $<input data-id="${id}" data-field="proxy_max" type="number" min="1" step="1" class="small"
+        ${mode === "bid" ? `<label>${gov ? "my max bids" : "my max $"}<input data-id="${id}" data-field="proxy_max" type="number" min="1" step="1" class="small"
           value="${esc(this._val(aid, "proxy_max", p?.hard_max || ""))}"></label>` : ""}
         <button type="button" data-act="proxy_ask" data-id="${id}" data-site="${esc(a.site)}" ${people.length ? "" : "disabled"}>${
           mode === "watch" ? (p && p.mode === "watch" && open ? "Watching" : "Keep them posted") : p && open && p.mode === "bid" ? "Update" : "Ask them"}</button>
@@ -1191,6 +1217,10 @@ class AuctionWatcherPanel extends HTMLElement {
       </div>` : ""}
       <div class="note">${!people.length ? "Add people on the ⚙ Settings tab (Bid for others) first."
         : mode === "watch" ? "They get a Telegram message now, another when it's about to end, and one when it ends. Nothing is bid."
+        : gov ? `They get a Telegram message and reply with how many bids they'll pay for (up to yours; e.g. "40" or "40 $25" with a
+          max price), then tap "I agree to pay": the bids used (${money(0.13)} each) win or lose, plus the final price if they win.
+          Then their bids are booked from your account (or auto-booking spends them if it's on here). They hear when their bids
+          run out and how it ends, with what they owe.`
         : `They get a Telegram message, reply with their max (up to yours), then tap "I agree to pay". Only then is a max bid
           placed from your account: the lower of theirs and yours. They also hear when they're outbid and how it ends.`}</div>
       ${this._saved["proxy:" + aid] ? `<div class="note"><b>${esc(this._saved["proxy:" + aid])}</b></div>` : ""}
@@ -1209,7 +1239,7 @@ class AuctionWatcherPanel extends HTMLElement {
     try {
       if (act === "proxy_ask") {
         const a = this._auctions().find((x) => String(x.auction_id) === String(id)) || {};
-        const mode = this._field(id, "proxy_mode", a.site === "macbid" ? "bid" : "watch");
+        const mode = this._field(id, "proxy_mode", a.site === "macbid" || a.site === "govauctions" ? "bid" : "watch");
         const person = this._field(id, "proxy_person", this._pv?.people?.[0]?.id);
         const max = parseInt(this._field(id, "proxy_max", 0), 10) || 0;
         if (mode === "bid" && !max) throw new Error("set your max first");
@@ -1486,6 +1516,8 @@ const STYLE = `
   details.packs-intro summary, details.hist summary { cursor: pointer; }
   .banner { margin: 12px 16px 0; padding: 10px 14px; border-radius: 12px; border: 1px solid var(--error-color, #db4437);
             background: rgba(219, 68, 55, .12); display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; }
+  .banner.update { border-color: var(--primary-color); background: rgba(3, 169, 244, .12); }
+  .banner button.btn { border: 0; cursor: pointer; }
   .banner .btn { background: var(--primary-color); color: var(--text-primary-color, #fff); border-radius: 6px; padding: 5px 12px; text-decoration: none; }
   .packs-more { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
   .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 3px; vertical-align: middle; }

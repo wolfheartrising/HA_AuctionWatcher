@@ -38,9 +38,15 @@ class Person:
 class ProxyRequest:
     lot_id: str
     person_id: str
-    hard_max: int                      # the most YOU will bid for them (0 in "just watching")
+    hard_max: int                      # the most YOU will bid for them: dollars (Mac.bid) or bids (GovAuctions); 0 = watching
     site: str = "macbid"
     mode: str = "bid"                  # "bid" | "watch"
+    # GovAuctions (penny auctions): every bid costs a point, win or lose
+    point_cost: float = 0.13           # $ per bid, for what they agree to pay
+    their_price: float = 0.0           # their max auction price (0 = none): booked bids stop above it
+    agreed_price: float = 0.0
+    start_bids: int = 0                # your bids on the auction when they agreed (theirs are the ones after)
+    stopped: bool = False              # cancelled after a Mac.bid bid was placed: no raises, still told how it ends
     title: str = ""
     url: str = ""
     state: str = ASKED
@@ -82,9 +88,58 @@ def parse_amount(text: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
+_PRICE = re.compile(r"\$\s*(\d{1,6}(?:[.,]\d{1,2})?)")
+
+
+def parse_gov_reply(text: str) -> tuple[int | None, float | None]:
+    """GovAuctions reply: '40' (bids) or '40 $25' / '40 bids $25.50' (bids + max price)."""
+    t = text or ""
+    price_m = _PRICE.search(t)
+    price = float(price_m.group(1).replace(",", ".")) if price_m else None
+    rest = t[:price_m.start()] + t[price_m.end():] if price_m else t
+    m = re.search(r"(\d{1,5})", rest)
+    return (int(m.group(1)) if m else None), price
+
+
+def on_bids(req: ProxyRequest, bids: int, price: float | None, current_price: float | None,
+            now: float | None = None) -> tuple[bool, str]:
+    """GovAuctions: they replied with how many bids they'll pay for (and maybe a max price)."""
+    if req.state not in (ASKED, CONFIRMING, CONFIRMED):
+        return False, "That request is closed."
+    if bids < 1:
+        return False, "Reply with how many bids you'd pay for, e.g. \"40\" or \"40 $25\"."
+    if req.state == CONFIRMED and bids <= req.agreed_max and not price:
+        return False, f"You've already agreed to {req.agreed_max} bids. Reply with a higher total (up to {req.hard_max}) to add more."
+    if bids > req.hard_max:
+        return False, f"The most I can spend for you on this one is {req.hard_max} bids. Reply with {req.hard_max} or fewer."
+    if price is not None and current_price is not None and price <= current_price:
+        return False, f"The price is already ${current_price:.2f}, so a max price has to be higher than that."
+    req.their_max = bids
+    req.their_price = float(price or 0)
+    if req.state != CONFIRMED:
+        req.state = CONFIRMING
+    req.note(f"they offered {bids} bids" + (f", max price ${price:.2f}" if price else ""), now)
+    return True, ""
+
+
+STOP_WORDS = {"stop", "cancel", "no", "nevermind", "never mind", "quit"}
+
+
+def wants_stop(text: str) -> bool:
+    return (text or "").strip().lower().strip(".!") in STOP_WORDS
+
+
+def gov_used(req: ProxyRequest, your_bids_now: int) -> int:
+    """Their bids used so far on a GovAuctions request (never more than they agreed to)."""
+    used = max(0, int(your_bids_now or 0) - req.start_bids)
+    return min(used, req.agreed_max) if req.agreed_max else used
+
+
 def on_amount(req: ProxyRequest, amount: int, current_price: float | None, now: float | None = None) -> tuple[bool, str]:
     """They replied with a max. Returns (accepted, what to tell them). Accepted -> CONFIRMING."""
     floor = int(current_price or 0) + 1
+    if req.stopped:
+        return False, "That request was cancelled, so I can't raise it."
     if req.state not in (ASKED, CONFIRMING, CONFIRMED):
         return False, "That request is closed."
     if req.state == CONFIRMED and amount <= req.agreed_max:
@@ -100,11 +155,17 @@ def on_amount(req: ProxyRequest, amount: int, current_price: float | None, now: 
 
 
 def on_agree(req: ProxyRequest, estimate: float | None, now: float | None = None) -> int:
-    """They tapped "I agree to pay". Returns the max bid to place (0 = nothing to do)."""
+    """They tapped "I agree to pay". Returns the max bid to place (Mac.bid dollars / GovAuctions bids; 0 = nothing)."""
     if not req.their_max or req.state not in (CONFIRMING, CONFIRMED):
         return 0
     req.agreed_max = req.their_max
+    req.agreed_price = req.their_price
     req.estimate = estimate
+    if req.site == "govauctions":
+        req.state = CONFIRMED
+        req.note(f"agreed to pay for up to {req.agreed_max} bids (${req.agreed_max * req.point_cost:.2f}) win or lose"
+                 + (f", max price ${req.agreed_price:.2f}" if req.agreed_price else ""), now)
+        return req.bid_amount
     req.state = CONFIRMED
     req.note(f"agreed to pay up to ${req.agreed_max} (est. ${estimate:.2f} with fees and tax)" if estimate is not None
              else f"agreed to pay up to ${req.agreed_max}", now)
@@ -126,12 +187,28 @@ def ask_text(name: str, title: str, url: str, price: float | None, hard_max: int
     return (f"Hi {name}! Want me to bid on this for you?\n\n{title}\nCurrent bid: ${int(price or 0)}"
             + (f" · ends {ends}" if ends else "") + f"\n{url}\n\n"
             f"Reply with the most you'd pay as a bid (whole dollars, up to ${hard_max}).\n"
-            "Mac.bid adds a 15% buyer's premium, a $3 lot fee and sales tax on top of the winning bid.")
+            "Mac.bid adds a 15% buyer's premium, a $3 lot fee and sales tax on top of the winning bid. "
+            "Reply \"stop\" any time to cancel.")
 
 
 def watch_text(name: str, title: str, url: str, price: float | None) -> str:
     return (f"Hi {name}! I'm keeping an eye on this for you:\n\n{title}\nCurrent price: ${price or 0:.2f}\n{url}\n\n"
-            "I'll message you when it's about to end and how it ends. Nothing will be bid.")
+            "I'll message you when it's about to end and how it ends. Nothing will be bid. Reply \"stop\" to stop updates.")
+
+
+def gov_ask_text(name: str, title: str, url: str, price: float | None, hard_max: int, point_cost: float) -> str:
+    return (f"Hi {name}! Want me to bid on this penny auction for you?\n\n{title}\nPrice now: ${price or 0:.2f}\n{url}\n\n"
+            f"Reply with how many bids you'd pay for (up to {hard_max}). Each bid costs ${point_cost:.2f}, "
+            "and you pay for the bids used whether you win or not. Add a max price if you like, e.g. \"40 $25\". "
+            "Reply \"stop\" any time to stop.")
+
+
+def gov_confirm_text(title: str, bids: int, point_cost: float, price: float, labels_note: str = "") -> str:
+    cost = bids * point_cost
+    return (f"{title}\n\nI'll spend up to {bids} bids for you: up to ${cost:.2f}, which you pay for the bids actually "
+            f"used, win or lose." + (f" I'll stop if the price passes ${price:.2f}." if price else "")
+            + " If you win, you also pay the final auction price (plus anything the site charges for that item)."
+            + (f" {labels_note}" if labels_note else "") + "\n\nTap \"I agree to pay\" to confirm.")
 
 
 def confirm_text(title: str, amount: int, estimate: float | None) -> str:
@@ -143,6 +220,21 @@ def confirm_text(title: str, amount: int, estimate: float | None) -> str:
 def result_text(kind: str, title: str, d: dict[str, Any], req: ProxyRequest) -> str | None:
     """What the person hears about the item they asked for (None = nothing to send)."""
     price = d.get("price")
+    if req.site == "govauctions" and req.mode == "bid":
+        used = gov_used(req, d.get("your_bids") or 0)
+        spent = f"{used} bid{'' if used == 1 else 's'} used (${used * req.point_cost:.2f})"
+        if kind == "booked":
+            return f"Your bids are booked on {title}: up to {req.bid_amount}" + (
+                f", stopping above ${req.agreed_price:.2f}." if req.agreed_price else ".")
+        if kind == "bid_limit":
+            return f"Your {req.bid_amount} bids on {title} are used up ({spent}). Reply with more bids to keep going."
+        if kind == "won":
+            pay = d.get("pay_if_won")
+            return (f"You won {title}! {spent}" + (f", plus the final price ${pay:.2f}." if isinstance(pay, (int, float))
+                                                    else (f", plus the final price ${price:.2f}." if isinstance(price, (int, float)) else ".")))
+        if kind == "ended":
+            return f"{title} ended and someone else won it. {spent}, which is what you owe."
+        return None
     if req.mode == "watch":
         if kind == "ending_soon":
             return f"{title} ends soon. Current price ${price or 0:.2f}."
@@ -154,6 +246,8 @@ def result_text(kind: str, title: str, d: dict[str, Any], req: ProxyRequest) -> 
     if kind == "bid_failed":
         return f"Your bid on {title} didn't go through: {d.get('reason') or 'Mac.bid refused it'}. I'll take a look."
     if kind == "outbid":
+        if req.stopped:
+            return None
         return (f"You've been outbid on {title} (now ${int(price or 0)}). Your max was ${req.bid_amount}. "
                 f"Reply with a higher amount (up to ${req.hard_max}) to raise it.")
     if kind == "ending_soon":

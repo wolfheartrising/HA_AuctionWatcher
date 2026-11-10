@@ -1,7 +1,8 @@
 """Bidding for someone else: nothing is bid until they've named a max AND agreed to pay."""
 
 from aw.proxy import (ASKED, CONFIRMED, CONFIRMING, DECLINED, ProxyRequest, ask_text, confirm_text,
-                      on_agree, on_amount, on_decline, parse_amount, result_text, watch_text)
+                      on_agree, on_amount, on_bids, on_decline, parse_amount, parse_gov_reply, result_text, watch_text,
+                      gov_confirm_text)
 
 
 def req(**kw):
@@ -58,3 +59,38 @@ def test_just_watching_never_bids_and_only_sends_updates():
     assert "ends soon" in result_text("ending_soon", "TV", {"price": 4.0}, r)
     assert "ended at $12.00" in result_text("won", "TV", {"price": 12.0}, r)
     assert result_text("outbid", "TV", {"price": 4.0}, r) is None and result_text("bid_placed", "TV", {}, r) is None
+
+
+def test_govauctions_reply_bids_and_optional_price():
+    assert parse_gov_reply("40") == (40, None)
+    assert parse_gov_reply("40 $25") == (40, 25.0) and parse_gov_reply("$25.50 for 40 bids") == (40, 25.5)
+
+
+def test_govauctions_they_pay_for_bids_win_or_lose():
+    r = ProxyRequest(lot_id="5", person_id="p", hard_max=50, site="govauctions", point_cost=0.13, title="TV")
+    ok, why = on_bids(r, 80, None, 3.0)
+    assert not ok and "50 bids" in why
+    ok, why = on_bids(r, 40, 2.0, 3.0)
+    assert not ok and "higher than that" in why
+    ok, _ = on_bids(r, 40, 25.0, 3.0)
+    assert ok and r.state == CONFIRMING and r.bid_amount == 0
+    assert "win or lose" in gov_confirm_text("TV", 40, 0.13, 25.0) and "$5.20" in gov_confirm_text("TV", 40, 0.13, 25.0)
+    r.start_bids = 12
+    assert on_agree(r, None) == 40 and r.agreed_price == 25.0
+    assert "$5.20" in r.log[-1][1]
+    assert "3 bids used ($0.39)" in result_text("ended", "TV", {"your_bids": 15}, r)
+    assert "40 bids used ($5.20)" in result_text("ended", "TV", {"your_bids": 99}, r)       # never more than agreed
+    assert "plus the final price $14.20" in result_text("won", "TV", {"your_bids": 20, "pay_if_won": 14.2}, r)
+
+
+def test_stop_words_and_stopped_requests():
+    from aw.proxy import gov_used, wants_stop
+    assert wants_stop("Stop") and wants_stop(" cancel! ") and not wants_stop("stop at 40")
+    r = req(); on_amount(r, 40, 10); on_agree(r, None)
+    r.stopped = True
+    ok, why = on_amount(r, 55, 20)
+    assert not ok and "cancelled" in why                      # no raises after stopping
+    assert result_text("outbid", "Bluey ship", {"price": 41}, r) is None
+    assert "won" in result_text("won", "Bluey ship", {"price": 38.0}, r)   # but still hears how it ends
+    g = ProxyRequest(lot_id="5", person_id="p", hard_max=50, site="govauctions", start_bids=10, agreed_max=20)
+    assert gov_used(g, 14) == 4 and gov_used(g, 99) == 20 and gov_used(g, 3) == 0

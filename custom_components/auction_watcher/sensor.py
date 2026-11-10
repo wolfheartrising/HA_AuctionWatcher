@@ -12,6 +12,7 @@ from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from .const import VERSION
 from . import proxy_manager
 from . import AuctionWatcherConfigEntry
 from .const import DOMAIN
@@ -92,6 +93,7 @@ class PointsSensor(_Base):
             "poll_every_seconds": int(interval.total_seconds()) if interval else None,
             # Lets the Auctions page find each site's account sensor
             "auction_watcher_account": self.coordinator.config_entry.title,
+            "integration_version": VERSION,  # lets an open page notice it's older than the plugin
             "entry_id": self.coordinator.config_entry.entry_id,
             "site": self.coordinator.config_entry.data.get("site"),
             **({"spending": self.coordinator.spending} if self.coordinator.spending else {}),
