@@ -10,7 +10,7 @@
  * until you save it, and the page re-draws from those drafts.
  */
 
-const PANEL_VERSION = "1.5.8";  // must match const.py VERSION (a test checks)
+const PANEL_VERSION = "1.6.0";  // must match const.py VERSION (a test checks)
 const SITE_NAMES = { govauctions: "GovAuctions", macbid: "Mac.bid", ebay: "eBay" };
 // What the per-auction spending cap is called on each site
 const LIMIT_LABEL = { govauctions: "Max bids", macbid: "Max bid ($)", ebay: "Max price ($)" };
@@ -480,6 +480,8 @@ class AuctionWatcherPanel extends HTMLElement {
       const act = el.dataset.pact, msg = { type: "auction_watcher/proxy/change", action: "set" };
       if (act === "enable") msg.enabled = el.checked;
       if (act === "bot") msg.bot_entry = el.value;
+      if (act === "owner") msg.owner_chat = el.value;
+      if (act === "owner_alerts") msg.owner_alerts = el.checked;
       if (act === "edit") {
         const p = this._pv.people.find((x) => x.id === el.dataset.pid);
         if (!p) return;
@@ -543,12 +545,26 @@ class AuctionWatcherPanel extends HTMLElement {
       <label class="chk"><input type="checkbox" data-pact="enable" ${v.enabled ? "checked" : ""}> Let me bid for people on this list
         (Mac.bid and GovAuctions, from my account) or keep them posted on any item</label>
       ${v.enabled && !v.telegram_ready ? `<div class="warn">Needs Home Assistant's Telegram bot integration (telegram_bot) for the questions and "I agree" buttons.</div>` : ""}
-      ${v.enabled && (v.bots || []).length ? `<label class="chk">Telegram bot
+      ${(v.bots || []).length ? `<label class="chk">Telegram bot
         <select data-pact="bot">
           ${(v.bots.length > 1 || v.bot_entry) ? "" : `<option value="">${esc(v.bots[0].title)}</option>`}
           ${v.bots.length > 1 || v.bot_entry ? `<option value="" ${v.bot_entry ? "" : "selected"}>choose…</option>` + v.bots.map((b) => `<option value="${esc(b.entry_id)}" ${b.entry_id === v.bot_entry ? "selected" : ""}>${esc(b.title)}</option>`).join("") : ""}
         </select></label>
-        ${v.bots.length > 1 && !v.bot_entry ? `<div class="warn">You have ${v.bots.length} Telegram bots: pick the one these people talk to (it must use Polling or Webhooks so their replies reach Home Assistant).</div>` : ""}` : ""}
+        ${v.bots.length > 1 && !v.bot_entry ? `<div class="warn">You have ${v.bots.length} Telegram bots: pick the one these people talk to (it must use Polling or Webhooks so their replies reach Home Assistant).</div>` : ""}
+        <div class="k">Your own chat (owner)</div>
+        <div class="sadd" style="border:0;padding:0">
+          <select data-pact="owner">
+            <option value="" ${v.owner_chat ? "" : "selected"}>not set</option>
+            ${(v.all_chats || []).map((c) => `<option value="${esc(c.chat_id)}" ${c.chat_id === v.owner_chat ? "selected" : ""}>${esc(c.name)} (${esc(c.source)})</option>`).join("")}
+            ${v.owner_chat && !(v.all_chats || []).some((c) => c.chat_id === v.owner_chat) ? `<option value="${esc(v.owner_chat)}" selected>${esc(v.owner_chat)}</option>` : ""}
+          </select>
+          ${v.owner_chat ? `<label class="chk"><input type="checkbox" data-pact="owner_alerts" ${v.owner_alerts ? "checked" : ""}>
+            Send my outbid / few-bidders / good-pack alerts here, with buttons</label>` : ""}
+        </div>
+        <div class="note">Your chat can use /status, /active (quick bid and Stop per item), /pause, /resume and /help, and gets
+          "X wants you to bid" requests with Allow buttons. Anything that spends asks you to confirm; your max, budgets and
+          spending cap still apply. If this bot is also under "Where alerts go", untick one or you'll get those alerts twice.
+          Not listed? Message the bot once (send /start), then reopen this tab.</div>` : ""}
       ${v.enabled ? `<div class="gs-list">${v.people.map((p) => `<span class="chk gs-item">💬 ${esc(p.name)} <span class="muted">${esc(p.chat_id)}</span>
           <button class="schip-t" data-pact="edit" data-pid="${esc(p.id)}" title="Rename ${esc(p.name)} or fix their chat id (their items stay)">✎</button>
           <button class="schip-x" data-pact="remove" data-pid="${esc(p.id)}" title="Remove ${esc(p.name)}">×</button></span>`).join("")
@@ -1239,7 +1255,7 @@ class AuctionWatcherPanel extends HTMLElement {
     const canBid = a.site === "macbid" || a.site === "govauctions";
     const gov = a.site === "govauctions";
     const amt = (n) => (gov ? `${num(n)} bids` : `$${num(n)}`);
-    const wish = p && p.mode === "watch" && p.wants ? p.wants : 0;
+    const wish = p && p.mode === "watch" && p.state === "watching" && p.wants ? p.wants : 0;
     const mode = this._val(aid, "proxy_mode", wish && canBid ? "bid" : p?.mode || (canBid ? "bid" : "watch"));
     const stateText = {
       watching: "gets updates on this item (nothing is bid)",
@@ -1256,6 +1272,15 @@ class AuctionWatcherPanel extends HTMLElement {
     return `<details class="booking proxy" ${open || wish || this._open["proxy:" + aid] ? "open" : ""} data-id="proxy:${id}">
       <summary>${canBid ? "Bid for someone" : "Keep someone posted"} ${head}</summary>
       ${wishLine}
+      ${p ? (() => {
+        const known = people.some((x) => x.id === p.person_id);
+        return `<div class="bk-row">
+          ${known ? "" : `<span class="warn">This was for someone no longer on your list.</span>
+            ${people.length ? `<select data-id="${id}" data-field="proxy_reassign">${people.map((x) => `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join("")}</select>
+            <button type="button" class="secondary" data-act="proxy_reassign" data-id="${id}" data-site="${esc(a.site)}">Reassign</button>` : ""}`}
+          ${!open || !known ? `<button type="button" class="secondary" data-act="proxy_forget" data-id="${id}" data-site="${esc(a.site)}"
+            title="Remove this request record (no message is sent)">Forget</button>` : ""}</div>`;
+      })() : ""}
       ${p ? `<div class="line"><b>${esc(p.person)}</b>: ${esc(p.stopped ? "stopped; the max bid already placed stays (Mac.bid bids can't be withdrawn)" : stateText[p.state] || p.state)}</div>
         ${p.mode === "watch" ? "" : `<div class="line"><span class="k">Your max</span> ${amt(p.hard_max)}
           ${p.their_max ? ` · <span class="k">they offered</span> ${amt(p.their_max)}` : ""}
@@ -1269,7 +1294,10 @@ class AuctionWatcherPanel extends HTMLElement {
         ${canBid ? `<select data-id="${id}" data-field="proxy_mode">
           <option value="bid" ${mode === "bid" ? "selected" : ""}>Bid for them (they confirm)</option>
           <option value="watch" ${mode === "watch" ? "selected" : ""}>Just keep them posted</option></select>` : ""}
-        <select data-id="${id}" data-field="proxy_person">${people.map((x) => `<option value="${esc(x.id)}" ${this._val(aid, "proxy_person", p?.person_id || people[0]?.id) === x.id ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select>
+        <select data-id="${id}" data-field="proxy_person">${(() => {
+          const known = people.some((x) => x.id === p?.person_id) ? p.person_id : people[0]?.id;
+          return people.map((x) => `<option value="${esc(x.id)}" ${this._val(aid, "proxy_person", known) === x.id ? "selected" : ""}>${esc(x.name)}</option>`).join("");
+        })()}</select>
         ${mode === "bid" && !gov ? `<label>my max <select data-id="${id}" data-field="proxy_max">
           ${(() => { const cur = Number(this._val(aid, "proxy_max", p?.hard_max || wish || "")) || 0; const o = mbValidBids(a.price, 80);
             if (cur && !o.includes(cur)) o.unshift(cur);
@@ -1459,7 +1487,8 @@ class AuctionWatcherPanel extends HTMLElement {
     const saved = { limit: a.bid_limit, max_price: a.max_price, book_count: a.rebook_amount || 10, auto_cancel: a.auto_cancel,
       auto_rebook: a.auto_rebook, rebook_mode: a.rebook_mode || "fixed", rebook_amount: a.rebook_amount || 10, topup_at: a.topup_at || 0,
       mb_late: a.mb_mode === "late", mb_assure: !!a.mb_assurance, mb_late_min: Math.round((a.mb_late_seconds || 180) / 60),
-      proxy_person: a.proxy?.person_id, proxy_max: a.proxy?.hard_max, proxy_mode: a.proxy?.mode }[field];
+      proxy_person: (this._pv?.people || []).some((x) => x.id === a.proxy?.person_id) ? a.proxy.person_id : undefined,
+      proxy_max: a.proxy?.hard_max, proxy_mode: a.proxy?.mode }[field];
     const v = this._val(id, field, saved);
     return v === undefined || v === null || v === "" ? fallback : v;
   }
@@ -1557,6 +1586,22 @@ class AuctionWatcherPanel extends HTMLElement {
       return;
     }
     if (act === "proxy_ask" || act === "proxy_cancel") return this._proxyAction(act, id, site);
+    if (act === "proxy_forget" || act === "proxy_reassign") {
+      const key = "proxy:" + id;
+      try {
+        if (act === "proxy_forget") {
+          if (!confirm("Forget this request? It's removed from the list; no message is sent. (A Mac.bid max already placed stays on Mac.bid.)")) return;
+          this._pv = await this._hass.callWS({ type: "auction_watcher/proxy/change", action: "forget", site, lot_id: id });
+          this._saved[key] = "Forgotten";
+        } else {
+          const person = this._val(id, "proxy_reassign", this._pv?.people?.[0]?.id);
+          this._pv = await this._hass.callWS({ type: "auction_watcher/proxy/change", action: "reassign", site, lot_id: id, person_id: person });
+          this._saved[key] = "Reassigned to " + (this._pv.people.find((x) => x.id === person)?.name || "them");
+        }
+      } catch (err) { this._saved[key] = "Couldn't: " + (err?.message || err); }
+      this._maybeRender(true);
+      return;
+    }
     const key = (act === "limit" || act === "max_price" ? act + ":" : "auto:") + id;
     const int = (v) => Math.max(0, parseInt(v, 10) || 0);
     const dec = (v) => Math.max(0, parseFloat(v) || 0);

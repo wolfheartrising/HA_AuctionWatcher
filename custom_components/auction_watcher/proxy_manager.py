@@ -15,9 +15,11 @@ import voluptuous as vol
 
 from homeassistant.components import websocket_api
 from homeassistant.core import Event, HomeAssistant, callback
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.storage import Store
 
 from . import global_settings
+from .owner_bot import OwnerMixin
 from .const import CONF_SITE, DOMAIN, SITE_GOVAUCTIONS, SITE_MACBID, STORAGE_VERSION
 from .proxy import (ASKED, CANCELLED, CONFIRMED, CONFIRMING, HEADER, OPEN, WATCHING, Person, ProxyRequest, ask_text,
                     confirm_text, gov_ask_text, gov_confirm_text, gov_used, on_agree, on_amount, on_bids, on_decline,
@@ -38,7 +40,7 @@ HELP_TEXT = ("Hi {name}! This bot bids on auctions for you, but only after you a
 RELAYED = {"bid_placed", "bid_failed", "outbid", "ending_soon", "won", "ended", "bid_limit"}
 
 
-class ProxyManager:
+class ProxyManager(OwnerMixin):
     def __init__(self, hass: HomeAssistant) -> None:
         self.hass = hass
         self._store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, f"{DOMAIN}.proxy")
@@ -55,6 +57,8 @@ class ProxyManager:
         d = await self._store.async_load() or {}
         self.enabled = bool(d.get("enabled"))
         self.bot_entry: str | None = d.get("bot_entry")  # which Telegram bot (HA config entry) talks to them
+        self.owner_chat: str | None = d.get("owner_chat")  # your own chat: /status, /active, alerts with buttons
+        self.owner_alerts: bool = bool(d.get("owner_alerts", True))
         self.people = [Person.from_dict(p) for p in d.get("people", [])]
         self.requests = {r.key: r for r in (ProxyRequest.from_dict(v) for v in (d.get("requests") or {}).values())}
         self._unsubs = [self.hass.bus.async_listen("telegram_text", self._on_text),
@@ -66,7 +70,8 @@ class ProxyManager:
             coord.async_update_listeners()  # item cards show the request's state
         cutoff = time.time() - 30 * 86400
         self.requests = {k: r for k, r in self.requests.items() if r.state in OPEN or r.created >= cutoff}
-        await self._store.async_save({"enabled": self.enabled, "bot_entry": self.bot_entry, "people": [to_dict(p) for p in self.people],
+        await self._store.async_save({"enabled": self.enabled, "bot_entry": self.bot_entry, "owner_chat": self.owner_chat,
+                                      "owner_alerts": self.owner_alerts, "people": [to_dict(p) for p in self.people],
                                       "requests": {k: to_dict(r) for k, r in self.requests.items()}})
 
     @callback
@@ -98,14 +103,53 @@ class ProxyManager:
             return {"config_entry_id": self.bot_entry}
         return {}
 
+    def _bot_entries(self) -> list[Any]:
+        entries = self.hass.config_entries.async_entries("telegram_bot")
+        if self.bot_entry and any(e.entry_id == self.bot_entry for e in entries):
+            return [e for e in entries if e.entry_id == self.bot_entry]
+        return entries
+
+    def _target(self, chat_id: str) -> dict[str, Any]:
+        """Address a chat the way Home Assistant's Telegram bot expects: newer versions want the chat's
+        notify entity (one per allowed chat); older ones take the chat id."""
+        cid = str(chat_id)
+        reg = er.async_get(self.hass)
+        for e in self._bot_entries():
+            for sid, sub in (getattr(e, "subentries", None) or {}).items():
+                if str((sub.data or {}).get("chat_id")) != cid:
+                    continue
+                for ent in er.async_entries_for_config_entry(reg, e.entry_id):
+                    if ent.domain == "notify" and getattr(ent, "config_subentry_id", None) == sid:
+                        return {"entity_id": [ent.entity_id]}
+        target = int(cid) if cid.lstrip("-").isdigit() else cid
+        return {"chat_id": [target], **self._bot()}
+
+    def _my_bot_ids(self) -> set[str]:
+        """Numeric ids of the bot(s) we talk through: the part of a bot's token before the colon."""
+        ids = set()
+        for e in self._bot_entries():
+            token = str((e.data or {}).get("api_key") or "")
+            if ":" in token:
+                ids.add(token.split(":", 1)[0])
+        return ids
+
+    def _from_my_bot(self, event: Event) -> bool:
+        """Only events that came through the chosen bot (other bots on this Home Assistant are ignored)."""
+        if not self.bot_entry:
+            return True
+        bot = event.data.get("bot") or {}
+        if isinstance(bot, dict) and bot.get("id") is not None:
+            return str(bot["id"]) in self._my_bot_ids()
+        entry = event.data.get("config_entry_id")
+        return entry is None or entry == self.bot_entry
+
     def telegram_ready(self) -> bool:
         return self.hass.services.has_service("telegram_bot", "send_message")
 
     async def _tg(self, chat_id: str, text: str, keyboard: list[str] | None = None, photo: str | None = None) -> None:
         """A message headed "🔔 Auction Watcher"; with the item's picture when there is one."""
-        target = int(chat_id) if str(chat_id).lstrip("-").isdigit() else chat_id
         body = f"{HEADER}\n\n{text}"
-        extra: dict[str, Any] = {"target": [target], **self._bot()}
+        extra: dict[str, Any] = self._target(chat_id)
         if keyboard:
             extra["inline_keyboard"] = keyboard
         if photo and photo.startswith("https://") and len(body) <= 1000:
@@ -121,6 +165,10 @@ class ProxyManager:
             _LOGGER.warning("Couldn't send the Telegram message to %s: %s", chat_id, err)
 
     def _tell_owner(self, person: Person | None, req: ProxyRequest, text: str) -> None:
+        if self.owner_chat:
+            who = person.name if person else "Someone"
+            self.hass.async_create_task(self._owner_say(f"{who} · {req.title}: {text}"))
+            return
         if (g := global_settings.get(self.hass)) is not None:
             g.send("proxy", {"auction_id": req.lot_id, "url": req.url,
                              "title_line": f"{person.name if person else 'Bidding for someone'}: {req.title}", "text": text})
@@ -280,9 +328,16 @@ class ProxyManager:
             self._tell_owner(person, req, f"{name} stopped it. " + msg)
 
     async def async_set(self, enabled: bool | None = None, add: dict[str, Any] | None = None, remove: str | None = None,
-                        bot_entry: str | None = None, change: dict[str, Any] | None = None) -> None:
+                        bot_entry: str | None = None, change: dict[str, Any] | None = None,
+                        owner_chat: str | None = None, owner_alerts: bool | None = None) -> None:
         if enabled is not None:
             self.enabled = enabled
+        if owner_chat is not None:
+            if owner_chat and not str(owner_chat).lstrip("-").isdigit():
+                raise SiteError("Your chat needs to be a numeric Telegram chat id")
+            self.owner_chat = str(owner_chat) or None
+        if owner_alerts is not None:
+            self.owner_alerts = owner_alerts
         if bot_entry is not None:
             self.bot_entry = bot_entry or None
         if add:
@@ -326,6 +381,8 @@ class ProxyManager:
                       event.data.get("chat_id"), event.data.get("user_id"), outcome)
 
     async def _on_text(self, event: Event) -> None:
+        if not self._from_my_bot(event):
+            return
         self._note_seen(event)
         what = str(event.data.get("text") or "")
         if not self.enabled:
@@ -381,6 +438,8 @@ class ProxyManager:
             await self._save()
             await self._tg(person.chat_id, reply)
             unit = f"{amount} bids" if req.site == SITE_GOVAUCTIONS else f"${amount}"
+            if await self.owner_approve(req, person.name, amount, price):
+                return
             self._tell_owner(person, req, f"wants you to bid up to {unit}" + (f" (max price ${price:.2f})" if price else "")
                              + (": place it on eBay by hand." if req.site == "ebay"
                                 else ". Open the item's card, set your max and tap \"Ask them\"."))
@@ -473,7 +532,17 @@ class ProxyManager:
             return None
 
     async def _on_callback(self, event: Event) -> None:
+        if not self._from_my_bot(event):
+            return
         data = str(event.data.get("data") or "")
+        if data.startswith("/aw_o_"):
+            if self.is_owner(event):
+                self._trace("button", event, data, "from you (owner)")
+                await self._answer(event, "Got it")
+                await self.owner_button(data)
+            else:
+                self._trace("button", event, data, "ignored: owner buttons only work in your own chat")
+            return
         if not self.enabled:
             self._trace("button", event, data, "ignored: For others is switched off")
             return
@@ -564,8 +633,14 @@ class ProxyManager:
 
     async def _on_command(self, event: Event) -> None:
         """Bot menu commands: /items (or /auctions), /stop, /help, /start."""
+        if not self._from_my_bot(event):
+            return
         self._note_seen(event)  # pressing Start counts: they show up in the person dropdown
         command = str(event.data.get("command") or "").split("@")[0].lower()
+        if self.is_owner(event):
+            self._trace("command", event, command, "from you (owner)")
+            await self.owner_command(command)
+            return
         if not self.enabled:
             self._trace("command", event, command, "ignored: For others is switched off")
             return
@@ -624,7 +699,8 @@ class ProxyManager:
     # ---------------- from the Mac.bid coordinator
     @callback
     def relay(self, site: str, kind: str, data: dict[str, Any]) -> None:
-        """Tell the person how their item is going (outbid, won, ...)."""
+        """Tell the person how their item is going (outbid, won, ...); and your own alerts with buttons."""
+        self.owner_alert(site, kind, data)
         if not self.enabled or kind not in RELAYED:
             return
         req = self.requests.get(f"{site}:{data.get('auction_id')}")
@@ -669,7 +745,7 @@ class ProxyManager:
             rows = amount_rows(req, None)
         await self._tg(person.chat_id, text, rows, photo=st.image if st is not None and kind in ("won", "ended") else None)
 
-    def chats(self) -> list[dict[str, str]]:
+    def chats(self, include_people: bool = False) -> list[dict[str, str]]:
         """Telegram chats you could add: the bot's allowed chats (Home Assistant's Telegram bot setup)
         plus chats that messaged the bot since Home Assistant started."""
         out: dict[str, dict[str, str]] = {}
@@ -682,8 +758,24 @@ class ProxyManager:
                     out[str(cid)] = {"chat_id": str(cid), "name": clean_name(sub.title) or str(cid), "source": "allowed chat"}
         for cid, name in self._seen.items():
             out.setdefault(cid, {"chat_id": cid, "name": name, "source": "messaged the bot"})
-        taken = {p.chat_id for p in self.people}
+        taken = set() if include_people else {p.chat_id for p in self.people}
         return [c for c in out.values() if c["chat_id"] not in taken]
+
+    # ---------------- tidying requests from the page
+    async def async_forget(self, site: str, lot_id: str) -> None:
+        """Remove a request record (no message is sent). A Mac.bid max already placed stays on Mac.bid."""
+        self.requests.pop(f"{site}:{lot_id}", None)
+        await self._save()
+
+    async def async_reassign(self, site: str, lot_id: str, person_id: str) -> None:
+        """Give a request to someone else on your list (e.g. its person was removed)."""
+        req = self.requests.get(f"{site}:{lot_id}")
+        person = self._person(person_id)
+        if req is None or person is None:
+            raise SiteError("Pick a request and someone from your list")
+        req.person_id = person.id
+        req.note(f"reassigned to {person.name}")
+        await self._save()
 
     def summary(self, site: str, lot_id: str) -> dict[str, Any] | None:
         req = self.requests.get(f"{site}:{lot_id}")
@@ -699,6 +791,7 @@ class ProxyManager:
 
     def view(self) -> dict[str, Any]:
         return {"enabled": self.enabled, "telegram_ready": self.telegram_ready(), "chats": self.chats(),
+                "all_chats": self.chats(include_people=True), "owner_chat": self.owner_chat, "owner_alerts": self.owner_alerts,
                 "bots": self.bots(), "bot_entry": self.bot_entry,
                 "people": [to_dict(p) for p in self.people],
                 "requests": [{**to_dict(r), "person": (self._person(r.person_id) or Person("?", "")).name}
@@ -722,7 +815,9 @@ def ws_view(hass: HomeAssistant, connection: Any, msg: dict[str, Any]) -> None:
 
 @websocket_api.websocket_command({
     vol.Required("type"): "auction_watcher/proxy/change",
-    vol.Required("action"): vol.In(["set", "ask", "cancel"]),
+    vol.Required("action"): vol.In(["set", "ask", "cancel", "forget", "reassign"]),
+    vol.Optional("owner_chat"): vol.Coerce(str),
+    vol.Optional("owner_alerts"): bool,
     vol.Optional("enabled"): bool,
     vol.Optional("bot_entry"): str,
     vol.Optional("add"): {vol.Required("name"): str, vol.Required("chat_id"): vol.Coerce(str)},
@@ -743,9 +838,14 @@ async def ws_change(hass: HomeAssistant, connection: Any, msg: dict[str, Any]) -
         return
     try:
         if msg["action"] == "set":
-            await p.async_set(msg.get("enabled"), msg.get("add"), msg.get("remove"), msg.get("bot_entry"), msg.get("change"))
+            await p.async_set(msg.get("enabled"), msg.get("add"), msg.get("remove"), msg.get("bot_entry"), msg.get("change"),
+                              msg.get("owner_chat"), msg.get("owner_alerts"))
         elif msg["action"] == "ask":
             await p.async_ask(msg["site"], msg.get("lot_id", ""), msg.get("person_id", ""), int(msg.get("hard_max") or 0), msg["mode"])
+        elif msg["action"] == "forget":
+            await p.async_forget(msg["site"], msg.get("lot_id", ""))
+        elif msg["action"] == "reassign":
+            await p.async_reassign(msg["site"], msg.get("lot_id", ""), msg.get("person_id", ""))
         else:
             await p.async_cancel(msg["site"], msg.get("lot_id", ""))
     except (SiteError, AuthError) as err:

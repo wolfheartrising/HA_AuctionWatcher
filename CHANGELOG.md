@@ -6,6 +6,16 @@ The section for a version becomes its release notes, so HACS shows them under "U
 After updating: restart Home Assistant if Python changed, then reload the Auctions page (it offers a Reload button
 when it's older than the plugin).
 
+## 1.6.0
+- **Telegram fixed:** replies now go to each chat's notify entity, which newer Home Assistant requires ("Please specify
+  at least 1 notify entity"), so commands and buttons finally answer.
+- **Locked to your chosen bot:** messages from other Telegram bots on the same Home Assistant are ignored.
+- **The bot for you:** set your own chat under Settings → For others. Then /status, /active (quick bid and Stop per
+  item), /pause, /resume, /help; your outbid / few-bidders / good-pack alerts with buttons; and "X wants you to bid"
+  requests with Allow buttons. Anything that spends asks you to confirm.
+- Requests: **Forget** (remove a record) and **Reassign** (when its person was removed); the card no longer shows a
+  wish on closed requests or defaults to a person who's gone.
+
 ## 1.5.8
 - For others: with debug logging on, every Telegram message, button tap and command is logged with what happened to it
   (or why it was ignored), to track down buttons/commands that seem to do nothing. People are also recognised by their
