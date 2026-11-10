@@ -1,0 +1,11 @@
+# Never commit logins
+*cookie*.txt
+*cookies*.txt
+*_curl.txt
+secrets.yaml
+.env
+
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/

@@ -1,0 +1,18 @@
+set_bid_limit:
+  fields:
+    auction_id:
+      required: true
+      example: "17782125"
+      selector:
+        text:
+    limit:
+      required: true
+      example: 1000
+      selector:
+        number:
+          min: 0
+          max: 100000
+          mode: box
+          unit_of_measurement: bids
+
+refresh:

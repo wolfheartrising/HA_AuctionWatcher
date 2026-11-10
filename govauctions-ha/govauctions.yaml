@@ -1,0 +1,320 @@
+# GovAuctions "safety bids" package for Home Assistant OS
+# --------------------------------------------------------
+# Goal: one tap (or voice command) books N bids on the auction you're
+# watching, so you stay in it while you get logged in.
+#
+# Put this file at:  /config/packages/govauctions.yaml
+# Then follow SETUP.md.
+#
+# Two things to change in this file:
+#   1. notify.mobile_app_YOUR_PHONE   (search for it, one place only)
+#   2. The rest_command url/payload    (after capturing the real request)
+
+# ---------- Controls you'll see on the dashboard ----------
+
+input_text:
+  govauctions_auction:
+    name: GovAuctions auction (paste URL or ID)
+    max: 255
+    icon: mdi:gavel
+
+input_boolean:
+  govauctions_armed:
+    name: GovAuctions safety bids armed
+    icon: mdi:shield-check
+
+input_number:
+  govauctions_bids_per_tap:
+    name: Safety bids per tap
+    min: 1
+    max: 25          # hard ceiling, a single tap can never book more than this
+    step: 1
+    initial: 10
+    mode: box
+    icon: mdi:numeric
+  govauctions_daily_cap:
+    name: Daily safety-bid limit
+    min: 0
+    max: 300
+    step: 5
+    initial: 50
+    mode: box
+    icon: mdi:cash-lock
+  govauctions_cooldown_min:
+    name: Minutes between bookings
+    min: 1
+    max: 30
+    step: 1
+    initial: 3
+    mode: box
+    icon: mdi:timer-sand
+
+input_datetime:
+  govauctions_last_booking:
+    name: Last safety-bid booking
+    has_date: true
+    has_time: true
+
+counter:
+  govauctions_bids_today:
+    name: Safety bids booked today
+    initial: 0
+    step: 1
+    restore: true
+    icon: mdi:counter
+
+# ---------- The one request sent to GovAuctions ----------
+
+rest_command:
+  govauctions_book_bids:
+    # >>> PLACEHOLDER: replace url + payload with the real request
+    # >>> captured in SETUP.md step 4. Until then it will just fail safely.
+    url: "https://www.govauctions.com/REPLACE_WITH_REAL_PATH/{{ auction_id }}"
+    method: post
+    content_type: "application/json"
+    headers:
+      Cookie: !secret govauctions_cookie
+      # X-CSRF-Token: !secret govauctions_csrf   # only if the captured request has one
+    payload: '{"auctionId": {{ auction_id }}, "count": {{ bid_count }}}'
+    timeout: 10
+
+# ---------- Scripts ----------
+
+script:
+  # Single place that decides which phone gets notifications.
+  govauctions_notify:
+    alias: GovAuctions - send phone notification
+    mode: queued
+    fields:
+      title:
+        description: Notification title
+      message:
+        description: Notification text
+      extra:
+        description: Optional extra notification data (buttons, links)
+    sequence:
+      - action: notify.mobile_app_YOUR_PHONE   # <<< CHANGE THIS (see SETUP.md step 3)
+        data:
+          title: "{{ title }}"
+          message: "{{ message }}"
+          data: "{{ extra if extra is defined else {} }}"
+
+  # The safety button itself. Every safety check lives here, so it doesn't
+  # matter whether it's triggered by phone, voice or dashboard.
+  govauctions_safety_bids:
+    alias: GovAuctions - book safety bids
+    icon: mdi:shield-plus
+    mode: single            # a double-tap can't fire it twice
+    max_exceeded: silent
+    fields:
+      count:
+        description: Optional override for how many bids to book (still capped at 25)
+        example: 10
+      auction:
+        description: Optional auction ID (from an alert button). Must be one of your live auctions or the pasted one.
+        example: 17782125
+    sequence:
+      - variables:
+          pasted: >-
+            {% set m = states('input_text.govauctions_auction') | regex_findall('\d{5,}') %}
+            {{ m[0] if m else 'none' }}
+          auction_id: >-
+            {% set m = (auction | string) | regex_findall('\d{5,}') if auction is defined else [] %}
+            {{ m[0] if m else pasted }}
+          allowed_ids: >-
+            {{ ((state_attr('sensor.govauctions_my_live_auctions', 'data') or []) | map('string') | list) + [pasted | string] }}
+          per_tap: "{{ states('input_number.govauctions_bids_per_tap') | int(0) }}"
+          requested: "{{ (count if count is defined else per_tap) | int(0) }}"
+          bid_count: "{{ [requested, 25] | min }}"
+          used: "{{ states('counter.govauctions_bids_today') | int(0) }}"
+          cap: "{{ states('input_number.govauctions_daily_cap') | int(0) }}"
+          last_ts: "{{ state_attr('input_datetime.govauctions_last_booking', 'timestamp') | float(0) }}"
+          cooldown_s: "{{ states('input_number.govauctions_cooldown_min') | float(3) * 60 }}"
+          wait_s: "{{ (cooldown_s - (now().timestamp() - last_ts)) | round(0) | int }}"
+
+      # Safety check 1: must be armed
+      - if:
+          - "{{ not is_state('input_boolean.govauctions_armed', 'on') }}"
+        then:
+          - action: script.govauctions_notify
+            data:
+              title: "Safety bids NOT booked"
+              message: "Safety bids are disarmed. Turn on 'GovAuctions safety bids armed' first."
+          - stop: Disarmed
+
+      # Safety check 2: must know which auction
+      - if:
+          - "{{ auction_id == 'none' }}"
+        then:
+          - action: script.govauctions_notify
+            data:
+              title: "Safety bids NOT booked"
+              message: "No auction set. Paste the auction URL into 'GovAuctions auction'."
+          - stop: No auction
+
+      # Safety check 2b: only auctions you're already in, or the pasted one
+      - if:
+          - "{{ (auction_id | string) not in allowed_ids }}"
+        then:
+          - action: script.govauctions_notify
+            data:
+              title: "Safety bids NOT booked"
+              message: "Auction {{ auction_id }} isn't one of your live auctions or the pasted one."
+          - stop: Auction not allowed
+
+      # Safety check 3: sane amount
+      - if:
+          - "{{ bid_count < 1 }}"
+        then:
+          - stop: Zero bids requested
+
+      # Safety check 4: daily limit
+      - if:
+          - "{{ used + bid_count > cap }}"
+        then:
+          - action: script.govauctions_notify
+            data:
+              title: "Safety bids NOT booked"
+              message: >-
+                That would go over your daily limit ({{ used }} of {{ cap }} used,
+                {{ bid_count }} requested). Raise the limit on the dashboard if you mean it.
+          - stop: Over daily cap
+
+      # Safety check 5: cooldown between bookings
+      - if:
+          - "{{ wait_s > 0 }}"
+        then:
+          - action: script.govauctions_notify
+            data:
+              title: "Safety bids NOT booked"
+              message: "Cooldown active. Try again in {{ wait_s }} seconds."
+          - stop: Cooldown
+
+      # All checks passed: send the one booking request
+      - action: rest_command.govauctions_book_bids
+        data:
+          auction_id: "{{ auction_id }}"
+          bid_count: "{{ bid_count }}"
+        response_variable: resp
+        continue_on_error: true
+
+      # NOTE: once we see the real response, this check can be tightened
+      # (e.g. look for "success": true in resp.content), because some sites
+      # answer 200 even when you're logged out.
+      - if:
+          - "{{ resp is defined and resp.status is defined and 200 <= (resp.status | int(0)) < 300 }}"
+        then:
+          - action: counter.set_value
+            target:
+              entity_id: counter.govauctions_bids_today
+            data:
+              value: "{{ used + bid_count }}"
+          - action: input_datetime.set_datetime
+            target:
+              entity_id: input_datetime.govauctions_last_booking
+            data:
+              timestamp: "{{ now().timestamp() }}"
+          - action: script.govauctions_notify
+            data:
+              title: "Booked {{ bid_count }} safety bids"
+              message: >-
+                Auction {{ auction_id }}. Today: {{ used + bid_count }} of {{ cap }}.
+                Tap to open the auction and take over.
+              extra:
+                url: "https://www.govauctions.com/auction/{{ auction_id }}"
+                clickAction: "https://www.govauctions.com/auction/{{ auction_id }}"
+                tag: govauctions-result
+        else:
+          - action: script.govauctions_notify
+            data:
+              title: "Safety bids FAILED"
+              message: >-
+                GovAuctions didn't accept the booking
+                (status {{ resp.status if resp is defined and resp.status is defined else 'no response' }}).
+                Your login cookie may have expired. Book manually on the site.
+              extra:
+                url: "https://www.govauctions.com/auction/{{ auction_id }}"
+                clickAction: "https://www.govauctions.com/auction/{{ auction_id }}"
+                tag: govauctions-result
+
+  # Puts a "Book safety bids" button in your phone's notification shade.
+  govauctions_send_button:
+    alias: GovAuctions - send me the Book button
+    icon: mdi:cellphone-arrow-down
+    sequence:
+      - action: script.govauctions_notify
+        data:
+          title: "GovAuctions safety button"
+          message: >-
+            Tap below to book {{ states('input_number.govauctions_bids_per_tap') | int }}
+            bids on auction {{ states('input_text.govauctions_auction') }}.
+          extra:
+            tag: govauctions-button
+            actions:
+              - action: GOVAUCTIONS_BOOK
+                title: "Book safety bids"
+
+# ---------- Automations ----------
+
+automation:
+  - id: govauctions_notification_button
+    alias: GovAuctions - notification button books safety bids
+    mode: queued
+    triggers:
+      - trigger: event
+        event_type: mobile_app_notification_action
+    conditions:
+      - "{{ (trigger.event.data.action | default('')).startswith('GOVAUCTIONS_BOOK') }}"
+    actions:
+      # GOVAUCTIONS_BOOK_17782125 -> books on 17782125; plain GOVAUCTIONS_BOOK -> pasted auction
+      - variables:
+          from_button: "{{ trigger.event.data.action | regex_findall('\\d{5,}') }}"
+      - if:
+          - "{{ from_button | count > 0 }}"
+        then:
+          - action: script.govauctions_safety_bids
+            data:
+              auction: "{{ from_button[0] }}"
+        else:
+          - action: script.govauctions_safety_bids
+
+  - id: govauctions_voice_command
+    alias: GovAuctions - voice command books safety bids
+    triggers:
+      - trigger: conversation
+        command:
+          - "book [my] safety bids"
+          - "save my auction"
+    actions:
+      - action: script.turn_on
+        target:
+          entity_id: script.govauctions_safety_bids
+      - set_conversation_response: "Booking safety bids. Check your phone."
+
+  - id: govauctions_midnight_reset
+    alias: GovAuctions - reset daily safety-bid count
+    triggers:
+      - trigger: time
+        at: "00:00:00"
+    actions:
+      - action: counter.reset
+        target:
+          entity_id: counter.govauctions_bids_today
+
+  # Forgetting to disarm can't leave it live for days.
+  - id: govauctions_auto_disarm
+    alias: GovAuctions - auto-disarm after 3 hours
+    triggers:
+      - trigger: state
+        entity_id: input_boolean.govauctions_armed
+        to: "on"
+        for:
+          hours: 3
+    actions:
+      - action: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.govauctions_armed
+      - action: script.govauctions_notify
+        data:
+          title: "GovAuctions safety bids disarmed"
+          message: "Auto-disarmed after 3 hours."

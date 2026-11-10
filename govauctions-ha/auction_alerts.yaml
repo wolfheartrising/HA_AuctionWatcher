@@ -1,0 +1,94 @@
+# Auction alerts package (GovAuctions + Mac.bid) for Home Assistant OS
+# ----------------------------------------------------------------------
+# Turns the sites' own alert emails into phone notifications.
+# Works with the built-in IMAP integration (SETUP.md step 6), so it needs
+# no login cookies and can't get your auction accounts flagged.
+#
+# Put this file at:  /config/packages/auction_alerts.yaml
+# It reuses script.govauctions_notify from govauctions.yaml.
+#
+# GovAuctions "outbid / running low" emails get a "Book safety bids"
+# button right on the notification.
+
+input_boolean:
+  auction_alerts_enabled:
+    name: Auction email alerts
+    icon: mdi:bell-ring
+
+automation:
+  - id: auction_alerts_from_email
+    alias: Auction alerts - phone push from GovAuctions / Mac.bid emails
+    mode: queued
+    triggers:
+      - trigger: event
+        event_type: imap_content
+    conditions:
+      - condition: state
+        entity_id: input_boolean.auction_alerts_enabled
+        state: "on"
+      # Only brand-new emails, only from the two auction sites
+      - "{{ trigger.event.data.initial | default(true) }}"
+      - >-
+        {{ 'govauctions' in (trigger.event.data.sender | lower)
+           or 'mac.bid' in (trigger.event.data.sender | lower)
+           or 'macdiscount' in (trigger.event.data.sender | lower) }}
+    actions:
+      - variables:
+          sender: "{{ trigger.event.data.sender | lower }}"
+          subject: "{{ trigger.event.data.subject | default('') }}"
+          s: "{{ subject | lower }}"
+          site: "{{ 'GovAuctions' if 'govauctions' in sender else 'Mac.bid' }}"
+          # Pulls an auction number out of the email body if there is one
+          auction_id: >-
+            {% set m = (trigger.event.data.text | default('')) | regex_findall('govauctions\.com/auction/(\d{5,})') %}
+            {{ m[0] if m else '' }}
+          kind: >-
+            {% if 'outbid' in s or 'running low' in s or 'out of bids' in s or 'low on' in s %}urgent
+            {% elif 'won' in s or 'winner' in s or 'congrat' in s %}won
+            {% elif 'ending' in s or 'closing' in s or 'ends' in s or 'last chance' in s %}ending
+            {% elif 'starting' in s or 'starts' in s or 'live' in s %}starting
+            {% else %}other{% endif %}
+      # Skip marketing/newsletter emails
+      - condition: template
+        value_template: "{{ kind != 'other' }}"
+      - choose:
+          # GovAuctions urgent: offer the safety button
+          - conditions:
+              - "{{ site == 'GovAuctions' and kind == 'urgent' }}"
+            sequence:
+              # If the email named the auction, point the safety button at it
+              - if:
+                  - "{{ auction_id != '' }}"
+                then:
+                  - action: input_text.set_value
+                    target:
+                      entity_id: input_text.govauctions_auction
+                    data:
+                      value: "{{ auction_id }}"
+              - action: script.govauctions_notify
+                data:
+                  title: "GovAuctions: {{ subject }}"
+                  message: >-
+                    Auction {{ auction_id if auction_id else states('input_text.govauctions_auction') }}.
+                    Tap the button to book safety bids, or open the site.
+                  extra:
+                    tag: govauctions-button
+                    priority: high
+                    ttl: 0
+                    actions:
+                      - action: GOVAUCTIONS_BOOK
+                        title: "Book safety bids"
+                      - action: URI
+                        title: "Open auction"
+                        uri: >-
+                          https://www.govauctions.com/auction/{{ auction_id if auction_id else (states('input_text.govauctions_auction') | regex_findall('\d{5,}') | first | default('')) }}
+        default:
+          - action: script.govauctions_notify
+            data:
+              title: >-
+                {{ site }}{{ ' WON' if kind == 'won' else (' ending soon' if kind == 'ending' else (' starting' if kind == 'starting' else '')) }}
+              message: "{{ subject }}"
+              extra:
+                tag: "{{ site | lower }}-{{ kind }}"
+                url: "{{ 'https://www.govauctions.com' if site == 'GovAuctions' else 'https://www.mac.bid' }}"
+                clickAction: "{{ 'https://www.govauctions.com' if site == 'GovAuctions' else 'https://www.mac.bid' }}"

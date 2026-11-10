@@ -1,0 +1,94 @@
+blueprint:
+  name: Auction Watcher alerts
+  description: >-
+    Phone notifications from Auction Watcher: an auction is down to a few
+    bidders, you hit your bid limit, an auction ended, or you won.
+  domain: automation
+  source_url: https://github.com/wolfheartrising/HA_AuctionWatcher/blob/main/blueprints/automation/auction_watcher/alerts.yaml
+  input:
+    notify_device:
+      name: Phone
+      description: Phone with the Home Assistant app
+      selector:
+        device:
+          filter:
+            - integration: mobile_app
+    send_opportunity:
+      name: Few bidders left
+      default: true
+      selector:
+        boolean:
+    send_limit:
+      name: Bid limit reached
+      default: true
+      selector:
+        boolean:
+    send_ended:
+      name: Auction ended
+      default: true
+      selector:
+        boolean:
+    send_won:
+      name: Auction won
+      default: true
+      selector:
+        boolean:
+
+mode: queued
+max: 20
+
+trigger_variables:
+  t_opportunity: !input send_opportunity
+  t_limit: !input send_limit
+  t_ended: !input send_ended
+  t_won: !input send_won
+
+triggers:
+  - trigger: event
+    event_type: auction_watcher_opportunity
+    id: opportunity
+  - trigger: event
+    event_type: auction_watcher_bid_limit_reached
+    id: limit
+  - trigger: event
+    event_type: auction_watcher_auction_ended
+    id: ended
+  - trigger: event
+    event_type: auction_watcher_auction_won
+    id: won
+
+conditions:
+  - condition: template
+    value_template: >-
+      {{ {'opportunity': t_opportunity, 'limit': t_limit, 'ended': t_ended, 'won': t_won}[trigger.id] }}
+
+variables:
+  e: "{{ trigger.event.data }}"
+  title: >-
+    {% set name = e.title | default('Auction ' ~ e.auction_id) %}
+    {% if trigger.id == 'opportunity' %}{{ e.active_bidders }} bidder{{ '' if e.active_bidders == 1 else 's' }} left: {{ name }}
+    {% elif trigger.id == 'limit' %}Bid limit reached: {{ name }}
+    {% elif trigger.id == 'ended' %}Ended: {{ name }}
+    {% else %}You won: {{ name }}{% endif %}
+  message: >-
+    {% if trigger.id == 'opportunity' %}${{ '%.2f' | format(e.price | float(0)) }}. Last minute: {{ e.recent_bidders | join(', ') }}.
+    You've used {{ e.your_bids }} bids (${{ '%.2f' | format(e.your_points_cost | float(0)) }}){% if e.bid_limit %} of your {{ e.bid_limit }} limit{% endif %}.
+    {% if e.median_winner_bids %}Past winners typically used {{ e.median_winner_bids }} bids.{% endif %}
+    {% elif trigger.id == 'limit' %}You've used {{ e.your_bids }} bids (${{ '%.2f' | format(e.your_points_cost | float(0)) }}), your limit is {{ e.bid_limit }}.
+    {% if e.your_booked_left %}You still have {{ e.your_booked_left }} booked bids running: cancel them on the site if you want to stop.{% endif %}
+    {% elif trigger.id == 'ended' %}Final ${{ '%.2f' | format(e.price | float(0)) }}, leader {{ e.leader }}. You used {{ e.your_bids }} bids.
+    {% if e.buy_it_now %}Buy It Now ${{ e.buy_it_now }} returns your points, for a limited time.{% endif %}
+    {% else %}Check the site to pay or exchange.{% endif %}
+
+actions:
+  - device_id: !input notify_device
+    domain: mobile_app
+    type: notify
+    title: "{{ title }}"
+    message: "{{ message }}"
+    data:
+      tag: "auction-{{ e.auction_id }}"
+      url: "{{ e.url | default('') }}"
+      clickAction: "{{ e.url | default('') }}"
+      priority: high
+      ttl: 0

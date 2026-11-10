@@ -1,0 +1,235 @@
+# GovAuctions live alerts: watches ALL your live auctions
+# --------------------------------------------------------
+# 1. Every 60 s: reads your "My Auctions - Live" list (same as the My Bids page).
+# 2. Every 10 s: reads the live feed for all of them (plus the one pasted into
+#    "GovAuctions auction", if any) in ONE request.
+# 3. Pushes when an auction is down to <= N active bidders under your max price,
+#    with a "Book safety bids" button for THAT auction.
+#
+# Put this file at:  /config/packages/govauctions_live.yaml
+# Needs govauctions.yaml (notify script, safety-bid script, auction box)
+# and the govauctions_cookie secret (your login lasts about a year).
+#
+# Feed fields, worked out from real responses:
+#   i = auction id, r = price, w = leader, t = clock (seconds),
+#   s = 1 while live, noNewBidders = closed to people who haven't bid,
+#   bb = your booked bids {a: booked, c: left}, x = looks like bids you've spent
+#   there (it matched the "Get 707 points back" on the steak page),
+#   p.bc = your bid credits, history = last 9 bids [price, unix time, user, ...]
+
+input_number:
+  govauctions_alert_max_bidders:
+    name: Alert when active bidders are at most
+    min: 1
+    max: 9
+    step: 1
+    initial: 2
+    mode: box
+    icon: mdi:account-multiple
+  govauctions_alert_max_price:
+    name: Alert only while price is under ($)
+    min: 0
+    max: 2000
+    step: 1
+    initial: 100
+    mode: box
+    icon: mdi:currency-usd
+  govauctions_low_credits:
+    name: Warn when bid credits drop below
+    min: 0
+    max: 1000
+    step: 5
+    initial: 50
+    mode: box
+    icon: mdi:battery-low
+
+input_boolean:
+  govauctions_live_alerts:
+    name: GovAuctions live alerts
+    icon: mdi:radar
+
+rest:
+  # Which auctions you're in right now
+  - resource: https://www.govauctions.com/api/v1/auctionFeed/my-auctions/live
+    method: GET
+    scan_interval: 60
+    timeout: 10
+    headers: &ga_headers
+      Cookie: !secret govauctions_cookie
+      Accept: "application/json, text/plain, */*"
+      X-Requested-With: XMLHttpRequest
+      Referer: "https://www.govauctions.com/my-bids"
+      User-Agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:159.0) Gecko/20100101 Firefox/159.0"
+    sensor:
+      - name: GovAuctions my live auctions
+        unique_id: govauctions_my_live_auctions
+        icon: mdi:format-list-bulleted
+        unit_of_measurement: auctions
+        value_template: "{{ value_json.feed[0].data | default([]) | count }}"
+        json_attributes_path: "$.feed[0]"
+        json_attributes:
+          - data
+
+  # Live state of all of them, one request
+  - resource_template: >-
+      {% set ids = (state_attr('sensor.govauctions_my_live_auctions', 'data') or []) | map('string') | list %}
+      {% set m = states('input_text.govauctions_auction') | regex_findall('\d{5,}') %}
+      {% if m and m[0] not in ids %}{% set ids = ids + [m[0]] %}{% endif %}
+      {% set q = ids | join(',') if ids else '0' %}
+      https://www.govauctions.com/gonzales.php?idlist={{ q }}&auctionDetailsIds={{ q }}
+    method: GET
+    # Every 10 s. The feed keeps the last 9 bids (~45 s at one bid per 5 s),
+    # so nothing is missed. 5 also works; the site's own page polls every 1 s.
+    scan_interval: 10
+    timeout: 8
+    headers: *ga_headers
+    sensor:
+      # Holds the raw feed in its attributes (exclude it from the recorder, SETUP step 7)
+      - name: GovAuctions feed
+        unique_id: govauctions_feed
+        icon: mdi:access-point
+        unit_of_measurement: auctions
+        availability: "{{ value_json is defined and value_json.p is defined }}"
+        value_template: "{{ value_json.auctions | default([]) | count }}"
+        json_attributes:
+          - auctions
+          - auctionsDetails
+          - p
+
+template:
+  - sensor:
+      # One row per auction, worked out from the raw feed
+      - name: GovAuctions watch
+        unique_id: govauctions_watch
+        icon: mdi:binoculars
+        availability: "{{ has_value('sensor.govauctions_feed') }}"
+        state: "{{ (state_attr('sensor.govauctions_feed', 'auctions') or []) | selectattr('s', 'eq', 1) | list | count }}"
+        attributes:
+          details: >-
+            {% set feed = state_attr('sensor.govauctions_feed', 'auctions') or [] %}
+            {% set det = state_attr('sensor.govauctions_feed', 'auctionsDetails') or [] %}
+            {% set cutoff = now().timestamp() - 60 %}
+            {% set ns = namespace(rows=[]) %}
+            {% for a in feed %}
+              {% set d = det | selectattr('auctionId', 'eq', a.i) | list %}
+              {% set h = d[0].history if d and d[0].history is defined else [] %}
+              {% set u = namespace(n=[]) %}
+              {% for b in h %}
+                {% if (b[1] | float(0)) > cutoff and b[2] not in u.n %}
+                  {% set u.n = u.n + [b[2]] %}
+                {% endif %}
+              {% endfor %}
+              {% set ns.rows = ns.rows + [dict(
+                   id=a.i,
+                   live=(a.s == 1),
+                   price=(a.r | float(0)),
+                   leader=a.w,
+                   secs=(a.t | int(0)),
+                   active=(u.n | count),
+                   bidders=u.n,
+                   closed=(a.noNewBidders == true),
+                   booked_left=(a.bb.c if a.bb else 0),
+                   spent=(a.x | int(0))
+                 )] %}
+            {% endfor %}
+            {{ ns.rows }}
+
+      # Auctions that meet your rule right now
+      - name: GovAuctions opportunities
+        unique_id: govauctions_opportunities
+        icon: mdi:target
+        availability: "{{ has_value('sensor.govauctions_watch') }}"
+        state: >-
+          {{ (state_attr('sensor.govauctions_watch', 'details') or [])
+             | selectattr('live') | selectattr('active', 'ge', 1)
+             | selectattr('active', 'le', states('input_number.govauctions_alert_max_bidders') | int(2))
+             | selectattr('price', 'lt', states('input_number.govauctions_alert_max_price') | float(0))
+             | list | count }}
+        attributes:
+          match_ids: >-
+            {{ (state_attr('sensor.govauctions_watch', 'details') or [])
+               | selectattr('live') | selectattr('active', 'ge', 1)
+               | selectattr('active', 'le', states('input_number.govauctions_alert_max_bidders') | int(2))
+               | selectattr('price', 'lt', states('input_number.govauctions_alert_max_price') | float(0))
+               | map(attribute='id') | list }}
+
+      - name: GovAuctions bid credits
+        unique_id: govauctions_bid_credits
+        icon: mdi:wallet
+        unit_of_measurement: bids
+        availability: "{{ (state_attr('sensor.govauctions_feed', 'p') or {}).bc is defined }}"
+        state: "{{ state_attr('sensor.govauctions_feed', 'p').bc | int(0) }}"
+
+automation:
+  # Alert once when an auction NEWLY meets your rule (no repeat every 15 s)
+  - id: govauctions_live_opportunity
+    alias: GovAuctions - alert when an auction is down to few bidders
+    mode: queued
+    triggers:
+      - trigger: state
+        entity_id: sensor.govauctions_opportunities
+        attribute: match_ids
+    conditions:
+      - condition: state
+        entity_id: input_boolean.govauctions_live_alerts
+        state: "on"
+    actions:
+      - variables:
+          old_ids: "{{ (trigger.from_state.attributes.match_ids if trigger.from_state and trigger.from_state.attributes.match_ids is defined else []) }}"
+          new_ids: "{{ (trigger.to_state.attributes.match_ids or []) | reject('in', old_ids) | list }}"
+      - repeat:
+          for_each: "{{ new_ids }}"
+          sequence:
+            - variables:
+                a: >-
+                  {{ (state_attr('sensor.govauctions_watch', 'details') or [])
+                     | selectattr('id', 'eq', repeat.item) | first | default({}) }}
+            - action: script.govauctions_notify
+              data:
+                title: >-
+                  GovAuctions {{ repeat.item }}: {{ a.active }} bidder{{ '' if a.active == 1 else 's' }} at ${{ '%.2f' | format(a.price | float(0)) }}
+                message: >-
+                  Last minute: {{ a.bidders | join(', ') }}. Leader: {{ a.leader }}.
+                  Your booked bids left: {{ a.booked_left }}. Bids you've put in: {{ a.spent }}.
+                extra:
+                  tag: "govauctions-{{ repeat.item }}"
+                  alert_once: true
+                  priority: high
+                  ttl: 0
+                  actions:
+                    - action: "GOVAUCTIONS_BOOK_{{ repeat.item }}"
+                      title: "Book safety bids"
+                    - action: URI
+                      title: "Open auction"
+                      uri: "https://www.govauctions.com/auction/{{ repeat.item }}"
+
+  - id: govauctions_live_low_credits
+    alias: GovAuctions - low bid credits warning
+    triggers:
+      - trigger: numeric_state
+        entity_id: sensor.govauctions_bid_credits
+        below: input_number.govauctions_low_credits
+    actions:
+      - action: script.govauctions_notify
+        data:
+          title: "GovAuctions: bid credits low"
+          message: "You have {{ states('sensor.govauctions_bid_credits') }} bids left."
+
+  # If the feed stops for 10 minutes, the login cookie probably expired.
+  - id: govauctions_live_feed_down
+    alias: GovAuctions - live feed stopped
+    triggers:
+      - trigger: state
+        entity_id: sensor.govauctions_feed
+        to: unavailable
+        for:
+          minutes: 10
+    conditions:
+      - condition: state
+        entity_id: input_boolean.govauctions_live_alerts
+        state: "on"
+    actions:
+      - action: script.govauctions_notify
+        data:
+          title: "GovAuctions live feed stopped"
+          message: "No data for 10 minutes. Your login cookie may have expired; export a fresh one."

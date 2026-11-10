@@ -1,0 +1,57 @@
+# Auction Watcher dashboard
+# Settings -> Dashboards -> + Add dashboard -> "New dashboard from scratch",
+# open it -> pencil -> three dots -> Raw configuration editor -> paste this whole file.
+# Each view is a tab: Active, Watching, GovAuctions.
+
+title: Auctions
+views:
+  - title: Active
+    path: active
+    icon: mdi:gavel
+    cards:
+      - type: markdown
+        content: |
+          {% set pts = 'sensor.auction_watcher_govauctions_points_balance' -%}
+          **Points:** {{ states(pts) }} · checking every {{ state_attr(pts, 'poll_every_seconds') }} s ({{ state_attr(pts, 'polling_mode') }})
+
+          | | Item | Price | Clock | Bidders | Your bids | If won now | Past winners used |
+          |---|---|---|---|---|---|---|---|
+          {% for e in integration_entities('auction_watcher') | select('match', 'sensor\.') | sort if is_state_attr(e, 'auction_watcher', true) and state_attr(e, 'category') == 'bidding' and state_attr(e, 'status') in ['live', 'upcoming'] -%}
+          {%- set a = states[e].attributes -%}
+          | {{ '🎯' if a.opportunity else ('⛔' if a.bid_limit_reached else '') }} | [{{ a.title[:38] }}]({{ a.url }}) | ${{ states(e) }} | {% if a.status == 'upcoming' %}in {{ ((as_timestamp(a.starts_at) - as_timestamp(now())) / 60) | round(0) | int }} min{% else %}{{ a.clock_seconds }}s{% endif %} | {{ a.active_bidders }}{{ '+' if (a.active_bidders or 0) >= 9 else '' }} | {{ a.your_bids }}{{ ' / ' ~ a.bid_limit if a.bid_limit else '' }} (${{ '%.2f' | format(a.your_points_cost) }}){{ ', ' ~ a.your_booked_left ~ ' booked' if a.your_booked_left else '' }} | ${{ '%.2f' | format(a.cost_if_won_now or 0) }} | {{ a.history_median_winner_bids ~ ' bids (median)' if a.history_median_winner_bids else '' }} |
+          {% endfor %}
+
+          🎯 few bidders left · ⛔ your bid limit reached · clock is as of the last check
+
+  - title: Watching
+    path: watching
+    icon: mdi:eye
+    cards:
+      - type: markdown
+        content: |
+          | Item | Status | Price | Bidders | Entry limit | Buy It Now | Past wins (median price, median bids) |
+          |---|---|---|---|---|---|---|
+          {% for e in integration_entities('auction_watcher') | select('match', 'sensor\.') | sort if is_state_attr(e, 'auction_watcher', true) and state_attr(e, 'category') == 'watching' -%}
+          {%- set a = states[e].attributes -%}
+          | [{{ a.title[:38] }}]({{ a.url }}) | {{ a.status }}{% if a.status == 'upcoming' %} in {{ ((as_timestamp(a.starts_at) - as_timestamp(now())) / 60) | round(0) | int }} min{% endif %} | ${{ states(e) }} | {{ a.active_bidders }} | {{ '$%.0f' | format(a.no_jumper_limit) if a.no_jumper_limit else '' }} | ${{ a.buy_it_now }} | {% if a.history_wins %}{{ a.history_wins }} wins: ${{ a.history_median_final_price }}, {{ a.history_median_winner_bids }} bids{% endif %} |
+          {% endfor %}
+
+  - title: GovAuctions
+    path: govauctions
+    icon: mdi:bank
+    cards:
+      - type: entities
+        title: Account
+        entities:
+          - sensor.auction_watcher_govauctions_points_balance
+          - sensor.auction_watcher_govauctions_live_auctions_followed
+          - sensor.auction_watcher_govauctions_opportunities
+      - type: markdown
+        title: Everything followed on GovAuctions
+        content: |
+          | Item | Status | Labels | Entry limit | Your bids | Booked left | Bid limit |
+          |---|---|---|---|---|---|---|
+          {% for e in integration_entities('auction_watcher') | select('match', 'sensor\.') | sort if is_state_attr(e, 'auction_watcher', true) and state_attr(e, 'site') == 'govauctions' -%}
+          {%- set a = states[e].attributes -%}
+          | [{{ a.title[:38] }}]({{ a.url }}) | {{ a.status }} | {{ a.labels | join(', ') }} | {{ '$%.0f' | format(a.no_jumper_limit) if a.no_jumper_limit else '' }} | {{ a.your_bids }} | {{ a.your_booked_left }} | {{ a.bid_limit or '' }} |
+          {% endfor %}

@@ -1,0 +1,69 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Add an auction site",
+        "description": "Log in to the site in your browser, then either upload the cookies.txt file a cookie-export extension saves, or paste the Cookie header from the browser's Network tab. GovAuctions logins last about a year and renew themselves.",
+        "data": {
+          "site": "Site",
+          "cookie_file": "Cookie file (cookies.txt)",
+          "cookie": "…or paste cookies"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Log in to {site} again",
+        "description": "{site} no longer accepts the saved login. Log in in your browser, then upload a fresh cookies.txt or paste the cookies.",
+        "data": {
+          "cookie_file": "Cookie file (cookies.txt)",
+          "cookie": "…or paste cookies"
+        }
+      }
+    },
+    "error": {
+      "no_cookies": "No cookies for this site were found in the file or text you gave.",
+      "invalid_auth": "The site says these cookies aren't logged in. Log in again in your browser and export fresh cookies.",
+      "cannot_connect": "Couldn't reach the site. Try again in a minute.",
+      "no_input": "Upload a cookies.txt file or paste your cookies."
+    },
+    "abort": {
+      "already_configured": "This site is already set up.",
+      "reauth_successful": "Logged in again."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Auction Watcher options",
+        "data": {
+          "alert_max_bidders": "Alert when active bidders (last minute) are at most",
+          "alert_max_price": "Only alert below this price (0 = any price)",
+          "default_bid_limit": "Default bid limit per auction (0 = none)",
+          "point_cost": "What one point/bid costs you",
+          "fast_interval_seconds": "Check every N seconds while something you follow is live",
+          "idle_interval_minutes": "Check every N minutes when nothing is live",
+          "extra_auction_ids": "Extra auction IDs to follow (comma separated)"
+        }
+      }
+    }
+  },
+  "services": {
+    "set_bid_limit": {
+      "name": "Set bid limit",
+      "description": "Set the most bids you want to spend on one auction. You'll get an alert when you reach it, and no more 'few bidders left' alerts for it. 0 removes the limit.",
+      "fields": {
+        "auction_id": {
+          "name": "Auction ID",
+          "description": "The number in the auction's address."
+        },
+        "limit": {
+          "name": "Bid limit",
+          "description": "Total bids for this auction, including ones already placed."
+        }
+      }
+    },
+    "refresh": {
+      "name": "Refresh now",
+      "description": "Check every followed auction right away."
+    }
+  }
+}

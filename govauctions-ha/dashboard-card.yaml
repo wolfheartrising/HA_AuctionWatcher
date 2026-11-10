@@ -1,0 +1,53 @@
+# Dashboard: Edit dashboard -> + Add card -> Manual -> paste ONE card at a time
+# (this file has two cards, separated by the "---" line).
+
+# Card 1: table of every live auction you're in
+type: markdown
+title: My GovAuctions
+content: >-
+  **Credits:** {{ states('sensor.govauctions_bid_credits') }} ·
+  **Alerts:** {{ states('sensor.govauctions_opportunities') }} matching
+
+  | Auction | Price | Active | Leader | Booked left | You've bid |
+  |---|---|---|---|---|---|
+  {% for a in state_attr('sensor.govauctions_watch', 'details') or [] -%}
+  | [{{ a.id }}](https://www.govauctions.com/auction/{{ a.id }}) | ${{ '%.2f' | format(a.price) }} | {{ a.active }}{{ '+' if a.active >= 9 else '' }} | {{ a.leader }} | {{ a.booked_left }} | {{ a.spent }} |
+  {% endfor %}
+---
+# Card 2: controls
+type: entities
+title: GovAuctions controls
+entities:
+  - type: section
+    label: Alerts
+  - entity: input_boolean.govauctions_live_alerts
+  - entity: input_number.govauctions_alert_max_bidders
+  - entity: input_number.govauctions_alert_max_price
+  - entity: input_number.govauctions_low_credits
+  - entity: input_boolean.auction_alerts_enabled
+  - type: section
+    label: Safety bids
+  - entity: input_boolean.govauctions_armed
+  - entity: input_text.govauctions_auction
+    name: Extra auction to watch / default for button
+  - entity: input_number.govauctions_bids_per_tap
+  - entity: counter.govauctions_bids_today
+  - entity: input_number.govauctions_daily_cap
+  - entity: input_number.govauctions_cooldown_min
+  - entity: input_datetime.govauctions_last_booking
+  - type: button
+    name: Book safety bids on the pasted auction
+    icon: mdi:shield-plus
+    action_name: BOOK
+    tap_action:
+      action: perform-action
+      perform_action: script.govauctions_safety_bids
+      confirmation:
+        text: Book safety bids on this auction?
+  - type: button
+    name: Send the Book button to my phone
+    icon: mdi:cellphone-arrow-down
+    action_name: SEND
+    tap_action:
+      action: perform-action
+      perform_action: script.govauctions_send_button
