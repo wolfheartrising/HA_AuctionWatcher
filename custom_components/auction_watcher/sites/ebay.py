@@ -1,6 +1,7 @@
-"""eBay, through eBay's official APIs (no page scraping).
+"""eBay support with the official API when keys are available, or your own browser cookies
+for the no-API mode that follows your own watchlist, bids and saved searches.
 
-Needs a free eBay developer Production keyset: App ID (client id) + Cert ID (client secret).
+With a free eBay developer Production keyset: App ID (client id) + Cert ID (client secret).
 
 Level A, keys only (application token):
   POST /identity/v1/oauth2/token  grant_type=client_credentials
@@ -20,6 +21,8 @@ NOTE: written from eBay's documented formats; not yet run against eBay
 from __future__ import annotations
 
 import base64
+import html
+import re
 import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
@@ -148,6 +151,81 @@ def parse_user_id(xml_text: str) -> str:
     return root.findtext(".//e:User/e:UserID", default="", namespaces=NS)
 
 
+def _json_string(fragment: str, key: str) -> str | None:
+    patterns = [
+        rf'"{re.escape(key)}"\s*:\s*"((?:\\.|[^"\\])*)"',
+        rf"'{re.escape(key)}'\s*:\s*'((?:\\.|[^'\\])*)'",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, fragment, flags=re.DOTALL)
+        if match:
+            value = match.group(1).replace('\\/', '/').replace('\\u0026', '&')
+            value = html.unescape(value)
+            return value
+    return None
+
+
+def _json_number(fragment: str, key: str) -> float | None:
+    match = re.search(rf'"{re.escape(key)}"\s*:\s*(\d+(?:\.\d+)?)', fragment)
+    if match:
+        return _num(match.group(1))
+    match = re.search(rf'"{re.escape(key)}"\s*:\s*"(\d+(?:\.\d+)?)"', fragment)
+    if match:
+        return _num(match.group(1))
+    return None
+
+
+def parse_my_ebay_html(html_text: str, now: float, category: str) -> dict[str, AuctionState]:
+    """Best-effort parser for the browser-rendered My eBay pages when no API keys are configured."""
+    if not html_text:
+        return {}
+    out: dict[str, AuctionState] = {}
+    scripts = re.findall(r"<script[^>]*>.*?</script>", html_text, flags=re.I | re.S)
+    for script in scripts:
+        if "itemId" not in script and "itemId" not in script:
+            continue
+        for match in re.finditer(r'"itemId"\s*:\s*"?(\d{9,15})"?', script):
+            item_id = match.group(1)
+            frag = script[max(0, match.start() - 300):match.end() + 1200]
+            title = _json_string(frag, "title") or _json_string(frag, "name") or f"eBay item {item_id}"
+            url = _json_string(frag, "itemWebUrl") or _json_string(frag, "listingUrl")
+            if not url:
+                url_match = re.search(r'https?://(?:www\.)?ebay\.com/(?:itm|p)/[^\s\"\'<>]+', frag, flags=re.I)
+                url = url_match.group(0) if url_match else f"https://www.ebay.com/itm/{item_id}"
+            end_raw = _json_string(frag, "endTime") or _json_string(frag, "listingEndTime") or _json_string(frag, "endDate")
+            price = _json_number(frag, "currentPrice") or _json_number(frag, "currentBidPrice") or _json_number(frag, "price")
+            if price is None:
+                price_match = re.search(r'"(?:currentPrice|currentBidPrice|price)"\s*:\s*\{[^\}]*"value"\s*:\s*"?(\d+(?:\.\d+)?)"?', frag)
+                if price_match:
+                    price = _num(price_match.group(1))
+            bid_count = _int(_json_string(frag, "bidCount"))
+            if bid_count is None:
+                bid_count_match = re.search(r'"bidCount"\s*:\s*"?(\d+)"?', frag)
+                bid_count = _int(bid_count_match.group(1)) if bid_count_match else None
+            st = AuctionState(
+                site=SITE,
+                auction_id=item_id,
+                title=title,
+                url=url,
+                category=category,
+                status=STATUS_LIVE if (ends := _dt(end_raw)) is None or ends.timestamp() > now else STATUS_ENDED,
+                price=price,
+                currency="USD",
+                ends_at=_dt(end_raw),
+                original_end=_dt(end_raw),
+                pay_if_won=price,
+                cost_if_won_now=price,
+                extra={
+                    "winning": False,
+                    "you_are_bidding": category == CATEGORY_BIDDING,
+                    "total_bids": bid_count,
+                    "on_watchlist": category == CATEGORY_WATCHING,
+                },
+            )
+            out[item_id] = st
+    return out
+
+
 def _state_from_trading(it: ET.Element, bidding: bool, me: str, now: float) -> AuctionState:
     f = lambda path: it.findtext(path, default="", namespaces=NS)  # noqa: E731
     item_id = f("e:ItemID")
@@ -189,25 +267,41 @@ def _state_from_trading(it: ET.Element, bidding: bool, me: str, now: float) -> A
 # ---------------------------------------------------------------- client
 
 class EbayClient:
-    """App token for item lookups; optional user token (refreshed for ~18 months) for My eBay."""
+    """Official API client, with a browser-cookie fallback for the public eBay site."""
 
-    def __init__(self, session: aiohttp.ClientSession, app_id: str, cert_id: str,
-                 runame: str | None = None, user_auth: dict[str, Any] | None = None) -> None:
+    def __init__(self, session: aiohttp.ClientSession, app_id: str = "", cert_id: str = "",
+                 runame: str | None = None, user_auth: dict[str, Any] | None = None,
+                 *, cookies: dict[str, str] | None = None) -> None:
         self._session = session
-        self.app_id = app_id
-        self._cert_id = cert_id
-        self.runame = runame
+        self.app_id = app_id or ""
+        self._cert_id = cert_id or ""
+        self.runame = runame or ""
         self.user_auth = dict(user_auth or {})
         self.user_auth_changed = False
+        self.cookies = dict(cookies or {})
         self._app_token: str | None = None
         self._app_expires = 0.0
 
     @property
     def signed_in(self) -> bool:
-        return bool(self.user_auth.get("refresh_token"))
+        return bool(self.user_auth.get("refresh_token") or self.cookies)
+
+    @property
+    def cookie_header(self) -> str:
+        return "; ".join(f"{k}={v}" for k, v in self.cookies.items())
 
     def _basic(self) -> str:
         return "Basic " + base64.b64encode(f"{self.app_id}:{self._cert_id}".encode()).decode()
+
+    def _request_headers(self, auth: str | None = None) -> dict[str, str]:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        }
+        if auth:
+            headers["Authorization"] = auth
+        if self.cookie_header:
+            headers["Cookie"] = self.cookie_header
+        return headers
 
     async def _token(self, form: dict[str, str]) -> dict[str, Any]:
         try:
@@ -257,7 +351,45 @@ class EbayClient:
             self.user_auth_changed = True
         return a["access_token"]
 
+    async def _fetch_html(self, url: str, *, params: dict[str, Any] | None = None) -> str:
+        if not self.cookies:
+            raise SiteError("eBay browser cookies are needed for the no-API mode")
+        try:
+            async with self._session.get(
+                url, params=params, headers=self._request_headers(), timeout=aiohttp.ClientTimeout(total=20),
+            ) as resp:
+                if resp.status in (401, 403):
+                    raise AuthError("eBay cookies expired or blocked the request")
+                if resp.status == 429:
+                    raise RateLimited("eBay says too many requests")
+                if resp.status >= 400:
+                    raise SiteError(f"eBay page answered {resp.status} at {url}")
+                return await resp.text()
+        except aiohttp.ClientError as err:
+            raise SiteError(f"Couldn't reach eBay: {err}") from err
+
     async def item(self, item_id: str) -> dict[str, Any]:
+        if not self.app_id or not self._cert_id:
+            html_text = await self._fetch_html(f"https://www.ebay.com/itm/{item_id}")
+            info = parse_my_ebay_html(html_text, time.time(), CATEGORY_WATCHING)
+            item = info.get(item_id)
+            if item is None:
+                raise SiteError(f"eBay item {item_id} not found in the browser page")
+            return {
+                "itemId": item_id,
+                "legacyItemId": item_id,
+                "title": item.title,
+                "itemWebUrl": item.url,
+                "currentBidPrice": {"value": str(item.price or 0), "currency": item.currency},
+                "bidCount": item.extra.get("total_bids") or 0,
+                "itemEndDate": item.ends_at.isoformat().replace("+00:00", "Z") if item.ends_at else None,
+                "buyingOptions": ["AUCTION"],
+                "image": {"imageUrl": item.image},
+                "condition": (item.labels or [None])[0],
+                "minimumPriceToBid": {"value": str((item.price or 0) + 1), "currency": "USD"},
+                "shippingOptions": [{"shippingCost": {"value": "0.00", "currency": "USD"}}],
+                "seller": {"username": item.leader},
+            }
         token = await self.app_token()
         try:
             async with self._session.get(
@@ -276,6 +408,25 @@ class EbayClient:
             raise SiteError(f"Couldn't reach eBay: {err}") from err
 
     async def search(self, query: str, limit: int = 50) -> list[dict[str, Any]]:
+        if not self.app_id or not self._cert_id:
+            html_text = await self._fetch_html(
+                "https://www.ebay.com/sch/i.html",
+                params={"_nkw": query, "_ipg": min(limit, 50), "_pgn": 1, "rt": "nc", "LH_Complete": 1},
+            )
+            out: list[dict[str, Any]] = []
+            for item in parse_my_ebay_html(html_text, time.time(), CATEGORY_WATCHING).values():
+                out.append({
+                    "item_id": item.auction_id,
+                    "title": item.title,
+                    "url": item.url,
+                    "price": item.price,
+                    "ends_at": item.ends_at.isoformat().replace("+00:00", "Z") if item.ends_at else None,
+                    "location": None,
+                    "image": item.image,
+                    "condition": (item.labels or [None])[0],
+                    "bids": item.extra.get("total_bids"),
+                })
+            return out[:limit]
         """Browse API search (auctions and buy-it-now), newest-ending first."""
         token = await self.app_token()
         try:
@@ -332,9 +483,17 @@ class EbayClient:
             raise SiteError(f"eBay refused {call}")
 
     async def my_user_id(self) -> str:
+        if not self.app_id or not self._cert_id:
+            return ""
         return parse_user_id(await self._trading("GetUser", ""))
 
     async def my_ebay(self, my_user_id: str, now: float | None = None) -> dict[str, AuctionState]:
+        if not self.app_id or not self._cert_id:
+            watch = await self._fetch_html("https://www.ebay.com/myb/WatchList")
+            bid = await self._fetch_html("https://www.ebay.com/myb/OrderList")
+            out = parse_my_ebay_html(watch, time.time() if now is None else now, CATEGORY_WATCHING)
+            out.update(parse_my_ebay_html(bid, time.time() if now is None else now, CATEGORY_BIDDING))
+            return out
         body = ("<WatchList><Include>true</Include><Pagination><EntriesPerPage>100</EntriesPerPage></Pagination></WatchList>"
                 "<BidList><Include>true</Include><Pagination><EntriesPerPage>100</EntriesPerPage></Pagination></BidList>")
         return parse_my_ebay_buying(await self._trading("GetMyeBayBuying", body), my_user_id,

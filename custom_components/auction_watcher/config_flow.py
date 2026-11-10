@@ -191,9 +191,10 @@ async def _finish_macbid_code(pending: dict[str, Any], code: str) -> tuple[str, 
 def _ebay_fields(d: Mapping[str, Any] | None = None) -> dict:
     d = d or {}
     return {
-        vol.Required(CONF_APP_ID, default=d.get(CONF_APP_ID, vol.UNDEFINED)): TextSelector(),
-        vol.Required(CONF_CERT_ID, default=d.get(CONF_CERT_ID, vol.UNDEFINED)): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
+        vol.Optional(CONF_APP_ID, default=d.get(CONF_APP_ID, vol.UNDEFINED)): TextSelector(),
+        vol.Optional(CONF_CERT_ID, default=d.get(CONF_CERT_ID, vol.UNDEFINED)): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
         vol.Optional(CONF_RUNAME, default=d.get(CONF_RUNAME, vol.UNDEFINED)): TextSelector(),
+        vol.Optional(CONF_COOKIE, default=d.get(CONF_COOKIE, vol.UNDEFINED)): COOKIE_SELECTOR,
         vol.Optional(CONF_EXTRA_IDS): TextSelector(TextSelectorConfig(multiline=True)),
     }
 
@@ -255,19 +256,33 @@ class AuctionWatcherConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_show_form(step_id="macbid", data_schema=vol.Schema(_macbid_fields()), errors=errors)
 
     async def async_step_ebay(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        """eBay developer keys; with a RuName, the next page signs in to your eBay account."""
+        """Either API keys or just your eBay browser cookies; no official API required."""
         errors: dict[str, str] = {}
         if user_input is not None:
-            app_id, cert_id = user_input[CONF_APP_ID].strip(), user_input[CONF_CERT_ID].strip()
-            error = await _check_ebay_keys(app_id, cert_id)
-            if not error:
-                self._ebay = {CONF_SITE: SITE_EBAY, CONF_APP_ID: app_id, CONF_CERT_ID: cert_id,
-                              CONF_RUNAME: (user_input.get(CONF_RUNAME) or "").strip(),
-                              "extra": (user_input.get(CONF_EXTRA_IDS) or "").strip()}
-                if self._ebay[CONF_RUNAME]:
-                    return await self.async_step_ebay_signin()
-                return self._finish_ebay()
-            errors["base"] = error
+            app_id = (user_input.get(CONF_APP_ID) or "").strip()
+            cert_id = (user_input.get(CONF_CERT_ID) or "").strip()
+            cookie_text = (user_input.get(CONF_COOKIE) or "").strip()
+            if app_id and cert_id:
+                error = await _check_ebay_keys(app_id, cert_id)
+                if not error:
+                    self._ebay = {CONF_SITE: SITE_EBAY, CONF_APP_ID: app_id, CONF_CERT_ID: cert_id,
+                                  CONF_RUNAME: (user_input.get(CONF_RUNAME) or "").strip(),
+                                  "extra": (user_input.get(CONF_EXTRA_IDS) or "").strip()}
+                    if self._ebay[CONF_RUNAME]:
+                        return await self.async_step_ebay_signin()
+                    return self._finish_ebay()
+                errors["base"] = error
+            elif cookie_text:
+                cookies = parse_cookie_input(cookie_text, domain="ebay.com")
+                if not cookies:
+                    errors["base"] = "no_cookies"
+                else:
+                    self._ebay = {CONF_SITE: SITE_EBAY, CONF_COOKIE: cookie_header(cookies),
+                                  CONF_RUNAME: (user_input.get(CONF_RUNAME) or "").strip(),
+                                  "extra": (user_input.get(CONF_EXTRA_IDS) or "").strip()}
+                    return self._finish_ebay()
+            else:
+                errors["base"] = "no_input"
         return self.async_show_form(step_id="ebay", data_schema=vol.Schema(_ebay_fields(user_input)), errors=errors)
 
     async def async_step_ebay_signin(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:

@@ -284,9 +284,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: AuctionWatcherConfigEntr
             pm.stop()  # another account set it up meanwhile: one listener for Telegram, not two
     session = async_create_clientsession(hass, cookie_jar=aiohttp.DummyCookieJar())
     if entry.data.get(CONF_SITE) == SITE_EBAY:
+        cookies = parse_cookie_input(entry.data.get(CONF_COOKIE, ""), domain="ebay.com")
         client_e = eb.EbayClient(
-            session, entry.data[CONF_APP_ID], entry.data[CONF_CERT_ID],
-            runame=entry.data.get(CONF_RUNAME), user_auth=entry.data.get(CONF_EBAY_TOKENS),
+            session,
+            entry.data.get(CONF_APP_ID, ""),
+            entry.data.get(CONF_CERT_ID, ""),
+            runame=entry.data.get(CONF_RUNAME),
+            user_auth=entry.data.get(CONF_EBAY_TOKENS),
+            cookies=cookies,
         )
         coordinator: AuctionWatcherCoordinator = EbayCoordinator(hass, entry, client_e)
     elif entry.data.get(CONF_SITE) == SITE_MACBID:
