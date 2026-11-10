@@ -705,18 +705,51 @@ class MacBidCoordinator(AuctionWatcherCoordinator):
         client: mb.MacBidClient = self.client  # type: ignore[assignment]
         mem = self._mbmem.setdefault(s.auction_id, MacBidMemory())
         mem.last_attempt = time.time()
-        await client.place_bid(s.auction_id, s.extra.get("lot_number") or "", s.extra.get("auction_id") or "", amount)
-        mem.placed = amount
-        mem.status = f"max bid ${amount} placed ({reason}); Mac.bid raises for you up to it"
-        await self._save()
-        self._emit("bid_placed", {**self._booking_data(s.auction_id, amount, reason, s), "amount": amount})
+        answer = await client.place_bid(s.auction_id, s.extra.get("lot_number") or "", s.extra.get("auction_id") or "", amount)
+        mem.answer = mb.short_answer(answer)
+        _LOGGER.info("Mac.bid answered a $%s max bid on lot %s: %s", amount, s.auction_id, mem.answer)
+        # Mac.bid accepts the request first and processes it after, so it only counts
+        # once its own lot data shows you as a bidder (checked on the next updates).
+        mem.pending, mem.pending_since = amount, time.time()
+        mem.status = f"sent a ${amount} max ({reason}); checking that Mac.bid recorded it… (answer: {mem.answer})"
+        self._lots.pop(s.auction_id, None)  # re-read this lot on the next check
+        self._pending_reason = getattr(self, "_pending_reason", {})
+        self._pending_reason[s.auction_id] = reason
+        await self.async_request_refresh()
+
+    async def _verify_pending(self, states: dict[str, AuctionState], now: float) -> None:
+        """Confirm sent bids from Mac.bid's own data (you show up as a bidder, or as the winner)."""
+        for aid, mem in self._mbmem.items():
+            if not mem.pending:
+                continue
+            s = states.get(aid)
+            reason = getattr(self, "_pending_reason", {}).get(aid, "")
+            if s is not None and (s.extra.get("you_are_bidding") or s.extra.get("winning")):
+                mem.placed, mem.pending = mem.pending, 0
+                mem.status = (f"max bid ${mem.placed} confirmed: "
+                              + ("you're winning" if s.extra.get("winning") else "someone's max is higher")
+                              + "; Mac.bid raises for you up to your max")
+                await self._save()
+                self._emit("bid_placed", {**self._booking_data(aid, mem.placed, reason or "confirmed", s), "amount": mem.placed})
+            elif now - mem.pending_since > 45:
+                amount, mem.pending = mem.pending, 0
+                mem.status = (f"Mac.bid accepted the request for a ${amount} max but no bid shows up. "
+                              f"Its answer: {mem.answer}")
+                _LOGGER.warning("Mac.bid bid on lot %s not recorded. Answer was: %s", aid, mem.answer)
+                if s is not None:
+                    self._emit("bid_failed", {**self._booking_data(aid, amount, mem.status, s), "amount": amount})
+            else:
+                self._lots.pop(aid, None)  # keep re-reading it until confirmed
 
     async def _run_macbid(self, states: dict[str, AuctionState], now: float) -> None:
+        await self._verify_pending(states, now)
         for aid, settings in list(self._mb.items()):
             s = states.get(aid)
             if s is None or settings.mode == MB_MODE_OFF:
                 continue
             mem = self._mbmem.setdefault(aid, MacBidMemory())
+            if mem.pending:
+                continue
             action, amount, reason = decide_macbid(
                 s, settings, mem, self.bid_limit(aid), now,
                 budget_left=self._macbid_budget_left(states, exclude=aid), paused=self.auto_paused)
@@ -725,7 +758,6 @@ class MacBidCoordinator(AuctionWatcherCoordinator):
                 continue
             try:
                 await self._place(s, amount, f"auto: {reason}")
-                s.extra["winning"] = True  # until the next check says otherwise
             except AuthError:
                 raise
             except SiteError as err:

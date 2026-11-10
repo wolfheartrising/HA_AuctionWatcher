@@ -228,6 +228,20 @@ def parse_pickups(data: Any, now: float) -> dict[str, AuctionState]:
     return out
 
 
+def item_url(auction_id: Any, lot_number: Any) -> str:
+    """The item's page on mac.bid (the same link the site uses: ?aid=<auction>&lid=<lot number>)."""
+    if auction_id and lot_number:
+        return f"{WEB}/?aid={auction_id}&lid={lot_number}"
+    return f"{WEB}/account/watchlist"
+
+
+def short_answer(data: Any, limit: int = 160) -> str:
+    """Mac.bid's reply to a bid, shortened for the card and the log (it holds no secrets)."""
+    import json
+    text = json.dumps(data, separators=(",", ":"), default=str) if not isinstance(data, str) else data
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
 def build_state(lot_id: str, lot: dict[str, Any] | None, static: dict[str, Any] | None,
                 my_id: str, watching_ids: set[str], now: float) -> AuctionState:
     lot = lot or {}
@@ -252,8 +266,7 @@ def build_state(lot_id: str, lot: dict[str, Any] | None, static: dict[str, Any] 
         site=SITE,
         auction_id=lot_id,
         title=title,
-        url=(f"{WEB}/auction/{lot.get('auction_id') or static.get('auction_id')}/lot/{lot_id}"
-             if (lot.get("auction_id") or static.get("auction_id")) else f"{WEB}/account/watchlist"),
+        url=item_url(lot.get("auction_id") or static.get("auction_id"), lot.get("lot_number") or static.get("lot_number")),
         category=CATEGORY_BIDDING if you_in else CATEGORY_WATCHING,
         status=status,
         price=_num(lot.get("current_bid")),

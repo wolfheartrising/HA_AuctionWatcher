@@ -29,7 +29,7 @@ def test_watching_not_bidding():
     assert s.status == "live" and s.category == "watching"
     assert s.price == 22.0 and s.buy_it_now == 144.0 and s.active_bidders == 3
     assert s.ends_at.isoformat().startswith("2026-11-11T00:16:09")
-    assert s.url == "https://www.mac.bid/auction/100707/lot/67465504"
+    assert s.url == "https://www.mac.bid/?aid=100707&lid=3129K"
     assert s.extra["winning"] is False and s.extra["retail_price"] == 178.99 and s.labels == ["OPEN BOX"]
 
 
@@ -183,3 +183,10 @@ def test_location_and_transfers():
 def test_win_cost_with_tax():
     assert mb.win_cost(160) == 187.0
     assert mb.win_cost(160, 0.07) == 200.09
+
+
+def test_item_link_matches_the_site():
+    s = mb.build_state("67774315", {**LOT, "auction_id": "101174", "lot_number": "3819N"}, None, ME, set(), NOW)
+    assert s.url == "https://www.mac.bid/?aid=101174&lid=3819N"
+    assert mb.item_url(None, "3819N") == "https://www.mac.bid/account/watchlist"
+    assert mb.short_answer({"message": "x" * 300}).endswith("…")

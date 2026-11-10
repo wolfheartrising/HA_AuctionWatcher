@@ -462,9 +462,12 @@ class MacBidSettings:
 
 @dataclass
 class MacBidMemory:
-    placed: int = 0           # the max we last placed on this lot
+    placed: int = 0           # the max Mac.bid has confirmed for this lot
     last_attempt: float = 0.0
     status: str = ""
+    pending: int = 0          # sent, waiting for Mac.bid's data to show it
+    pending_since: float = 0.0
+    answer: str = ""          # what Mac.bid replied when we sent it
 
 
 def decide_macbid(

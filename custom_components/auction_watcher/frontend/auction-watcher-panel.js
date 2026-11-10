@@ -681,7 +681,7 @@ class AuctionWatcherPanel extends HTMLElement {
         const total = (max * 1.15 + 3) * (1 + (a.sales_tax || 0));
         if (!confirm(`Place a $${max} max bid on "${a.title}"?\nIf you win at your max you pay about ${money(total)} with the premium, fee and tax.`)) return;
         await this._hass.callService("auction_watcher", "place_bid", { auction_id: id, amount: max }, undefined, false, true);
-        this._saved[key] = `Max bid $${max} placed`;
+        this._saved[key] = `Sent a $${max} max: checking that Mac.bid recorded it (see the status below)`;
       } else {
         const mode = this._field(id, "mb_mode", a.mb_mode || "off");
         const lateMin = Math.max(1, parseInt(this._field(id, "mb_late_min", Math.round((a.mb_late_seconds || 180) / 60)), 10) || 3);
