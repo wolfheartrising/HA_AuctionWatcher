@@ -6,6 +6,12 @@ The section for a version becomes its release notes, so HACS shows them under "U
 After updating: restart Home Assistant if Python changed, then reload the Auctions page (it offers a Reload button
 when it's older than the plugin).
 
+## 1.6.2
+- eBay cookie-mode Following/Watching cards now recover full item details when My eBay page blocks are sparse
+  (fixes placeholder titles like `EDIT_NOTE` and blank bid/clock fields).
+- Added stronger eBay HTML fallbacks from item-page metadata/embedded data, and coordinator-side fill-in for
+  incomplete cookie-mode entries.
+
 ## 1.6.1
 - eBay setup now supports either **official API keys** (App ID + Cert ID, optional RuName sign-in) **or your own
   eBay browser cookies** for owner-only no-API mode.

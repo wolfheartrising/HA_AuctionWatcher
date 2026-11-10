@@ -1146,6 +1146,11 @@ class EbayCoordinator(AuctionWatcherCoordinator):
         lefts = [s.ends_at.timestamp() - now for s in self._mine.values() if s.status == STATUS_LIVE and s.ends_at]
         return not self._mine_at or now - self._mine_at >= mb.lot_refresh_seconds(min(lefts) if lefts else None)
 
+    @staticmethod
+    def _needs_fill(st: AuctionState) -> bool:
+        return (not (st.title or "").strip() or st.title == "EDIT_NOTE"
+                or (st.price is None and st.ends_at is None))
+
     async def _async_update_data(self) -> dict[str, AuctionState]:
         e = self.config_entry
         now = time.time()
@@ -1156,6 +1161,25 @@ class EbayCoordinator(AuctionWatcherCoordinator):
                 if client.has_api_keys and not self._ebay_user:
                     self._ebay_user = await client.my_user_id()
                 self._mine = await client.my_ebay(self._ebay_user, now)
+                if not client.has_api_keys:
+                    filled = 0
+                    for item_id, st in list(self._mine.items()):
+                        if not self._needs_fill(st) or filled >= 4:
+                            continue
+                        cached = self._items.get(item_id)
+                        if cached and now - cached[0] < 300:
+                            full = cached[1]
+                        else:
+                            full = eb.state_from_browse(await client.item(item_id), st.category == "watching", now)
+                            self._items[item_id] = (now, full)
+                        full.category = st.category
+                        full.extra.update({
+                            "winning": st.extra.get("winning", False),
+                            "you_are_bidding": st.extra.get("you_are_bidding", st.category == "bidding"),
+                            "on_watchlist": st.extra.get("on_watchlist", st.category == "watching"),
+                        })
+                        self._mine[item_id] = full
+                        filled += 1
                 self._mine_at = now
             for item_id in extra:
                 if item_id in self._mine or now < self._backoff_until:

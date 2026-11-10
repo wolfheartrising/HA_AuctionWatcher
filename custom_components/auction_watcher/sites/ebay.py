@@ -174,6 +174,69 @@ def _json_number(fragment: str, key: str) -> float | None:
     return None
 
 
+def _meta_content(html_text: str, key: str) -> str | None:
+    patterns = [
+        rf'<meta[^>]+property=["\']{re.escape(key)}["\'][^>]+content=["\']([^"\']+)["\']',
+        rf'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']{re.escape(key)}["\']',
+        rf'<meta[^>]+name=["\']{re.escape(key)}["\'][^>]+content=["\']([^"\']+)["\']',
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, html_text, flags=re.I)
+        if m:
+            return html.unescape(m.group(1).strip())
+    return None
+
+
+def _suspicious_title(title: str) -> bool:
+    t = (title or "").strip()
+    if not t:
+        return True
+    if t.upper() in {"EDIT_NOTE", "WATCHLIST_NOTE"}:
+        return True
+    return bool(re.fullmatch(r"[A-Z_]{4,}", t))
+
+
+def _item_from_html(item_id: str, html_text: str) -> dict[str, Any]:
+    title = _meta_content(html_text, "og:title") or _meta_content(html_text, "twitter:title")
+    if not title:
+        m_title = re.search(r"<title>(.*?)</title>", html_text, flags=re.I | re.S)
+        title = html.unescape((m_title.group(1).strip() if m_title else f"eBay item {item_id}"))
+
+    url = _meta_content(html_text, "og:url") or f"https://www.ebay.com/itm/{item_id}"
+    image = _meta_content(html_text, "og:image")
+    currency = (_json_string(html_text, "currency") or "USD").upper()
+    price = (
+        _json_number(html_text, "currentPrice")
+        or _json_number(html_text, "currentBidPrice")
+        or _json_number(html_text, "price")
+    )
+    if price is None:
+        m_price = re.search(r'"(?:currentPrice|currentBidPrice|price)"\s*:\s*\{[^\}]*"value"\s*:\s*"(\d+(?:\.\d+)?)"', html_text)
+        if m_price:
+            price = _num(m_price.group(1))
+    end_raw = _json_string(html_text, "endTime") or _json_string(html_text, "listingEndTime") or _json_string(html_text, "endDate")
+    min_next = _json_number(html_text, "minimumPriceToBid")
+    bids = _int(_json_string(html_text, "bidCount"))
+    if bids is None:
+        m_bids = re.search(r'"bidCount"\s*:\s*"?(\d+)"?', html_text)
+        bids = _int(m_bids.group(1)) if m_bids else None
+    return {
+        "itemId": item_id,
+        "legacyItemId": item_id,
+        "title": title or f"eBay item {item_id}",
+        "itemWebUrl": url,
+        "currentBidPrice": {"value": str(price) if price is not None else "0", "currency": currency},
+        "bidCount": bids or 0,
+        "itemEndDate": end_raw,
+        "buyingOptions": ["AUCTION"],
+        "image": {"imageUrl": image},
+        "condition": _json_string(html_text, "condition"),
+        "minimumPriceToBid": {"value": str(min_next) if min_next is not None else str((price or 0) + 1), "currency": currency},
+        "shippingOptions": [{"shippingCost": {"value": "0.00", "currency": currency}}],
+        "seller": {"username": _json_string(html_text, "username") or _json_string(html_text, "sellerUserName")},
+    }
+
+
 def parse_my_ebay_html(html_text: str, now: float, category: str) -> dict[str, AuctionState]:
     """Best-effort parser for the browser-rendered My eBay pages when no API keys are configured."""
     if not html_text:
@@ -201,6 +264,8 @@ def parse_my_ebay_html(html_text: str, now: float, category: str) -> dict[str, A
             if bid_count is None:
                 bid_count_match = re.search(r'"bidCount"\s*:\s*"?(\d+)"?', frag)
                 bid_count = _int(bid_count_match.group(1)) if bid_count_match else None
+            if _suspicious_title(title) and price is None and end_raw is None:
+                title = f"eBay item {item_id}"
             st = AuctionState(
                 site=SITE,
                 auction_id=item_id,
@@ -374,23 +439,23 @@ class EbayClient:
             html_text = await self._fetch_html(f"https://www.ebay.com/itm/{item_id}")
             info = parse_my_ebay_html(html_text, time.time(), CATEGORY_WATCHING)
             item = info.get(item_id)
-            if item is None:
-                raise SiteError(f"eBay item {item_id} not found in the browser page")
-            return {
-                "itemId": item_id,
-                "legacyItemId": item_id,
-                "title": item.title,
-                "itemWebUrl": item.url,
-                "currentBidPrice": {"value": str(item.price or 0), "currency": item.currency},
-                "bidCount": item.extra.get("total_bids") or 0,
-                "itemEndDate": item.ends_at.isoformat().replace("+00:00", "Z") if item.ends_at else None,
-                "buyingOptions": ["AUCTION"],
-                "image": {"imageUrl": item.image},
-                "condition": (item.labels or [None])[0],
-                "minimumPriceToBid": {"value": str((item.price or 0) + 1), "currency": "USD"},
-                "shippingOptions": [{"shippingCost": {"value": "0.00", "currency": "USD"}}],
-                "seller": {"username": item.leader},
-            }
+            if item is not None and not (_suspicious_title(item.title) and item.price is None and item.ends_at is None):
+                return {
+                    "itemId": item_id,
+                    "legacyItemId": item_id,
+                    "title": item.title,
+                    "itemWebUrl": item.url,
+                    "currentBidPrice": {"value": str(item.price or 0), "currency": item.currency},
+                    "bidCount": item.extra.get("total_bids") or 0,
+                    "itemEndDate": item.ends_at.isoformat().replace("+00:00", "Z") if item.ends_at else None,
+                    "buyingOptions": ["AUCTION"],
+                    "image": {"imageUrl": item.image},
+                    "condition": (item.labels or [None])[0],
+                    "minimumPriceToBid": {"value": str((item.price or 0) + 1), "currency": item.currency or "USD"},
+                    "shippingOptions": [{"shippingCost": {"value": "0.00", "currency": item.currency or "USD"}}],
+                    "seller": {"username": item.leader},
+                }
+            return _item_from_html(item_id, html_text)
         token = await self.app_token()
         try:
             async with self._session.get(
@@ -525,4 +590,3 @@ def _dt(v: Any) -> datetime | None:
         return datetime.fromisoformat(str(v).replace("Z", "+00:00")).astimezone(timezone.utc)
     except ValueError:
         return None
-
