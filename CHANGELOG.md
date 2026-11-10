@@ -6,6 +6,11 @@ The section for a version becomes its release notes, so HACS shows them under "U
 After updating: restart Home Assistant if Python changed, then reload the Auctions page (it offers a Reload button
 when it's older than the plugin).
 
+## 1.5.8
+- For others: with debug logging on, every Telegram message, button tap and command is logged with what happened to it
+  (or why it was ignored), to track down buttons/commands that seem to do nothing. People are also recognised by their
+  user id when a tap arrives without a chat id.
+
 ## 1.5.7
 - For others: ✎ next to each person to rename them or fix their chat id; their open items stay with them. (Switching
   everyone to another bot is just the Telegram bot picker: chat ids are the same with every bot.)

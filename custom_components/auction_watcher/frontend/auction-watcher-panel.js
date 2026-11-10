@@ -10,7 +10,7 @@
  * until you save it, and the page re-draws from those drafts.
  */
 
-const PANEL_VERSION = "1.5.7";  // must match const.py VERSION (a test checks)
+const PANEL_VERSION = "1.5.8";  // must match const.py VERSION (a test checks)
 const SITE_NAMES = { govauctions: "GovAuctions", macbid: "Mac.bid", ebay: "eBay" };
 // What the per-auction spending cap is called on each site
 const LIMIT_LABEL = { govauctions: "Max bids", macbid: "Max bid ($)", ebay: "Max price ($)" };

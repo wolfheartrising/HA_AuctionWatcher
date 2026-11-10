@@ -316,13 +316,26 @@ class ProxyManager:
             name = " ".join(x for x in (event.data.get("from_first"), event.data.get("from_last")) if x)
             self._seen[str(cid)] = name or str(cid)
 
+    def _sender(self, event: Event) -> Person | None:
+        return (self._person(chat_id=event.data.get("chat_id")) if event.data.get("chat_id") is not None else None) \
+            or (self._person(chat_id=event.data.get("user_id")) if event.data.get("user_id") is not None else None)
+
+    def _trace(self, kind: str, event: Event, what: str, outcome: str) -> None:
+        """Debug log of every Telegram event (Settings → Devices & services → Auction Watcher → Enable debug logging)."""
+        _LOGGER.debug("For others: Telegram %s %r from chat %s / user %s: %s", kind, what[:40],
+                      event.data.get("chat_id"), event.data.get("user_id"), outcome)
+
     async def _on_text(self, event: Event) -> None:
         self._note_seen(event)
+        what = str(event.data.get("text") or "")
         if not self.enabled:
+            self._trace("message", event, what, "ignored: For others is switched off")
             return
-        person = self._person(chat_id=event.data.get("chat_id"))
+        person = self._sender(event)
         if person is None:
+            self._trace("message", event, what, "ignored: not someone on your For others list")
             return
+        self._trace("message", event, what, f"from {person.name}")
         text = str(event.data.get("text") or "")
         chat = str(person.chat_id)
         now = time.time()
@@ -460,14 +473,19 @@ class ProxyManager:
             return None
 
     async def _on_callback(self, event: Event) -> None:
-        if not self.enabled:
-            return
         data = str(event.data.get("data") or "")
+        if not self.enabled:
+            self._trace("button", event, data, "ignored: For others is switched off")
+            return
         if not data.startswith("/aw_"):
+            self._trace("button", event, data, "ignored: not one of Auction Watcher's buttons")
             return
-        person = self._person(chat_id=event.data.get("chat_id"))
+        person = self._sender(event)
         if person is None:
+            self._trace("button", event, data, "ignored: not someone on your For others list")
+            await self._answer(event, "You're not set up for this bot")
             return
+        self._trace("button", event, data, f"from {person.name}")
         parts = data.split()
         cmd, rid = parts[0], (parts[1] if len(parts) > 1 else "")
         if cmd == STOP_ALL:
@@ -548,9 +566,14 @@ class ProxyManager:
         """Bot menu commands: /items (or /auctions), /stop, /help, /start."""
         self._note_seen(event)  # pressing Start counts: they show up in the person dropdown
         command = str(event.data.get("command") or "").split("@")[0].lower()
-        if not self.enabled or command not in ("/items", "/auctions", "/stop", "/help", "/start"):
+        if not self.enabled:
+            self._trace("command", event, command, "ignored: For others is switched off")
             return
-        person = self._person(chat_id=event.data.get("chat_id"))
+        if command not in ("/items", "/auctions", "/stop", "/help", "/start"):
+            self._trace("command", event, command, "ignored: not one of Auction Watcher's commands")
+            return
+        person = self._sender(event)
+        self._trace("command", event, command, f"from {person.name}" if person else "not someone on your list")
         if person is None:
             if command == "/start" and event.data.get("chat_id") is not None:
                 name = event.data.get("from_first") or "there"
