@@ -10,7 +10,7 @@
  * until you save it, and the page re-draws from those drafts.
  */
 
-const PANEL_VERSION = "1.5.1";  // must match const.py VERSION (a test checks)
+const PANEL_VERSION = "1.5.3";  // must match const.py VERSION (a test checks)
 const SITE_NAMES = { govauctions: "GovAuctions", macbid: "Mac.bid", ebay: "eBay" };
 // What the per-auction spending cap is called on each site
 const LIMIT_LABEL = { govauctions: "Max bids", macbid: "Max bid ($)", ebay: "Max price ($)" };
@@ -934,6 +934,7 @@ class AuctionWatcherPanel extends HTMLElement {
           ${img ? `<img src="${img}" alt="" loading="lazy">` : `<div class="noimg">🛒</div>`}
           <div class="head">
             <a class="name" href="${url}" target="_blank" rel="noopener">${esc(a.title)}</a>
+            ${this._stopButton(a)}
             <div class="sub">${esc(SITE_NAMES[a.site] || a.site)} · <span class="status ${esc(status)}">${esc(status)}</span>
               ${a.opportunity ? `<span class="badge hot">🎯 few bidders</span>` : ""}
               ${a.bid_limit_reached ? `<span class="badge cap">⛔ max bids reached</span>` : ""}
@@ -953,6 +954,10 @@ class AuctionWatcherPanel extends HTMLElement {
             ${a.you_are_bidding ? `<div class="k">+ you</div>` : ""}</div>
         </div>
         ${this._overtimeLine(a)}
+        ${(a.status === "live" || a.status === "upcoming") && (!a.closed_to_new || a.your_bids) && !a.bid_limit_reached
+          ? `<div class="quick"><button type="button" class="secondary" data-act="quick" data-id="${id}"
+              title="Place one bid now (1 point). Staking a claim before the entry limit lets you come back later${(a.labels || []).some((l) => /re-?entry/i.test(l)) ? "; this one is No Re-Entry" : ""}.">+1 bid</button>
+              <span class="muted">${a.your_bids ? `you've placed ${num(a.your_bids)}` : "stake a claim before the entry limit"}</span></div>` : ""}
         ${bidders ? `<div class="line"><span class="k">Bidding:</span> ${bidders}</div>` : ""}
         <div class="rows">
           <div><span class="k">Your bids</span> ${num(a.your_bids)}${a.bid_limit ? ` / ${num(a.bid_limit)}` : ""} <span class="muted">(${money(a.your_points_cost)})</span></div>
@@ -1092,6 +1097,7 @@ class AuctionWatcherPanel extends HTMLElement {
           ${img ? `<img src="${img}" alt="" loading="lazy">` : `<div class="noimg">🛒</div>`}
           <div class="head">
             <a class="name" href="${url}" target="_blank" rel="noopener">${esc(a.title)}</a>
+            ${this._stopButton(a)}
             <div class="sub">${esc(SITE_NAMES[a.site] || a.site)} · <span class="status ${esc(a.status)}">${esc(status)}</span> ${badge}</div>
             ${(a.labels || []).length ? `<div class="labels">${a.labels.map((l) => `<span class="tag cond-label ${esc(String(l).toLowerCase().replace(/\s+/g, "-"))}">${esc(l)}</span>`).join(" ")}</div>` : ""}
           </div>
@@ -1142,6 +1148,8 @@ class AuctionWatcherPanel extends HTMLElement {
                 value="${esc(limit)}" placeholder="none">`}</label>
             ${a.site === "macbid" && a.status === "live"
               ? `<button type="button" class="bid-now" data-act="mb_place" data-id="${id}">Bid now</button>
+                 ${!a.winning && a.min_next_bid ? `<button type="button" class="secondary" data-act="quick" data-id="${id}"
+                    title="Place the smallest bid Mac.bid accepts right now (checked live when you tap)">Bid ${money(a.min_next_bid)} (next step)</button>` : ""}
                  ${a.winning && a.price && Number(a.mb_placed || a.bid_limit || 0) > Number(a.price)
                    ? `<button type="button" class="secondary" data-act="mb_lower" data-id="${id}"
                         title="You're winning: pull your max back to the current price (Mac.bid allows this while you lead)">Lower my max to ${money(a.price)}</button>` : ""}
@@ -1297,6 +1305,18 @@ class AuctionWatcherPanel extends HTMLElement {
       this._saved[key] = "Couldn't: " + (e?.message || e);
     }
     this._maybeRender(true);
+  }
+
+  _running(a) {
+    if (a.status !== "live" && a.status !== "upcoming") return false;
+    return a.site === "macbid" ? a.mb_mode === "late"
+      : !!(a.auto_cancel || a.auto_rebook || a.topup_at || a.your_booked_left);
+  }
+
+  _stopButton(a) {
+    if (!this._running(a)) return this._saved["stop:" + a.auction_id] ? `<div class="note"><b>${esc(this._saved["stop:" + a.auction_id])}</b></div>` : "";
+    return `<button type="button" class="stop-btn" data-act="stop" data-id="${esc(a.auction_id)}"
+      title="Stop everything automatic on this item">■ Stop</button>`;
   }
 
   _overtimeLine(a) {
@@ -1475,6 +1495,38 @@ class AuctionWatcherPanel extends HTMLElement {
 
   async _action(act, id, site) {
     if (act === "mb_place" || act === "mb_auto" || act === "mb_lower") return this._macbidAction(act, id);
+    if (act === "quick") {
+      const a = this._auctions().find((x) => String(x.auction_id) === String(id)) || {};
+      const msg = a.site === "macbid"
+        ? `Bid the next step on "${a.title}"?\n\nThat's the smallest bid Mac.bid accepts right now (about ${money(a.min_next_bid)}; checked live when you tap). If you win at it you pay about ${money(((a.min_next_bid || 0) * 1.15 + 3) * (1 + (a.sales_tax || 0)))} with the 15% premium, $3 fee and tax. Bids can't be cancelled.`
+        : `Place 1 bid on "${a.title}"?\n\nIt costs 1 point (${money(a.point_cost || 0.13)}) and is placed right away.`;
+      if (!confirm(msg)) return;
+      try {
+        const res = await this._hass.callService("auction_watcher", "quick_bid", { auction_id: id }, undefined, false, true);
+        this._saved["stop:" + id] = (res?.response?.done || "Done") + (a.site === "macbid" ? ": checking Mac.bid recorded it" : "");
+      } catch (err) {
+        this._saved["stop:" + id] = "Couldn't bid: " + (err?.message || err);
+      }
+      this._maybeRender(true);
+      setTimeout(() => { delete this._saved["stop:" + id]; this._maybeRender(true); }, 10000);
+      return;
+    }
+    if (act === "stop") {
+      const a = this._auctions().find((x) => String(x.auction_id) === String(id)) || {};
+      const msg = a.site === "macbid"
+        ? `Stop the scheduled auto-bid on "${a.title}"?${a.mb_placed ? `\n\nYour $${a.mb_placed} max already placed stays: Mac.bid bids can't be withdrawn.${a.winning ? " While you're winning you can lower it to the current price." : ""}` : ""}`
+        : `Stop everything automatic on "${a.title}"?\n\nAuto-cancel, auto-rebook and top-up go off${a.your_booked_left ? `, and your ${a.your_booked_left} booked bids are cancelled (unused bids come back)` : ""}. Bids already placed are spent.`;
+      if (!confirm(msg)) return;
+      try {
+        const res = await this._hass.callService("auction_watcher", "stop", { auction_id: id }, undefined, false, true);
+        this._saved["stop:" + id] = "Stopped: " + (res?.response?.done || "done");
+      } catch (err) {
+        this._saved["stop:" + id] = "Couldn't stop: " + (err?.message || err);
+      }
+      this._maybeRender(true);
+      setTimeout(() => { delete this._saved["stop:" + id]; this._maybeRender(true); }, 10000);
+      return;
+    }
     if (act === "pack_follow") {
       const btn = this.shadowRoot.querySelector(`[data-act=pack_follow][data-id="${CSS.escape(id)}"]`);
       const limit = parseInt(btn?.dataset.limit || "0", 10) || 0;
@@ -1574,6 +1626,9 @@ const STYLE = `
   .pack-auction a { font-weight: 600; color: var(--primary-color); text-decoration: none; min-width: 52px; }
   .pack-auction .stars { margin-left: auto; }
   .small-btn { padding: 2px 10px; font-size: 12px; }
+  .quick { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; }
+  .stop-btn { float: right; margin-left: 8px; background: var(--error-color, #db4437); color: #fff; border: 0; border-radius: 6px;
+              padding: 4px 10px; font-size: 13px; font-weight: 600; cursor: pointer; }
   details.packs-intro, .packs-more { grid-column: 1 / -1; }
   details.packs-intro summary, details.hist summary { cursor: pointer; }
   .banner { margin: 12px 16px 0; padding: 10px 14px; border-radius: 12px; border: 1px solid var(--error-color, #db4437);

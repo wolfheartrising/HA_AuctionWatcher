@@ -299,6 +299,26 @@
           "description": "Max bids (GovAuctions) or max bid in $ (Mac.bid) to set at the same time."
         }
       }
+    },
+    "stop": {
+      "name": "Stop automatic bidding on an item",
+      "description": "GovAuctions: auto-cancel/rebook/top-up off and booked bids cancelled. Mac.bid: the scheduled late bid off (a placed max can't be withdrawn).",
+      "fields": {
+        "auction_id": {
+          "name": "Auction id",
+          "description": "The item's id."
+        }
+      }
+    },
+    "quick_bid": {
+      "name": "Quick bid",
+      "description": "GovAuctions: place one bid (e.g. to stake a claim before the entry limit). Mac.bid: bid the next allowed amount, read live.",
+      "fields": {
+        "auction_id": {
+          "name": "Auction id",
+          "description": "The item's id."
+        }
+      }
     }
   }
 }

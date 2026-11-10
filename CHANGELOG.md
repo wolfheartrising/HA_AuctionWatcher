@@ -1,0 +1,71 @@
+# Changelog
+
+Each version gets a GitHub release automatically when it reaches `main` (see `.github/workflows/release.yml`).
+The section for a version becomes its release notes, so HACS shows them under "Update available".
+
+After updating: restart Home Assistant if Python changed, then reload the Auctions page (it offers a Reload button
+when it's older than the plugin).
+
+## 1.5.3
+- Quick bids: **+1 bid** on GovAuctions cards (one bid, placed right away: stake a claim before the entry limit) and
+  **Bid $X (next step)** on Mac.bid cards (the smallest bid Mac.bid accepts, read live when you tap). One confirmation;
+  your max, budget and spending cap still apply. New action `auction_watcher.quick_bid`.
+
+## 1.5.2
+- A red **■ Stop** button on any card with something automatic running. GovAuctions: auto-cancel, auto-rebook and
+  top-up off, and booked bids still waiting cancelled. Mac.bid: the scheduled late bid off (a placed max can't be
+  withdrawn there). New action `auction_watcher.stop`.
+
+## 1.5.1
+- Point packs: a **Follow** button per pack auction bookmarks it on GovAuctions and sets its Max bids to the suggested
+  max, so it gets a full card (Book, auto-booking, limits). Following never bids by itself.
+- Point packs: the timer of a live pack now reads "live · first countdown …" (bidding is already open), not "starts in".
+- New action `auction_watcher.follow`.
+
+## 1.5.0
+- For others (Telegram): every message has buttons tied to its item (amounts in Mac.bid's real steps or GovAuctions
+  bid counts, Other amount, No thanks / Stop, I'd like to bid). A typed number or "stop" with several items open asks
+  "which item?" instead of guessing. `/items` lists their open items.
+
+## 1.4.2
+- Mac.bid: "Lower my max to $X" (the current price) while you're winning, checked live; your saved max follows so
+  auto-bid won't raise it again.
+
+## 1.4.1
+- Saved searches no longer lose their results, "already seen" list and last run on restart (they're loaded before
+  anything can use them, and never saved before that). Same start-up protection for global settings and For others.
+
+## 1.4.0
+- Mac.bid bids use only the amounts its own "Set your max bid" list offers ($1 steps to $100, $5 to $500, $10 to
+  $1,000, then $50). The Max bid box is that list; automatic bids round down, never up.
+
+## 1.3.8
+- Requests use Home Assistant's standard web client identity instead of naming the plugin.
+
+## 1.3.7
+- Mac.bid auto-bids stop after 2 bids Mac.bid didn't record (no endless retries), check the live minimum first, and
+  only items you're in are checked every few seconds near the end.
+
+## 1.3.6
+- Mac.bid items you're bidding on are checked every 2 minutes (every minute in their last 2 hours).
+
+## 1.3.5
+- Mac.bid: live price check before accepting or placing a bid; reads back the max Mac.bid recorded. Names drop the
+  Telegram chat id; "bid for someone" is refused on items you're bidding on yourself.
+
+## 1.3.0 – 1.3.4
+- For others on GovAuctions (they agree to pay for N bids, win or lose, plus the final price), cancelling properly
+  (booked bids cancelled), "stop" replies, and asking to bid while just watching. Reload banner when the page is
+  older than the plugin. Telegram chat picker.
+
+## 1.2.0
+- For others: bid on Mac.bid items for people on your list after they confirm on Telegram, or just keep them posted.
+
+## 1.1.x
+- Global ⚙ Settings tab (where alerts go, which alerts), per-site settings on each site tab, one spending cap across
+  all sites (weekly or monthly, block or warn), ☆ add search results to the site's watchlist / bookmarks, Mac.bid
+  sign-in recovery (Reconfigure instead of retrying forever).
+
+## 1.0.x
+- Saved searches across sites with Mac.bid keyword sync and pickup-location filters, auto-rebook top-up, faster
+  Mac.bid condition notes, point packs grouped by size.

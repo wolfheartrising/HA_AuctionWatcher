@@ -219,6 +219,34 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         except SiteError as err:
             raise HomeAssistantError(str(err)) from err
 
+    async def stop(call: ServiceCall) -> ServiceResponse:
+        """Stop everything automatic on one item (the card's Stop button)."""
+        await _require_admin(call)
+        aid = str(call.data["auction_id"]).strip()
+        coord = _owner(aid)
+        try:
+            return {"done": await coord.async_stop(aid)}
+        except SiteError as err:
+            raise HomeAssistantError(str(err)) from err
+
+    hass.services.async_register(DOMAIN, "stop", stop, schema=vol.Schema({vol.Required("auction_id"): cv.string}),
+                                 supports_response=SupportsResponse.OPTIONAL)
+
+    async def quick_bid(call: ServiceCall) -> ServiceResponse:
+        """GovAuctions: one bid. Mac.bid: the next allowed amount (read live)."""
+        await _require_admin(call)
+        aid = str(call.data["auction_id"]).strip()
+        coord = _owner(aid)
+        if not hasattr(coord, "async_quick_bid"):
+            raise ServiceValidationError("Quick bids aren't available on this site")
+        try:
+            return {"done": await coord.async_quick_bid(aid)}
+        except SiteError as err:
+            raise HomeAssistantError(str(err)) from err
+
+    hass.services.async_register(DOMAIN, "quick_bid", quick_bid, schema=vol.Schema({vol.Required("auction_id"): cv.string}),
+                                 supports_response=SupportsResponse.OPTIONAL)
+
     hass.services.async_register(
         DOMAIN, "follow", follow,
         schema=vol.Schema({

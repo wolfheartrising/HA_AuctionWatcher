@@ -27,6 +27,20 @@ refresh:
 
 search_now: {}
 
+quick_bid:
+  fields:
+    auction_id:
+      required: true
+      selector:
+        text:
+
+stop:
+  fields:
+    auction_id:
+      required: true
+      selector:
+        text:
+
 follow:
   fields:
     auction_id:

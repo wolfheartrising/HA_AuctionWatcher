@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import logging
 import time
 from datetime import timedelta
@@ -486,6 +487,27 @@ class AuctionWatcherCoordinator(DataUpdateCoordinator[dict[str, AuctionState]]):
         self._emit("cancelled", self._booking_data(aid, s.your_booked_left, "cancelled by you"))
         await self.async_request_refresh()
 
+    async def async_quick_bid(self, auction_id: str) -> str:
+        """GovAuctions "+1 bid": book a single bid (it's placed right away), e.g. to stake a claim before
+        the entry limit. Your Max bids, budget and spending cap still apply."""
+        booked = await self.async_book(str(auction_id), 1)
+        return f"{booked} bid placed"
+
+    async def async_stop(self, auction_id: str) -> str:
+        """The card's Stop button (GovAuctions): auto-cancel / auto-rebook / top-up off, and booked bids
+        still waiting cancelled (unused bids come back). Returns what was done."""
+        aid = str(auction_id)
+        done: list[str] = []
+        cur = self.auto_settings(aid)
+        if cur.auto_cancel or cur.auto_rebook or cur.topup_at:
+            await self.async_set_auto(aid, replace(cur, auto_cancel=False, auto_rebook=False, topup_at=0))
+            done.append("auto-booking off")
+        s = (self.data or {}).get(aid)
+        if s is not None and s.your_booked_left:
+            await self.async_cancel(aid)
+            done.append(f"{s.your_booked_left} booked bids cancelled")
+        return ", ".join(done) or "nothing was running"
+
     def _booking_data(self, aid: str, count: int, reason: str, state: AuctionState | None = None) -> dict[str, Any]:
         s = state or (self.data or {}).get(aid)
         return {
@@ -713,6 +735,31 @@ class MacBidCoordinator(AuctionWatcherCoordinator):
 
     def macbid_memory(self, lot_id: str) -> MacBidMemory:
         return self._mbmem.get(str(lot_id), MacBidMemory())
+
+    async def async_quick_bid(self, auction_id: str) -> str:
+        """Mac.bid "Bid $X (next step)": the smallest bid Mac.bid accepts right now (read live when tapped).
+        It's a max of that amount; your budget and spending cap still apply."""
+        aid = str(auction_id)
+        live = await self.async_lot_now(aid)
+        if live["winning"]:
+            raise SiteError("You're already winning this one")
+        amount = int(live["min_next"])
+        if self.bid_limit(aid) < amount:
+            await self.async_set_bid_limit(aid, amount)
+        await self.async_place_bid(aid, amount)
+        return f"${amount} max sent"
+
+    async def async_stop(self, auction_id: str) -> str:
+        """The card's Stop button (Mac.bid): the scheduled late bid is turned off. A max already placed
+        can't be withdrawn on Mac.bid (while winning it can be lowered to the current price)."""
+        aid = str(auction_id)
+        cur = self.macbid_settings(aid)
+        if cur.mode != MB_MODE_OFF:
+            self._mb[aid] = replace(cur, mode=MB_MODE_OFF)
+            await self._save()
+            self.async_update_listeners()
+            return "auto-bid off"
+        return "nothing was scheduled"
 
     async def async_set_macbid(self, lot_id: str, settings: MacBidSettings) -> None:
         aid = str(lot_id)
@@ -1063,6 +1110,9 @@ class EbayCoordinator(AuctionWatcherCoordinator):
 
     def dollars_used(self, since: float, exclude: str | None = None) -> float:
         return 0.0  # no bidding on eBay from here, so nothing counts toward the spending cap
+
+    async def async_quick_bid(self, auction_id: str) -> str:
+        raise SiteError("eBay can't be bid on from here (eBay keeps bidding to approved partners)")
 
     async def async_watch(self, item_id: str, on: bool = True) -> None:
         """Add to (or remove from) your eBay watch list (needs eBay sign-in)."""

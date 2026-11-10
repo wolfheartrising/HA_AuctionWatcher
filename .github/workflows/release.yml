@@ -1,0 +1,64 @@
+# On every push to main: run the tests, then, if the version in manifest.json has no release yet,
+# create the tag (v<version>) and a GitHub release whose notes are that version's CHANGELOG.md section.
+# HACS shows the version number and those notes under "Update available".
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Run the tests
+        run: |
+          pip install --quiet aiohttp pytest pytest-asyncio pyflakes
+          python -m pytest tests -q
+
+      - name: Read the version
+        id: version
+        run: |
+          VERSION=$(python -c "import json; print(json.load(open('custom_components/auction_watcher/manifest.json'))['version'])")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if git rev-parse "v$VERSION" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Release notes from CHANGELOG.md
+        if: steps.version.outputs.exists == 'false'
+        run: |
+          python - <<'EOF'
+          import re
+          version = "${{ steps.version.outputs.version }}"
+          text = open("CHANGELOG.md", encoding="utf-8").read()
+          m = re.search(rf"^## {re.escape(version)}\s*$(.*?)(?=^## |\Z)", text, re.S | re.M)
+          notes = m.group(1).strip() if m else f"Version {version}."
+          notes += ("\n\nAfter updating: restart Home Assistant if Python changed, then reload the Auctions page "
+                    "(it offers a Reload button when it's older than the plugin).")
+          open("release-notes.md", "w", encoding="utf-8").write(notes)
+          EOF
+
+      - name: Create the release
+        if: steps.version.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${{ steps.version.outputs.version }}" \
+            --target "${{ github.sha }}" \
+            --title "${{ steps.version.outputs.version }}" \
+            --notes-file release-notes.md
