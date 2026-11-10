@@ -6,6 +6,7 @@ from typing import Any
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -30,7 +31,10 @@ async def async_setup_entry(
     hass: HomeAssistant, entry: AuctionWatcherConfigEntry, async_add_entities: AddConfigEntryEntitiesCallback
 ) -> None:
     coord = entry.runtime_data
-    async_add_entities([PointsSensor(coord), OpportunitiesSensor(coord), FollowingSensor(coord)])
+    if entry.data.get("site") == "macbid":
+        async_add_entities([PickupsSensor(coord), FollowingSensor(coord)])
+    else:
+        async_add_entities([PointsSensor(coord), OpportunitiesSensor(coord), FollowingSensor(coord)])
 
     known: set[str] = set()
 
@@ -40,6 +44,15 @@ async def async_setup_entry(
         if new:
             known.update(new)
             async_add_entities(AuctionSensor(coord, aid) for aid in new)
+        # Auctions that ended more than "keep ended" days ago: remove their sensors for good
+        if coord.expired_ids:
+            registry = er.async_get(hass)
+            for aid in coord.expired_ids:
+                entity_id = registry.async_get_entity_id("sensor", DOMAIN, f"{entry.entry_id}_auction_{aid}")
+                if entity_id:
+                    registry.async_remove(entity_id)
+                known.discard(aid)
+            coord.expired_ids = []
 
     _add_new()
     entry.async_on_unload(coord.async_add_listener(_add_new))
@@ -77,6 +90,21 @@ class PointsSensor(_Base):
             "auction_watcher_account": self.coordinator.config_entry.title,
             "site": self.coordinator.config_entry.data.get("site"),
         }
+
+
+class PickupsSensor(PointsSensor):
+    """Mac.bid has no points; its account sensor counts won items waiting for pickup."""
+
+    _attr_name = "Pickups waiting"
+    _attr_icon = "mdi:package-variant-closed"
+    _attr_native_unit_of_measurement = "items"
+
+    def __init__(self, coord: AuctionWatcherCoordinator) -> None:
+        _Base.__init__(self, coord, "pickups")
+
+    @property
+    def native_value(self) -> int:
+        return sum(1 for s in (self.coordinator.data or {}).values() if s.status == "awaiting_pickup")
 
 
 class OpportunitiesSensor(_Base):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from datetime import timedelta
@@ -10,11 +11,22 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers.debounce import Debouncer
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
-from .alerts import build_calls
+from .alerts import build_calls, human_time
 from .const import (
+    CONF_KEEP_ENDED_DAYS,
+    DEFAULT_KEEP_ENDED_DAYS,
+    CONF_AUTH,
+    CONF_ENDING_MINUTES,
+    CONF_PICKUP_HOURS,
+    DEFAULT_ENDING_MINUTES,
+    DEFAULT_PICKUP_HOURS,
+    PICKUP_REFRESH_SECONDS,
+    WATCHLIST_REFRESH_SECONDS,
     CONF_ACTIVE_WINDOW,
     CONF_STABLE_SECONDS,
     DEFAULT_ACTIVE_WINDOW,
@@ -41,6 +53,10 @@ from .const import (
     EVENT_BID_LIMIT,
     EVENT_BOOKING,
     EVENT_ENDED,
+    EVENT_ENDING_SOON,
+    EVENT_OUTBID,
+    EVENT_OVER_MAX,
+    EVENT_PICKUP,
     EVENT_OPPORTUNITY,
     EVENT_WON,
     HISTORY_FETCHES_PER_UPDATE,
@@ -57,12 +73,27 @@ from .logic import (
     BidderTracker,
     Rules,
     Snapshot,
+    TimedSnapshot,
     choose_interval,
+    choose_timed_interval,
     decide_auto,
     evaluate,
+    evaluate_timed,
+    keep_ended,
 )
-from .sites.base import STATUS_LIVE, STATUS_UPCOMING, AuctionState, AuthError, PriceHistory, SiteError
+from .sites.base import (
+    STATUS_ENDED,
+    STATUS_LIVE,
+    STATUS_UPCOMING,
+    AuctionState,
+    AuthError,
+    PriceHistory,
+    SiteError,
+    state_from_dict,
+    state_to_dict,
+)
 from .sites import govauctions as ga
+from .sites import macbid as mb
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -74,6 +105,10 @@ EVENT_NAMES = {
     "booked": EVENT_BOOKING,
     "cancelled": EVENT_BOOKING,
     "booking_failed": EVENT_BOOKING,
+    "outbid": EVENT_OUTBID,
+    "ending_soon": EVENT_ENDING_SOON,
+    "over_max": EVENT_OVER_MAX,
+    "pickup": EVENT_PICKUP,
 }
 # Which "Which alerts to send" choice covers each event
 ALERT_KIND_OF = {"booked": "booking", "cancelled": "booking", "booking_failed": "booking"}
@@ -91,6 +126,8 @@ class AuctionWatcherCoordinator(DataUpdateCoordinator[dict[str, AuctionState]]):
             config_entry=entry,
             name=f"{DOMAIN} {entry.title}",
             update_interval=timedelta(seconds=self._opt(entry, CONF_FAST_INTERVAL, DEFAULT_FAST_INTERVAL)),
+            # "Check now" requests (the open Auctions page asks every few seconds) at most every 2 s
+            request_refresh_debouncer=Debouncer(hass, _LOGGER, cooldown=2.0, immediate=True),
         )
         self.client = client
         self.points: int | None = None
@@ -107,6 +144,11 @@ class AuctionWatcherCoordinator(DataUpdateCoordinator[dict[str, AuctionState]]):
         self._bidders = BidderTracker()
         self._auto: dict[str, AutoSettings] = {}
         self._mem: dict[str, AutoMemory] = {}
+        self._last_seen: dict[str, AuctionState] = {}
+        self._ended: dict[str, tuple[float, AuctionState]] = {}
+        self.expired_ids: list[str] = []  # ended long enough ago that their sensors can go
+        self._original_end: dict[str, float] = {}  # Mac.bid lot -> first end time seen (saved)
+        self._needs_save = False
 
     @staticmethod
     def _opt(entry: ConfigEntry, key: str, default: Any) -> Any:
@@ -132,12 +174,22 @@ class AuctionWatcherCoordinator(DataUpdateCoordinator[dict[str, AuctionState]]):
         self._limits = {str(k): int(v) for k, v in (stored.get("limits") or {}).items()}
         self._auto = {str(k): AutoSettings.from_dict(v) for k, v in (stored.get("auto") or {}).items()}
         self._mem = {str(k): AutoMemory(cancelled_with=int(v)) for k, v in (stored.get("cancelled_with") or {}).items()}
+        self._ended = {}
+        for k, (t, d) in (stored.get("ended") or {}).items():
+            try:
+                self._ended[str(k)] = (float(t), state_from_dict(d))
+            except (TypeError, ValueError, KeyError):
+                continue
+        self._last_seen = {k: st for k, (_, st) in self._ended.items()}
+        self._original_end = {str(k): float(v) for k, v in (stored.get("original_end") or {}).items()}
 
     async def _save(self) -> None:
         await self._store.async_save({
             "limits": self._limits,
             "auto": {k: vars(v) for k, v in self._auto.items()},
             "cancelled_with": {k: m.cancelled_with for k, m in self._mem.items() if m.cancelled_with},
+            "ended": {k: [t, state_to_dict(st)] for k, (t, st) in self._ended.items()},
+            "original_end": self._original_end,
         })
 
     async def async_set_bid_limit(self, auction_id: str, limit: int) -> None:
@@ -150,6 +202,21 @@ class AuctionWatcherCoordinator(DataUpdateCoordinator[dict[str, AuctionState]]):
 
     def bid_limit(self, auction_id: str) -> int:
         return self.rules.bid_limit(auction_id)
+
+    async def _apply_keep_ended(self, states: dict[str, AuctionState], now: float) -> dict[str, AuctionState]:
+        """Keep ended (or dropped) auctions on the page for the configured number of days."""
+        days = float(self._opt(self.config_entry, CONF_KEEP_ENDED_DAYS, DEFAULT_KEEP_ENDED_DAYS))
+        for st in states.values():
+            if st.status == STATUS_LIVE and st.original_end and now > st.original_end.timestamp():
+                st.extra["overtime_seconds"] = int(now - st.original_end.timestamp())
+        before = {k: t for k, (t, _) in self._ended.items()}
+        shown, self._last_seen, self._ended, self.expired_ids = keep_ended(states, self._last_seen, self._ended, now, days)
+        if before != {k: t for k, (t, _) in self._ended.items()} or self._needs_save:
+            # forget original end times of lots that are gone for good
+            self._original_end = {k: v for k, v in self._original_end.items() if k in shown or k in self._ended}
+            self._needs_save = False
+            await self._save()  # only write to disk when the ended list changes
+        return shown
 
     def auto_settings(self, auction_id: str) -> AutoSettings:
         return self._auto.get(str(auction_id), AutoSettings())
@@ -337,6 +404,7 @@ class AuctionWatcherCoordinator(DataUpdateCoordinator[dict[str, AuctionState]]):
             st.extra["point_cost"] = point_cost
             states[aid] = st
         self._bidders.forget_except(set(tracked))
+        states = await self._apply_keep_ended(states, now)
 
         events, self._snapshot = evaluate(states, self.rules, self._snapshot, self._lists["won"], now)
         for kind, data in events:
@@ -363,4 +431,119 @@ class AuctionWatcherCoordinator(DataUpdateCoordinator[dict[str, AuctionState]]):
             self.hass.config_entries.async_update_entry(
                 e, data={**e.data, CONF_COOKIE: cookie_header(self.client.cookies)}
             )
+        return states
+
+
+class MacBidCoordinator(AuctionWatcherCoordinator):
+    """Mac.bid account: watchlist + recent bids, live lot data, and won items awaiting pickup.
+
+    Shares alerts, max-bid storage and notifications with the GovAuctions coordinator;
+    no booking or auto-bidding here.
+    """
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, client: mb.MacBidClient) -> None:
+        super().__init__(hass, entry, client)  # type: ignore[arg-type]
+        self._watch: dict[str, dict[str, Any]] = {}
+        self._watch_at = 0.0
+        self._pickups: dict[str, AuctionState] = {}
+        self._pickups_at = 0.0
+        self._timed = TimedSnapshot()
+        self._known_lots: set[str] = set()
+        self._lots: dict[str, tuple[float, dict[str, Any]]] = {}  # lot_id -> (fetched at, data)
+        self._backoff_until = 0.0
+
+    @staticmethod
+    def _seconds_left(lot: dict[str, Any], now: float) -> float | None:
+        end = mb._dt(lot.get("end_time"))
+        return end.timestamp() - now if end else None
+
+    @property
+    def opportunities(self) -> list[str]:
+        return []
+
+    async def async_book(self, auction_id: str, count: int, max_price: float | None = None) -> int:
+        raise SiteError("Booking isn't available for Mac.bid")
+
+    async def async_cancel(self, auction_id: str) -> None:
+        raise SiteError("Booking isn't available for Mac.bid")
+
+    async def _async_update_data(self) -> dict[str, AuctionState]:
+        e = self.config_entry
+        now = time.time()
+        client: mb.MacBidClient = self.client  # type: ignore[assignment]
+        try:
+            if not self._watch_at or now - self._watch_at >= WATCHLIST_REFRESH_SECONDS:
+                self._watch = await client.watchlist()
+                self._known_lots |= set(await client.active_ids())
+                self._watch_at = now
+            if not self._pickups_at or now - self._pickups_at >= PICKUP_REFRESH_SECONDS:
+                self._pickups = await client.pickups(now)
+                self._pickups_at = now
+            extra = [x.strip() for x in str(self._opt(e, CONF_EXTRA_IDS, "")).replace(",", " ").split() if x.strip().isdigit()]
+            tracked = sorted(set(self._watch) | self._known_lots | set(extra))
+            # Each lot is checked only as often as it needs (often near its end), spaced out,
+            # and a "too many requests" answer just keeps the last known data.
+            first = True
+            for lot_id in tracked:
+                cached = self._lots.get(lot_id)
+                if cached and now - cached[0] < mb.lot_refresh_seconds(self._seconds_left(cached[1], now)):
+                    continue
+                if now < self._backoff_until:
+                    break
+                if not first:
+                    await asyncio.sleep(0.5)
+                first = False
+                try:
+                    self._lots[lot_id] = (now, await client.lot(lot_id))
+                except mb.RateLimited:
+                    self._backoff_until = now + 60
+                    _LOGGER.info("Mac.bid asked to slow down; using last known data for a minute")
+                    break
+        except AuthError as err:
+            raise ConfigEntryAuthFailed(str(err)) from err
+        except SiteError as err:
+            raise UpdateFailed(str(err)) from err
+        finally:
+            # Mac.bid hands out a new refresh token on every renewal: always keep the latest
+            if client.auth_changed:
+                client.auth_changed = False
+                self.hass.config_entries.async_update_entry(e, data={**e.data, CONF_AUTH: client.auth})
+
+        states: dict[str, AuctionState] = {}
+        for lot_id in tracked:
+            lot = (self._lots.get(lot_id) or (0, None))[1]
+            st = mb.build_state(lot_id, lot, self._watch.get(lot_id), client.user_id, set(self._watch), now)
+            if st.ends_at:
+                if lot_id not in self._original_end:
+                    self._original_end[lot_id] = st.ends_at.timestamp()
+                    self._needs_save = True
+                first = self._original_end[lot_id]
+                if first < st.ends_at.timestamp() - 1:
+                    st.original_end = dt_util.utc_from_timestamp(first)
+                else:
+                    st.original_end = st.ends_at
+            # Forget lots you only bid on once they've closed and dropped off your bid history
+            if st.status == STATUS_ENDED and lot_id not in self._watch and lot_id in self._known_lots:
+                self._known_lots.discard(lot_id)
+            states[lot_id] = st
+        states.update(self._pickups)
+        states = await self._apply_keep_ended(states, now)
+
+        events, self._timed = evaluate_timed(
+            states, self.rules, self._timed, now,
+            ending_minutes=int(self._opt(e, CONF_ENDING_MINUTES, DEFAULT_ENDING_MINUTES)),
+            pickup_hours=int(self._opt(e, CONF_PICKUP_HOURS, DEFAULT_PICKUP_HOURS)),
+        )
+        for kind, data in events:
+            if data.get("ends_at"):
+                data["ends_local"] = human_time(dt_util.as_local(dt_util.parse_datetime(data["ends_at"])))
+            self._emit(kind, data)
+
+        seconds = choose_timed_interval(
+            states, now,
+            fast=int(self._opt(e, CONF_FAST_INTERVAL, DEFAULT_FAST_INTERVAL)),
+            idle_minutes=int(self._opt(e, CONF_IDLE_INTERVAL, DEFAULT_IDLE_INTERVAL)),
+        )
+        self.mode = "fast" if seconds <= 60 else ("watching" if seconds <= 15 * 60 else "idle")
+        self.update_interval = timedelta(seconds=seconds)
         return states

@@ -240,6 +240,8 @@ def build_state(
         leader=live.get("leader"),
         clock_seconds=live.get("clock_seconds"),
         starts_at=starts_at,
+        # unixStarts is when the first long countdown runs out (checked against the live clock)
+        original_end=starts_at,
         active_bidders=live.get("active_bidders"),
         recent_bidders=live.get("recent_bidders", []),
         closed_to_new=live.get("closed_to_new"),

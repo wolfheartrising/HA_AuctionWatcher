@@ -25,6 +25,7 @@ CATEGORY_WATCHING = "watching"
 STATUS_LIVE = "live"
 STATUS_UPCOMING = "upcoming"
 STATUS_ENDED = "ended"
+STATUS_PICKUP = "awaiting_pickup"  # won, waiting for you to collect it (Mac.bid)
 
 
 @dataclass
@@ -61,6 +62,9 @@ class AuctionState:
     # Timed auctions (eBay, GovDeals, ...): fixed end time.
     ends_at: datetime | None = None
     starts_at: datetime | None = None
+    # When it was originally due to end; after that it's in overtime
+    # (penny auctions: end of the first countdown; timed auctions: first end time seen)
+    original_end: datetime | None = None
     active_bidders: int | None = None
     recent_bidders: list[str] = field(default_factory=list)
     closed_to_new: bool | None = None
@@ -80,7 +84,7 @@ class AuctionState:
         """Flat dict for Home Assistant state attributes."""
         data = asdict(self)
         hist = data.pop("history")
-        for key in ("ends_at", "starts_at"):
+        for key in ("ends_at", "starts_at", "original_end"):
             if data[key] is not None:
                 data[key] = data[key].isoformat()
         if hist:
@@ -89,3 +93,23 @@ class AuctionState:
         extra = data.pop("extra")
         data.update(extra)
         return data
+
+
+def state_to_dict(s: AuctionState) -> dict[str, Any]:
+    """For saving to disk. Price history is left out (it's re-fetched for live auctions)."""
+    d = asdict(s)
+    d["history"] = None
+    for key in ("ends_at", "starts_at", "original_end"):
+        if d.get(key) is not None:
+            d[key] = d[key].isoformat()
+    return d
+
+
+def state_from_dict(d: dict[str, Any]) -> AuctionState:
+    d = dict(d)
+    for key in ("ends_at", "starts_at", "original_end"):
+        if d.get(key):
+            d[key] = datetime.fromisoformat(d[key])
+    d["history"] = None
+    known = AuctionState.__dataclass_fields__
+    return AuctionState(**{k: v for k, v in d.items() if k in known})

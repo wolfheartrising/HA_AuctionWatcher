@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from .sites.base import STATUS_LIVE, STATUS_UPCOMING, AuctionState
+from .sites.base import STATUS_ENDED, STATUS_LIVE, STATUS_UPCOMING, AuctionState
 
 
 @dataclass
@@ -254,3 +254,118 @@ def decide_auto(
             return "", 0, "no points left to book"
         return "book", count, f"down to {s.active_bidders} bidder{'' if s.active_bidders == 1 else 's'}"
     return "", 0, mem.status or "watching"
+
+
+# ---------------------------------------------------------------- timed auctions (Mac.bid)
+#
+# Fixed end times (pushed back by late bids), pay what you bid. Alerts:
+#   outbid       you were winning, now someone else is
+#   ending_soon  N minutes before the end (once per auction)
+#   over_max     the price passed your max bid (once per max)
+#   won / ended  when it closes
+#   pickup       N hours before a won item's pickup deadline (once)
+
+@dataclass
+class TimedSnapshot:
+    winning: set[str] = field(default_factory=set)
+    live: set[str] = field(default_factory=set)
+    ending_fired: set[str] = field(default_factory=set)
+    over_fired: set[tuple[str, int]] = field(default_factory=set)
+    pickup_fired: set[str] = field(default_factory=set)
+    first: bool = True  # don't alert about things that were already true at startup
+
+
+def evaluate_timed(
+    states: dict[str, AuctionState],
+    rules: Rules,
+    prev: TimedSnapshot,
+    now: float,
+    ending_minutes: int = 10,
+    pickup_hours: int = 24,
+) -> tuple[list[tuple[str, dict[str, Any]]], TimedSnapshot]:
+    events: list[tuple[str, dict[str, Any]]] = []
+    snap = TimedSnapshot(ending_fired=set(prev.ending_fired), over_fired=set(prev.over_fired),
+                         pickup_fired=set(prev.pickup_fired), first=False)
+    for aid, s in states.items():
+        winning = bool(s.extra.get("winning"))
+        left = s.ends_at.timestamp() - now if s.ends_at else None
+        d = {**_data(s, rules), "minutes_left": round(left / 60) if left is not None else None,
+             "ends_at": s.ends_at.isoformat() if s.ends_at else None, "winning": winning}
+
+        if s.status == "awaiting_pickup":
+            if left is not None and left <= pickup_hours * 3600 and aid not in prev.pickup_fired:
+                snap.pickup_fired.add(aid)
+                events.append(("pickup", d))
+            continue
+
+        if s.status == STATUS_LIVE:
+            snap.live.add(aid)
+            if winning:
+                snap.winning.add(aid)
+            elif aid in prev.winning and not prev.first:
+                events.append(("outbid", d))
+            if ending_minutes and left is not None and 0 < left <= ending_minutes * 60 and aid not in prev.ending_fired:
+                snap.ending_fired.add(aid)
+                events.append(("ending_soon", d))
+            limit = rules.bid_limit(aid)  # on Mac.bid: your max bid in dollars
+            if limit and s.price is not None and s.price > limit and not winning and (aid, limit) not in prev.over_fired:
+                snap.over_fired.add((aid, limit))
+                events.append(("over_max", d))
+        elif aid in prev.live and s.status == STATUS_ENDED:
+            events.append(("won" if winning or aid in prev.winning else "ended", d))
+    return events, snap
+
+
+def choose_timed_interval(states: dict[str, AuctionState], now: float, fast: int, idle_minutes: int) -> int:
+    """Poll fast only near an end time; Mac.bid auctions run for days."""
+    lefts = [s.ends_at.timestamp() - now for s in states.values() if s.status == STATUS_LIVE and s.ends_at]
+    soonest = min(lefts) if lefts else None
+    if soonest is None:
+        return idle_minutes * 60
+    if soonest <= 15 * 60:
+        return fast
+    if soonest <= 2 * 3600:
+        return 120
+    return min(idle_minutes * 60, 15 * 60)
+
+
+# ---------------------------------------------------------------- keeping ended auctions
+
+KEEP_STATUSES = (STATUS_LIVE, STATUS_UPCOMING, STATUS_ENDED)
+
+
+def keep_ended(
+    states: dict[str, AuctionState],
+    last_seen: dict[str, AuctionState],
+    ended: dict[str, tuple[float, AuctionState]],
+    now: float,
+    keep_days: float,
+) -> tuple[dict[str, AuctionState], dict[str, AuctionState], dict[str, tuple[float, AuctionState]], list[str]]:
+    """Keep ended auctions on the page for keep_days.
+
+    Sites drop auctions from their lists soon after they end (or when you
+    un-watch them). Anything that was live and disappears is kept as ended,
+    marked "no longer followed". Returns (states to show, new last_seen,
+    new ended, auction ids whose time is up and whose sensors can go).
+    """
+    out = dict(states)
+    ended = dict(ended)
+    for aid, s in states.items():
+        if s.status == STATUS_ENDED:
+            ended[aid] = (ended.get(aid, (now, s))[0], s)
+    for aid, prev in last_seen.items():
+        if aid not in states and prev.status in KEEP_STATUSES and aid not in ended:
+            gone = AuctionState(**{**prev.__dict__})
+            if gone.status != STATUS_ENDED:
+                gone.status = STATUS_ENDED
+                gone.extra = {**gone.extra, "dropped": True}
+            ended[aid] = (now, gone)
+    expired = [aid for aid, (t, _) in ended.items() if now - t > keep_days * 86400]
+    for aid in expired:
+        del ended[aid]
+    for aid, (t, s) in ended.items():
+        if aid not in out:
+            out[aid] = s
+        out[aid].extra = {**out[aid].extra, "ended_at": t, "remove_after": t + keep_days * 86400}
+    new_last = {aid: s for aid, s in states.items() if s.status in KEEP_STATUSES}
+    return out, new_last, ended, expired

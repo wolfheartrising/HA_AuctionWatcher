@@ -1,8 +1,8 @@
 # Auction Watcher for Home Assistant
 
 Follow the online auctions you're bidding on or watching, with a dashboard,
-phone alerts and spending limits. **Supports GovAuctions**; more sites
-(eBay, Mac.bid, GovDeals, ...) are planned, one handler per site.
+phone alerts and spending limits. **Supports GovAuctions and Mac.bid**; more sites
+(eBay, GovDeals, ...) are planned, one handler per site.
 
 Auction Watcher reads your auctions. It only **books or cancels bids** when you
 press a button, call a service, or turn on auto-booking for a specific auction,
@@ -24,8 +24,20 @@ and never past the bid limit you set for that auction.
   - **Telegram**: its notify service or notify entities, with the auction link in the message.
   - **Alexa**: Alexa Media Player services are sent as announcements; for the official Alexa Devices integration pick its *Announce* or *Speak* entity. Alexa gets a short spoken version.
   - Anything else Home Assistant can notify (email, the bell-icon notification, ...).
+- **Ended auctions stay for 3 days** (a setting) with the final price, winner and what you spent, then they're removed along with their sensors. Auctions you stop following are kept too, marked *no longer followed*. This survives restarts.
 - **Events** too (`auction_watcher_opportunity`, `…_bid_limit_reached`, `…_auction_ended`, `…_auction_won`), so you can build your own automations, like flashing a light. The old blueprint in `blueprints/` still works but isn't needed.
 - **Bid limits**: a default limit per auction in the options, and `auction_watcher.set_bid_limit` for a single auction. At the limit you get one alert and no more "few bidders left" alerts for that auction.
+
+## Mac.bid
+
+Timed liquidation auctions: you pay what you bid, plus fees, and pick up in person.
+
+- **Login**: your Mac.bid email and password (recommended), or your browser's saved login (`mac_auths` + `device_id` from the browser's Local Storage). Mac.bid's login lasts 30 minutes and is renewed automatically; the renewal chain lasts 60 days and extends itself, and with email + password it can always log in fresh. Mac.bid hands out a new renewal token every time, so a pasted browser login is taken over by Home Assistant: log in again in your browser afterwards.
+- **Follows** your watchlist and the lots in your recent bid history (plus any extra lot IDs you add). Each lot is checked only as often as it needs: every check in its last 15 minutes, every 2 minutes in its last 2 hours, every 15 minutes otherwise. If Mac.bid says "too many requests", the last known data is kept and it backs off.
+- **Cards** show a real countdown to the end (with an *extended* badge when late bids push it back), **you're winning / outbid**, other bidders, watchers, retail and Buy Now prices, and **what winning costs**: the bid plus Mac.bid's 15% buyer's premium and $3 lot fee (before tax).
+- **Max bid ($)** per lot, with what winning at it would cost. Auction Watcher doesn't place Mac.bid bids.
+- **Awaiting pickup** tab: won items with a countdown to the pickup deadline, checked every 6 hours.
+- **Alerts**: outbid, ending soon (default 10 minutes before), price passed your max, won / ended, and a pickup reminder (default 24 hours before the deadline).
 
 ## Booking and auto-booking (GovAuctions)
 

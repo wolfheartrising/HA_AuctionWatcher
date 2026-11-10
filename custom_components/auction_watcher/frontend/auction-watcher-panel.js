@@ -10,9 +10,9 @@
  * until you save it, and the page re-draws from those drafts.
  */
 
-const SITE_NAMES = { govauctions: "GovAuctions" };
+const SITE_NAMES = { govauctions: "GovAuctions", macbid: "Mac.bid" };
 // What the per-auction spending cap is called on each site
-const LIMIT_LABEL = { govauctions: "Max bids" };
+const LIMIT_LABEL = { govauctions: "Max bids", macbid: "Max bid ($)" };
 const SHORT_CLOCK = 15; // seconds; same as FINAL_PHASE_MAX_CLOCK in logic.py
 
 const SORTS = {
@@ -81,9 +81,19 @@ class AuctionWatcherPanel extends HTMLElement {
 
   connectedCallback() {
     this._timer = setInterval(() => this._tick(), 1000);
+    // While you're looking at the page and a penny auction is in its 5-second phase,
+    // ask for a check every 3 s so the clock and bidders keep up with the site.
+    this._live = setInterval(() => this._liveRefresh(), 3000);
     this._maybeRender(true);
   }
-  disconnectedCallback() { clearInterval(this._timer); }
+  disconnectedCallback() { clearInterval(this._timer); clearInterval(this._live); }
+
+  _liveRefresh() {
+    if (!this._hass || document.visibilityState !== "visible") return;
+    const hot = this._auctions().some((a) => a.site === "govauctions" && a.status === "live"
+      && a.clock_seconds !== null && a.clock_seconds !== undefined && Number(a.clock_seconds) <= SHORT_CLOCK);
+    if (hot) this._hass.callService("auction_watcher", "refresh", { site: "govauctions" }).catch(() => {});
+  }
 
   // ---------------------------------------------------------------- data
 
@@ -113,6 +123,7 @@ class AuctionWatcherPanel extends HTMLElement {
       { id: "active", label: "Active", filter: (a) => a.category === "bidding" && (a.status === "live" || a.status === "upcoming") },
       { id: "watching", label: "Watching", filter: (a) => a.category === "watching" && a.status !== "ended" },
       { id: "ended", label: "Ended", filter: (a) => a.status === "ended" },
+      { id: "pickup", label: "Awaiting pickup", filter: (a) => a.status === "awaiting_pickup" },
       ...sites.map((site) => ({ id: "site-" + site, label: SITE_NAMES[site] || site, filter: (a) => a.site === site })),
     ];
   }
@@ -227,8 +238,10 @@ class AuctionWatcherPanel extends HTMLElement {
   _clock(a) {
     // Real deadlines tick down. A penny auction's short clock is reset by every
     // bid, which we only see at the next check, so it's shown "as of" that check.
+    if (a.status === "ended" && a.remove_after) return { label: "Leaves page in", deadline: Number(a.remove_after) * 1000 };
+    if (a.status === "awaiting_pickup") return { label: "Pick up within", deadline: a.ends_at ? Date.parse(a.ends_at) : null };
     if (a.status === "upcoming" && a.starts_at) return { label: "Starts in", deadline: Date.parse(a.starts_at) };
-    if (a.ends_at) return { label: "Ends in", deadline: Date.parse(a.ends_at) };
+    if (a.ends_at) return { label: a.status === "ended" ? "Ended" : "Ends in", deadline: Date.parse(a.ends_at) };
     if (a.status === "live" && a.clock_seconds !== null && a.clock_seconds !== undefined) {
       const clock = Number(a.clock_seconds);
       if (clock > SHORT_CLOCK) return { label: "First countdown", deadline: a.updated + clock * 1000 };
@@ -238,6 +251,7 @@ class AuctionWatcherPanel extends HTMLElement {
   }
 
   _card(a) {
+    if (a.site === "macbid") return this._macbidCard(a);
     const id = esc(a.auction_id);
     const c = this._clock(a);
     const img = safeUrl(a.image);
@@ -259,6 +273,7 @@ class AuctionWatcherPanel extends HTMLElement {
               ${a.opportunity ? `<span class="badge hot">🎯 few bidders</span>` : ""}
               ${a.bid_limit_reached ? `<span class="badge cap">⛔ max bids reached</span>` : ""}
               ${a.closed_to_new && !a.your_bids ? `<span class="badge">closed to new bidders</span>` : ""}
+              ${a.dropped ? `<span class="badge">no longer followed</span>` : ""}
             </div>
           </div>
         </div>
@@ -267,11 +282,12 @@ class AuctionWatcherPanel extends HTMLElement {
           <div><div class="k">Price</div><div class="v">${money(a.price)}</div></div>
           <div><div class="k">${c.label}</div>
             ${c.asOf
-              ? `<div class="v ${c.value <= 3 ? "urgent" : ""}">${c.value}s</div><div class="k ago" data-since="${c.asOf}"></div>`
+              ? `<div class="v penny" data-from="${c.value}" data-since="${c.asOf}">${c.value}s</div><div class="k ago" data-since="${c.asOf}"></div>`
               : `<div class="v timer" data-deadline="${c.deadline ?? ""}">–</div>`}</div>
           <div><div class="k">Other bidders (${esc(a.active_window_minutes || 1)} min)</div><div class="v">${active}</div>
             ${a.you_are_bidding ? `<div class="k">+ you</div>` : ""}</div>
         </div>
+        ${this._overtimeLine(a)}
         ${bidders ? `<div class="line"><span class="k">Bidding:</span> ${bidders}</div>` : ""}
         <div class="rows">
           <div><span class="k">Your bids</span> ${num(a.your_bids)}${a.bid_limit ? ` / ${num(a.bid_limit)}` : ""} <span class="muted">(${money(a.your_points_cost)})</span></div>
@@ -307,6 +323,86 @@ class AuctionWatcherPanel extends HTMLElement {
       </div>`;
   }
 
+  // ---------------------------------------------------------------- Mac.bid cards
+
+  _macbidCard(a) {
+    const id = esc(a.auction_id);
+    const c = this._clock(a);
+    const img = safeUrl(a.image);
+    const url = safeUrl(a.url);
+    const pickup = a.status === "awaiting_pickup";
+    const status = a.unavailable ? "unavailable" : pickup ? "awaiting pickup" : a.status;
+    let badge = "";
+    if (pickup) badge = a.overdue ? `<span class="badge cap">⛔ pickup overdue</span>` : `<span class="badge">${a.paid ? "paid" : "not paid yet"}</span>`;
+    else if (a.winning) badge = `<span class="badge on">✅ you're winning</span>`;
+    else if (a.you_are_bidding && a.status === "live") badge = `<span class="badge hot">⚠️ outbid</span>`;
+    if (a.in_extension) badge += ` <span class="badge">⏱ extended</span>`;
+    if (a.dropped) badge += ` <span class="badge">no longer followed</span>`;
+    if (a.status === "ended" && !a.dropped) badge += a.winning ? ` <span class="badge on">🏆 you won</span>` : "";
+    if (a.bid_limit && Number(a.price) > Number(a.bid_limit) && !a.winning && !pickup) badge += ` <span class="badge cap">past your max</span>`;
+    const head = `
+        <div class="top">
+          ${img ? `<img src="${img}" alt="" loading="lazy">` : `<div class="noimg">🛒</div>`}
+          <div class="head">
+            <a class="name" href="${url}" target="_blank" rel="noopener">${esc(a.title)}</a>
+            <div class="sub">Mac.bid · <span class="status ${esc(a.status)}">${esc(status)}</span> ${badge}</div>
+            ${(a.labels || []).length ? `<div class="labels">${a.labels.map((l) => `<span class="tag">${esc(l)}</span>`).join(" ")}</div>` : ""}
+          </div>
+        </div>`;
+    const clock = `<div><div class="k">${c.label}</div><div class="v timer" data-deadline="${c.deadline ?? ""}">–</div></div>`;
+    if (pickup) {
+      return `<div class="card ${a.overdue ? "capped" : ""}">${head}
+        <div class="big">
+          <div><div class="k">Won for</div><div class="v">${money(a.price)}</div></div>
+          ${clock}
+          <div><div class="k">Lot</div><div class="v small">${esc(a.lot_number || "–")}</div></div>
+        </div>
+        <div class="note">Pickup deadline: ${a.ends_at ? esc(new Date(a.ends_at).toLocaleString()) : "–"}.
+          ${a.paid ? "" : "Pay the invoice before picking up."} <a href="${url}" target="_blank" rel="noopener">Open awaiting pickup</a></div>
+      </div>`;
+    }
+    const limit = this._val(a.auction_id, "limit", a.bid_limit || "");
+    return `<div class="card ${a.winning ? "opp" : ""}">${head}
+        <div class="big">
+          <div><div class="k">Current bid</div><div class="v">${money(a.price)}</div></div>
+          ${clock}
+          <div><div class="k">Other bidders</div><div class="v">${a.active_bidders ?? "–"}</div>
+            ${a.you_are_bidding ? `<div class="k">+ you</div>` : ""}</div>
+        </div>
+        ${this._overtimeLine(a)}
+        <div class="rows">
+          <div><span class="k">If you win now</span> ${money(a.cost_if_won_now)} <span class="muted">(+15% + $3, before tax)</span></div>
+          <div><span class="k">Retail</span> ${money(a.retail_price)}</div>
+          <div><span class="k">Buy now</span> ${money(a.buy_it_now)}</div>
+          <div><span class="k">Bids · watchers</span> ${num(a.total_bids)} · ${num(a.watchers)}</div>
+        </div>
+        <div class="limits">
+          <div class="lim-row">
+            <label>Max bid ($)
+              <input data-id="${id}" data-field="limit" type="number" min="0" step="1" inputmode="numeric"
+                value="${esc(limit)}" placeholder="none"></label>
+            <button type="button" data-act="limit" data-id="${id}">Save</button>
+            <span class="saved">${esc(this._saved["limit:" + a.auction_id] || "")}</span>
+          </div>
+          <div class="total" data-total="${id}">${this._totalText(a)}</div>
+          <div class="note">You get an alert when the price passes this. Bid on Mac.bid itself; this doesn't place bids.</div>
+        </div>
+      </div>`;
+  }
+
+  _overtimeLine(a) {
+    if (!a.original_end) return "";
+    const orig = Date.parse(a.original_end);
+    const when = new Date(orig).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" });
+    if (a.status === "live" && Date.now() > orig) {
+      return `<div class="line"><span class="k">Original end</span> ${esc(when)} · <b>overtime <span class="overtime" data-since="${orig}">${fmtDuration((Date.now() - orig) / 1000)}</span></b></div>`;
+    }
+    if (a.ends_at && Math.abs(Date.parse(a.ends_at) - orig) > 1000) {
+      return `<div class="line"><span class="k">Original end</span> ${esc(when)} · extended ${fmtDuration((Date.parse(a.ends_at) - orig) / 1000)}</div>`;
+    }
+    return a.status === "live" || a.status === "upcoming" ? `<div class="line"><span class="k">Scheduled end</span> ${esc(when)}</div>` : "";
+  }
+
   _isOneCent(a) {
     return (a.labels || []).some((l) => /1¢/.test(l));
   }
@@ -314,6 +410,11 @@ class AuctionWatcherPanel extends HTMLElement {
   // Total max cost = max bids × point cost + what you'd pay if you won at your max price
   _totalText(a) {
     const aid = a.auction_id;
+    if (a.site === "macbid") {
+      const max = parseFloat(this._val(aid, "limit", a.bid_limit || 0)) || 0;
+      if (!max) return `<span class="muted">Set a max bid to see what winning at it would cost.</span>`;
+      return `<b>If you win at your max: ${money(max * 1.15 + 3)}</b> <span class="muted">= ${money(max)} + 15% buyer's premium + $3 lot fee, before tax.</span>`;
+    }
     const limit = parseInt(this._val(aid, "limit", a.bid_limit || 0), 10) || 0;
     const maxPrice = parseFloat(this._val(aid, "max_price", a.max_price || 0)) || 0;
     if (!limit) return `<span class="muted">Set ${esc(LIMIT_LABEL[a.site] || "a bid limit")} to see your total max cost.</span>`;
@@ -381,6 +482,14 @@ class AuctionWatcherPanel extends HTMLElement {
       const left = (dl - now) / 1000;
       el.textContent = left <= 0 ? "now" : fmtDuration(left);
       el.classList.toggle("urgent", left > 0 && left <= 60);
+    });
+    this.shadowRoot.querySelectorAll(".penny").forEach((el) => {
+      const left = Number(el.dataset.from) - (now - Number(el.dataset.since)) / 1000;
+      el.textContent = left > 0 ? `${Math.ceil(left)}s` : "0s";
+      el.classList.toggle("urgent", left <= 3);
+    });
+    this.shadowRoot.querySelectorAll(".overtime").forEach((el) => {
+      el.textContent = fmtDuration((now - Number(el.dataset.since)) / 1000);
     });
     this.shadowRoot.querySelectorAll(".ago").forEach((el) => {
       el.textContent = `as of ${fmtDuration((now - Number(el.dataset.since)) / 1000)} ago`;
@@ -506,6 +615,7 @@ const STYLE = `
   .big .v { font-size: 20px; font-weight: 500; font-variant-numeric: tabular-nums; }
   .timer.urgent, .v.urgent { color: var(--error-color, #db4437); }
   .ago { font-size: 11px; }
+  .big .v.small { font-size: 15px; }
   .k { color: var(--secondary-text-color); font-size: 12px; }
   .rows { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; font-size: 14px; }
   .rows .k { display: block; }

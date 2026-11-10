@@ -199,3 +199,37 @@ def test_label_notes_explain_special_types():
     static = ga.parse_static({"static": {"1": {"name": "X", "icons": [{"title": "1¢ Auction", "message": "Most winners pay 1¢"}],
                                                 "noReEntry": True}}})["1"]
     assert static["label_notes"] == {"1¢ Auction": "Most winners pay 1¢", "No Re-Entry": ga.label_note("No Re-Entry")}
+
+
+def test_keep_ended_for_n_days_then_expire():
+    from aw.logic import keep_ended
+    from aw.sites.base import state_from_dict, state_to_dict
+    live = _states()
+    shown, last, ended, gone = keep_ended(live, {}, {}, NOW, 3)
+    assert set(shown) == {"17782125"} and ended == {} and gone == []
+    # the site drops it from its list while we last saw it live -> kept as ended, marked dropped
+    shown, last, ended, gone = keep_ended({}, last, ended, NOW + 60, 3)
+    s = shown["17782125"]
+    assert s.status == "ended" and s.extra["dropped"] and s.extra["remove_after"] == NOW + 60 + 3 * 86400
+    # survives a save/restore (Home Assistant restart)
+    restored = {k: (t, state_from_dict(state_to_dict(st))) for k, (t, st) in ended.items()}
+    shown, last, ended, gone = keep_ended({}, last, restored, NOW + 86400, 3)
+    assert shown["17782125"].title.startswith("Omaha") and gone == []
+    # after 3 days it's gone, and reported so its sensor can be removed
+    shown, last, ended, gone = keep_ended({}, last, ended, NOW + 60 + 3 * 86400 + 1, 3)
+    assert shown == {} and gone == ["17782125"]
+
+
+def test_pickups_are_not_kept_when_collected():
+    from aw.logic import keep_ended
+    from aw.sites.base import AuctionState
+    p = AuctionState(site="macbid", auction_id="pickup-1", title="Fryer", url="u", category="bidding", status="awaiting_pickup")
+    shown, last, ended, gone = keep_ended({"pickup-1": p}, {}, {}, NOW, 3)
+    shown, last, ended, gone = keep_ended({}, last, ended, NOW + 60, 3)
+    assert shown == {} and ended == {}
+
+
+def test_original_end_is_first_countdown_end():
+    s = _states()["17782125"]
+    assert s.original_end == ga.parse_static(STATIC)["17782125"]["starts_at"]
+    assert s.as_attributes()["original_end"].startswith("20")

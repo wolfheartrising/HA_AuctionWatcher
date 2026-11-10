@@ -13,7 +13,8 @@ from __future__ import annotations
 
 from typing import Any
 
-KINDS = ("opportunity", "bid_limit", "ended", "won", "booked", "cancelled", "booking_failed")
+KINDS = ("opportunity", "bid_limit", "ended", "won", "booked", "cancelled", "booking_failed",
+         "outbid", "ending_soon", "over_max", "pickup")
 SPOKEN_HINTS = ("announce", "speak", "alexa", "echo")
 
 
@@ -31,6 +32,32 @@ def _spoken_money(v: Any) -> str:
         return "an unknown price"
     dollars, cents = int(f), round((f - int(f)) * 100)
     return f"{dollars} dollars" + (f" {cents}" if cents else "")
+
+
+def _human_minutes(m: Any) -> str:
+    try:
+        m = int(m)
+    except (TypeError, ValueError):
+        return "soon"
+    if m < 60:
+        return f"{m} minute{'' if m == 1 else 's'}"
+    h, mm = divmod(m, 60)
+    return f"{h} hour{'' if h == 1 else 's'}" + (f" {mm} min" if mm else "")
+
+
+def human_time(dt: Any) -> str:
+    """'Wed Nov 12, 5:00 PM' (dt should already be in your local time zone)."""
+    return f"{dt:%a %b} {dt.day}, {dt.hour % 12 or 12}:{dt:%M} {'AM' if dt.hour < 12 else 'PM'}"
+
+
+def _human_deadline(iso: Any, local: str | None = None) -> str:
+    if local:
+        return local
+    from datetime import datetime
+    try:
+        return human_time(datetime.fromisoformat(str(iso)))
+    except (TypeError, ValueError):
+        return "the deadline"
 
 
 def format_alert(kind: str, d: dict[str, Any]) -> tuple[str, str, str]:
@@ -58,6 +85,28 @@ def format_alert(kind: str, d: dict[str, Any]) -> tuple[str, str, str]:
         if d.get("buy_it_now") and bids:
             msg += f" Buy It Now {_money(d['buy_it_now'])} returns your points, for a limited time."
         spoken = f"Auction ended. {name} finished at {_spoken_money(d.get('price'))}."
+    elif kind == "outbid":
+        title = f"Outbid: {name}"
+        msg = f"Now {_money(d.get('price'))}"
+        if d.get("minutes_left") is not None:
+            msg += f", ends in {_human_minutes(d['minutes_left'])}"
+        msg += f". Your max is {_money(limit)}." if limit else "."
+        spoken = f"You were outbid on {name}."
+    elif kind == "ending_soon":
+        title = f"Ending in {_human_minutes(d.get('minutes_left'))}: {name}"
+        msg = f"Now {_money(d.get('price'))}, {'you are winning' if d.get('winning') else 'you are not winning'}."
+        if limit:
+            msg += f" Your max is {_money(limit)}."
+        spoken = f"{name} ends in {_human_minutes(d.get('minutes_left'))}."
+    elif kind == "over_max":
+        title = f"Past your max: {name}"
+        msg = f"Now {_money(d.get('price'))}, over your max of {_money(limit)}."
+        spoken = f"{name} went past your max bid."
+    elif kind == "pickup":
+        when = _human_deadline(d.get("ends_at"), d.get("ends_local"))
+        title = f"Pick up by {when}: {name}"
+        msg = f"Won for {_money(d.get('price'))}. Pickup deadline {when}."
+        spoken = f"Reminder: pick up {name} by {when}."
     elif kind == "booked":
         title = f"Booked {d.get('count')} bids: {name}"
         msg = f"{d.get('reason') or ''}. Price {_money(d.get('price'))}, {d.get('active_bidders')} bidders."

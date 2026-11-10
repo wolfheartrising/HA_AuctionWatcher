@@ -16,6 +16,14 @@ set_bid_limit:
           unit_of_measurement: bids
 
 refresh:
+  fields:
+    site:
+      example: govauctions
+      selector:
+        select:
+          options:
+            - govauctions
+            - macbid
 
 book_bids:
   fields:

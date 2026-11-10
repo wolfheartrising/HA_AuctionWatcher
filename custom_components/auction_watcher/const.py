@@ -1,13 +1,13 @@
 """Constants for Auction Watcher."""
 
 DOMAIN = "auction_watcher"
-VERSION = "0.5.0"  # keep in sync with manifest.json (a test checks this)
+VERSION = "0.6.0"  # keep in sync with manifest.json (a test checks this)
 
 CONF_SITE = "site"
 CONF_COOKIE = "cookie"
 
 SITE_GOVAUCTIONS = "govauctions"
-SITES = {SITE_GOVAUCTIONS: "GovAuctions"}
+SITES = {SITE_GOVAUCTIONS: "GovAuctions", "macbid": "Mac.bid"}
 
 # Options
 CONF_FAST_INTERVAL = "fast_interval_seconds"
@@ -24,7 +24,8 @@ CONF_ACTIVE_WINDOW = "active_window_minutes"  # count bidders seen within this m
 CONF_STABLE_SECONDS = "stable_seconds"        # must stay at <= N bidders this long before alerting
 DEFAULT_ACTIVE_WINDOW = 3
 DEFAULT_STABLE_SECONDS = 0
-DEFAULT_ALERT_KINDS = ["opportunity", "bid_limit", "ended", "won", "booking"]
+DEFAULT_ALERT_KINDS = ["opportunity", "bid_limit", "ended", "won", "booking",
+                       "outbid", "ending_soon", "over_max", "pickup"]
 
 DEFAULT_FAST_INTERVAL = 10       # seconds, while something you follow is live
 DEFAULT_IDLE_INTERVAL = 45       # minutes, when nothing is live (keeps the login fresh)
@@ -44,6 +45,25 @@ EVENT_BID_LIMIT = f"{DOMAIN}_bid_limit_reached"
 EVENT_ENDED = f"{DOMAIN}_auction_ended"
 EVENT_WON = f"{DOMAIN}_auction_won"
 EVENT_BOOKING = f"{DOMAIN}_booking"  # data.action: booked / cancelled / booking_failed
+# Timed auctions (Mac.bid)
+EVENT_OUTBID = f"{DOMAIN}_outbid"
+EVENT_ENDING_SOON = f"{DOMAIN}_ending_soon"
+EVENT_OVER_MAX = f"{DOMAIN}_over_max"
+EVENT_PICKUP = f"{DOMAIN}_pickup_reminder"
+
+SITE_MACBID = "macbid"
+CONF_EMAIL = "email"
+CONF_PASSWORD = "password"
+CONF_AUTH = "auth"            # Mac.bid tokens (renewed automatically)
+CONF_DEVICE_ID = "device_id"
+CONF_ENDING_MINUTES = "ending_soon_minutes"
+CONF_PICKUP_HOURS = "pickup_reminder_hours"
+DEFAULT_ENDING_MINUTES = 10
+DEFAULT_PICKUP_HOURS = 24
+PICKUP_REFRESH_SECONDS = 6 * 3600
+WATCHLIST_REFRESH_SECONDS = 120
+CONF_KEEP_ENDED_DAYS = "keep_ended_days"
+DEFAULT_KEEP_ENDED_DAYS = 3
 
 SERVICE_BOOK = "book_bids"
 SERVICE_CANCEL = "cancel_booked_bids"

@@ -22,8 +22,17 @@ from .const import (
     SERVICE_SET_AUTO,
     SERVICE_SET_BID_LIMIT,
 )
-from .coordinator import AuctionWatcherCoordinator
+from .const import (
+    CONF_AUTH,
+    CONF_DEVICE_ID,
+    CONF_EMAIL,
+    CONF_PASSWORD,
+    CONF_SITE,
+    SITE_MACBID,
+)
+from .coordinator import AuctionWatcherCoordinator, MacBidCoordinator
 from .cookies import parse_cookie_input
+from .sites import macbid as mb
 from .logic import AutoSettings
 from .sites.base import SiteError
 from .panel import async_register_panel, async_remove_panel
@@ -65,8 +74,10 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             await coord.async_set_bid_limit(auction_id, int(call.data["limit"]))
 
     async def refresh(call: ServiceCall) -> None:
+        site = call.data.get("site")
         for coord in _coordinators():
-            await coord.async_request_refresh()
+            if not site or coord.config_entry.data.get(CONF_SITE) == site:
+                await coord.async_request_refresh()
 
     def _owner(auction_id: str) -> AuctionWatcherCoordinator:
         for coord in _coordinators():
@@ -134,14 +145,21 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             vol.Required("limit"): vol.All(vol.Coerce(int), vol.Range(min=0, max=100000)),
         }),
     )
-    hass.services.async_register(DOMAIN, SERVICE_REFRESH, refresh)
+    hass.services.async_register(DOMAIN, SERVICE_REFRESH, refresh, schema=vol.Schema({vol.Optional("site"): cv.string}))
     return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: AuctionWatcherConfigEntry) -> bool:
     session = async_create_clientsession(hass, cookie_jar=aiohttp.DummyCookieJar())
-    cookies = parse_cookie_input(entry.data[CONF_COOKIE], domain=ga.COOKIE_DOMAIN)
-    coordinator = AuctionWatcherCoordinator(hass, entry, ga.GovAuctionsClient(session, cookies))
+    if entry.data.get(CONF_SITE) == SITE_MACBID:
+        client = mb.MacBidClient(
+            session, entry.data.get(CONF_AUTH), entry.data[CONF_DEVICE_ID],
+            email=entry.data.get(CONF_EMAIL), password=entry.data.get(CONF_PASSWORD),
+        )
+        coordinator: AuctionWatcherCoordinator = MacBidCoordinator(hass, entry, client)
+    else:
+        cookies = parse_cookie_input(entry.data[CONF_COOKIE], domain=ga.COOKIE_DOMAIN)
+        coordinator = AuctionWatcherCoordinator(hass, entry, ga.GovAuctionsClient(session, cookies))
     await coordinator.async_load()
     await coordinator.async_config_entry_first_refresh()
     entry.runtime_data = coordinator

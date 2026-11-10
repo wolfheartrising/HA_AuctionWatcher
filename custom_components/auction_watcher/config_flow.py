@@ -24,9 +24,21 @@ from homeassistant.helpers.selector import (
     SelectSelectorConfig,
     TextSelector,
     TextSelectorConfig,
+    TextSelectorType,
 )
 
 from .const import (
+    CONF_KEEP_ENDED_DAYS,
+    DEFAULT_KEEP_ENDED_DAYS,
+    CONF_ENDING_MINUTES,
+    CONF_PICKUP_HOURS,
+    DEFAULT_ENDING_MINUTES,
+    DEFAULT_PICKUP_HOURS,
+    CONF_AUTH,
+    CONF_DEVICE_ID,
+    CONF_EMAIL,
+    CONF_PASSWORD,
+    SITE_MACBID,
     CONF_ACTIVE_WINDOW,
     CONF_STABLE_SECONDS,
     DEFAULT_ACTIVE_WINDOW,
@@ -56,6 +68,7 @@ from .const import (
 )
 from .cookies import cookie_header, parse_cookie_input
 from .sites import govauctions as ga
+from .sites import macbid as mb
 from .sites.base import AuthError, SiteError
 
 CONF_COOKIE_FILE = "cookie_file"
@@ -100,29 +113,89 @@ async def _validate(cookie_text: str) -> tuple[str, dict[str, str]]:
         return "", client.cookies
 
 
+CONF_AUTH_TEXT = "saved_login"
+
+
+def _macbid_fields() -> dict:
+    """Email + password (recommended), or the browser's saved login + device id."""
+    return {
+        vol.Optional(CONF_EMAIL): TextSelector(TextSelectorConfig(type=TextSelectorType.EMAIL, autocomplete="username")),
+        vol.Optional(CONF_PASSWORD): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD, autocomplete="current-password")),
+        vol.Optional(CONF_AUTH_TEXT): TextSelector(TextSelectorConfig(multiline=True)),
+        vol.Optional(CONF_DEVICE_ID): TextSelector(),
+    }
+
+
+async def _validate_macbid(user_input: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Return (error key or "", entry data for Mac.bid)."""
+    email = (user_input.get(CONF_EMAIL) or "").strip()
+    password = user_input.get(CONF_PASSWORD) or ""
+    saved = (user_input.get(CONF_AUTH_TEXT) or "").strip()
+    device = (user_input.get(CONF_DEVICE_ID) or "").strip().strip('"')
+    if not (email and password) and not saved:
+        return "macbid_no_input", {}
+    auth: dict[str, Any] | None = None
+    if not (email and password):
+        if not device:
+            return "macbid_need_device", {}
+        try:
+            auth = mb.parse_auth(saved)
+        except (SiteError, ValueError):
+            return "macbid_bad_saved_login", {}
+    device = device or mb.new_device_id()
+    async with aiohttp.ClientSession(cookie_jar=aiohttp.DummyCookieJar()) as session:
+        client = mb.MacBidClient(session, auth, device, email=email or None, password=password or None)
+        try:
+            if email and password:
+                await client.login()
+            await client.watchlist()
+        except AuthError:
+            return "invalid_auth", {}
+        except SiteError:
+            return "cannot_connect", {}
+    data: dict[str, Any] = {CONF_SITE: SITE_MACBID, CONF_AUTH: client.auth, CONF_DEVICE_ID: device}
+    if email and password:
+        data.update({CONF_EMAIL: email, CONF_PASSWORD: password})
+    return "", data
+
+
 class AuctionWatcherConfigFlow(ConfigFlow, domain=DOMAIN):
     VERSION = 1
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        errors: dict[str, str] = {}
+        """Step 1: which site."""
         if user_input is not None:
             site = user_input[CONF_SITE]
             await self.async_set_unique_id(site)
             self._abort_if_unique_id_configured()
-            error, cookies = await _validate(await _cookie_text(self.hass, user_input))
-            if not error:
-                return self.async_create_entry(
-                    title=SITES[site],
-                    data={CONF_SITE: site, CONF_COOKIE: cookie_header(cookies)},
-                )
-            errors["base"] = error
+            return await (self.async_step_macbid() if site == SITE_MACBID else self.async_step_govauctions())
         schema = vol.Schema({
             vol.Required(CONF_SITE, default=SITE_GOVAUCTIONS): SelectSelector(
                 SelectSelectorConfig(options=[{"value": k, "label": v} for k, v in SITES.items()])
             ),
-            **_cookie_fields(),
         })
-        return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
+        return self.async_show_form(step_id="user", data_schema=schema)
+
+    async def async_step_govauctions(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            error, cookies = await _validate(await _cookie_text(self.hass, user_input))
+            if not error:
+                return self.async_create_entry(
+                    title=SITES[SITE_GOVAUCTIONS],
+                    data={CONF_SITE: SITE_GOVAUCTIONS, CONF_COOKIE: cookie_header(cookies)},
+                )
+            errors["base"] = error
+        return self.async_show_form(step_id="govauctions", data_schema=vol.Schema(_cookie_fields()), errors=errors)
+
+    async def async_step_macbid(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            error, data = await _validate_macbid(user_input)
+            if not error:
+                return self.async_create_entry(title=SITES[SITE_MACBID], data=data)
+            errors["base"] = error
+        return self.async_show_form(step_id="macbid", data_schema=vol.Schema(_macbid_fields()), errors=errors)
 
     async def async_step_reauth(self, entry_data: Mapping[str, Any]) -> ConfigFlowResult:
         return await self.async_step_reauth_confirm()
@@ -130,16 +203,22 @@ class AuctionWatcherConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_reauth_confirm(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         errors: dict[str, str] = {}
         entry = self._get_reauth_entry()
+        is_macbid = entry.data.get(CONF_SITE) == SITE_MACBID
         if user_input is not None:
-            error, cookies = await _validate(await _cookie_text(self.hass, user_input))
-            if not error:
-                return self.async_update_reload_and_abort(
-                    entry, data={**entry.data, CONF_COOKIE: cookie_header(cookies)}
-                )
+            if is_macbid:
+                error, data = await _validate_macbid(user_input)
+                if not error:
+                    return self.async_update_reload_and_abort(entry, data=data)
+            else:
+                error, cookies = await _validate(await _cookie_text(self.hass, user_input))
+                if not error:
+                    return self.async_update_reload_and_abort(
+                        entry, data={**entry.data, CONF_COOKIE: cookie_header(cookies)}
+                    )
             errors["base"] = error
         return self.async_show_form(
             step_id="reauth_confirm",
-            data_schema=vol.Schema(_cookie_fields()),
+            data_schema=vol.Schema(_macbid_fields() if is_macbid else _cookie_fields()),
             errors=errors,
             description_placeholders={"site": entry.title},
         )
@@ -165,6 +244,10 @@ ALERT_KIND_OPTIONS = [
     {"value": "ended", "label": "Auction ended"},
     {"value": "won", "label": "Auction won"},
     {"value": "booking", "label": "Bids booked or cancelled (including automatic)"},
+    {"value": "outbid", "label": "Outbid (Mac.bid)"},
+    {"value": "ending_soon", "label": "Ending soon (Mac.bid)"},
+    {"value": "over_max", "label": "Price passed your max bid (Mac.bid)"},
+    {"value": "pickup", "label": "Pickup deadline reminder (Mac.bid)"},
 ]
 
 
@@ -196,6 +279,10 @@ class AuctionWatcherOptionsFlow(OptionsFlow):
             vol.Optional(CONF_ALERT_KINDS, default=o.get(CONF_ALERT_KINDS, DEFAULT_ALERT_KINDS)): SelectSelector(
                 SelectSelectorConfig(options=ALERT_KIND_OPTIONS, multiple=True)
             ),
+            # Mac.bid
+            vol.Required(CONF_ENDING_MINUTES, default=o.get(CONF_ENDING_MINUTES, DEFAULT_ENDING_MINUTES)): _num(0, 240, 1, "min"),
+            vol.Required(CONF_PICKUP_HOURS, default=o.get(CONF_PICKUP_HOURS, DEFAULT_PICKUP_HOURS)): _num(1, 168, 1, "h"),
+            vol.Required(CONF_KEEP_ENDED_DAYS, default=o.get(CONF_KEEP_ENDED_DAYS, DEFAULT_KEEP_ENDED_DAYS)): _num(0, 60, 1, "days"),
             # Costs and timing
             vol.Required(CONF_POINT_COST, default=o.get(CONF_POINT_COST, DEFAULT_POINT_COST)): _num(0, 5, 0.01, "$"),
             vol.Required(CONF_FAST_INTERVAL, default=o.get(CONF_FAST_INTERVAL, DEFAULT_FAST_INTERVAL)): _num(5, 120, 1, "s"),

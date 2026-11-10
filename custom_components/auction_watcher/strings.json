@@ -3,19 +3,39 @@
     "step": {
       "user": {
         "title": "Add an auction site",
-        "description": "Log in to the site in your browser, then either upload the cookies.txt file a cookie-export extension saves, or paste the Cookie header from the browser's Network tab. GovAuctions logins last about a year and renew themselves.",
+        "description": "Pick the site. The next page asks how to log in.",
         "data": {
-          "site": "Site",
-          "cookie_file": "Cookie file (cookies.txt)",
-          "cookie": "…or paste cookies"
+          "site": "Site"
         }
       },
       "reauth_confirm": {
         "title": "Log in to {site} again",
-        "description": "{site} no longer accepts the saved login. Log in in your browser, then upload a fresh cookies.txt or paste the cookies.",
+        "description": "{site} no longer accepts the saved login. Fill in the same kind of login as when you set it up.",
+        "data": {
+          "cookie_file": "Cookie file (cookies.txt)",
+          "cookie": "…or paste cookies",
+          "email": "Email",
+          "password": "Password",
+          "saved_login": "…or the browser's mac_auths value",
+          "device_id": "…and its device_id value"
+        }
+      },
+      "govauctions": {
+        "title": "GovAuctions login",
+        "description": "Log in to GovAuctions in your browser, then upload the cookies.txt file a cookie-export extension saves, or paste the Cookie header from the browser's Network tab. The login lasts about a year and renews itself.",
         "data": {
           "cookie_file": "Cookie file (cookies.txt)",
           "cookie": "…or paste cookies"
+        }
+      },
+      "macbid": {
+        "title": "Mac.bid login",
+        "description": "Recommended: your Mac.bid email and password. Home Assistant then has its own login and renews it every 30 minutes, without logging your browser out.\n\nOr leave those empty and paste your browser's saved login instead (F12 → Storage/Application → Local Storage → https://www.mac.bid → copy the values of mac_auths and device_id). After pasting, log in again in your browser: Mac.bid only keeps one renewal chain per login.",
+        "data": {
+          "email": "Email",
+          "password": "Password",
+          "saved_login": "…or the browser's mac_auths value",
+          "device_id": "…and its device_id value"
         }
       }
     },
@@ -23,7 +43,10 @@
       "no_cookies": "No cookies for this site were found in the file or text you gave.",
       "invalid_auth": "The site says these cookies aren't logged in. Log in again in your browser and export fresh cookies.",
       "cannot_connect": "Couldn't reach the site. Try again in a minute.",
-      "no_input": "Upload a cookies.txt file or paste your cookies."
+      "no_input": "Upload a cookies.txt file or paste your cookies.",
+      "macbid_no_input": "Enter your email and password, or paste the browser's saved login.",
+      "macbid_need_device": "With a pasted saved login, also paste its device_id.",
+      "macbid_bad_saved_login": "That doesn't look like Mac.bid's mac_auths value. Copy the whole value (it starts with {)."
     },
     "abort": {
       "already_configured": "This site is already set up.",
@@ -40,20 +63,24 @@
           "active_window_minutes": "Count anyone who bid within the last N minutes",
           "stable_seconds": "…and only after it stays that low for N seconds (0 = right away)",
           "alert_max_price": "Only alert below this price (0 = any price)",
-          "default_bid_limit": "Default bid limit per auction (0 = none)",
+          "default_bid_limit": "Default max bids per auction (GovAuctions) / max bid $ (Mac.bid); 0 = none",
           "notify_services": "Send alerts to (phone push, Telegram, Alexa Media Player, ...)",
           "notify_entities": "Also send to notify entities (Telegram chats, Alexa Devices Announce/Speak, ...)",
           "alert_kinds": "Which alerts to send",
           "point_cost": "What one point/bid costs you",
           "fast_interval_seconds": "Check every N seconds while something you follow is live",
           "idle_interval_minutes": "Check every N minutes when nothing is live",
-          "extra_auction_ids": "Extra auction IDs to follow (comma separated)"
+          "extra_auction_ids": "Extra auction IDs to follow (comma separated)",
+          "ending_soon_minutes": "Mac.bid: alert this many minutes before an auction ends (0 = off)",
+          "pickup_reminder_hours": "Mac.bid: pickup reminder this many hours before the deadline",
+          "keep_ended_days": "Keep ended auctions on the Auctions page for this many days"
         },
         "data_description": {
           "active_window_minutes": "The site only shows the last 9 bids. Counting a few minutes back catches people who pause and jump back in.",
           "stable_seconds": "With 2 bidders an auction can end in seconds, so 0 alerts as soon as it qualifies.",
           "notify_entities": "Alexa gets a short spoken version; text targets like Telegram get the auction link.",
-          "alert_max_bidders": "1 = you against one other person. Also what auto-cancel/rebook call crowded: more than this is crowded."
+          "alert_max_bidders": "1 = you against one other person. Also what auto-cancel/rebook call crowded: more than this is crowded.",
+          "keep_ended_days": "Then they're removed, including their sensors. Auctions you stop following are kept too, marked 'no longer followed'."
         }
       }
     }
