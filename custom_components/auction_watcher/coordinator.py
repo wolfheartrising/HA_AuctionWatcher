@@ -18,6 +18,8 @@ from homeassistant.util import dt as dt_util
 
 from .alerts import build_calls, human_time
 from .const import (
+    CONF_SITE,
+    SITE_MACBID,
     CONF_MACBID_BUDGET,
     CONF_WEEKLY_BUDGET,
     CONF_PACKS_ENABLED,
@@ -112,7 +114,7 @@ from .sites.base import (
     state_from_dict,
     state_to_dict,
 )
-from . import global_settings
+from . import global_settings, proxy_manager
 from . import packs as packs_mod
 from .sites import govauctions as ga
 from .sites import ebay as eb
@@ -508,6 +510,9 @@ class AuctionWatcherCoordinator(DataUpdateCoordinator[dict[str, AuctionState]]):
         # Where alerts go and which ones: the Settings tab on the Auctions page (same for every site)
         if (g := global_settings.get(self.hass)) is not None:
             g.send(kind, data, ALERT_KIND_OF.get(kind, kind))
+        # Bidding for someone: they hear how their item is going too
+        if (p := proxy_manager.get(self.hass)) is not None:
+            p.relay(e.data.get(CONF_SITE, "govauctions"), kind, data)
 
     async def _run_auto(self, states: dict[str, AuctionState], now: float) -> None:
         """Opt-in auto-cancel / auto-rebook, one decision per auction per check."""

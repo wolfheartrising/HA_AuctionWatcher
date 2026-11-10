@@ -81,6 +81,7 @@ The **Saved searches** tab looks for keywords on every site you've set up, once 
 quicker alerts, or when you tap **Search now**. The open page is told when results change (no constant polling). It uses each
 site's own search: what typing in its search box does.
 
+- **☆ Star** a result to add it to that site's own **bookmarks** (GovAuctions) or **watchlist** (Mac.bid, eBay); it then shows on the Watching tab. ★ means you already follow it.
 - **Add** a keyword, pick the sites, optionally a max price. Tick *Also save to my Mac.bid alerts* to add it there too.
 - Your **Mac.bid keyword alerts** (Account → Notifications) come in automatically. Colored dots show where a search
   is also saved: red GovAuctions, green Mac.bid, blue eBay. The same keyword from two places is one search.
@@ -95,7 +96,28 @@ site's own search: what typing in its search box does.
 - GovAuctions results skip finished auctions and flag ones already **closed to new bidders**.
 - Automations: the action `auction_watcher.search_now`, and the event `auction_watcher_search_matches` (with the new items).
 
+## For others (household bidding, opt-in)
+
+Off unless you switch on **Bid for others** on the ⚙ Settings tab and add people (name + Telegram chat id). Needs Home
+Assistant's **Telegram bot** integration; each person must have pressed /start with your bot and be an allowed chat. Only
+people on your list are listened to. Bids are placed from **your** account (like a household account).
+
+- **Bid for them (Mac.bid):** on an item, *Bid for someone* → pick the person, set **your max**, *Ask them*. They get a
+  Telegram message (item photo, "🔔 Auction Watcher" on top), reply with their max (up to yours), then tap **I agree to pay**
+  (the message shows the estimate with the 15% premium, $3 lot fee and tax). Only then is a max bid placed: the lower of their
+  max and yours. Your budgets and spending cap still apply. They hear when they're outbid (and can reply with a higher max,
+  which needs a new "I agree"), when it ends soon, and how it ends. Every step is logged on the card.
+- **Just keep them posted (any site):** they get a message now, when it's about to end, and when it ends. Nothing is bid.
+- **For others tab:** everything you're doing for someone, with a sub-tab per person.
+- eBay only lets approved partners bid through its API, so eBay is "keep them posted" only.
+
 ## Money overview and budgets
+
+**Spending cap (all sites)** on the ⚙ Settings tab: one dollar cap per **week** (Mon–Sun) or **month**, either
+**stopping** bids and bookings that would go past it or **warning** only. It counts GovAuctions points used plus points held
+in booked bids (at your point cost), Mac.bid max bids on live items plus scheduled late bids, and Mac.bid items won this
+period (winning price, before fees and tax). The Active tab shows a bar with what's used per site; one alert when it's
+reached. Each site's own budget below still applies too.
 
 The **Active** tab starts with a tally per site:
 - **GovAuctions**: balance (per the site; booked bids are already taken out of it), **booked**, **earmarked** (what auto-rebook could still book under your max bids), **at risk**, spent today and this week. Set a **weekly budget** in the settings: when it's used up, auto-booking stops and the Book button refuses until Monday. Several auctions booking at once draw from one shared balance, so they can't spend the same points twice.
@@ -192,6 +214,11 @@ Settings live on the **Auctions page**:
 All sites: extra auction IDs to follow.
 
 ## Notes and limits
+
+- **Mac.bid sign-in:** Mac.bid replaces its login token on every renewal and the old one stops working. If Home Assistant
+  is restored from a backup or rolled back, it has an old token: you'll see "needs you to sign in again" (a banner on the
+  Auctions page and *Reconfigure* in Devices & services). Sign in there; **don't delete the account**, or its saved max
+  bids and settings are lost. With your email and password saved, it signs itself back in when it can.
 
 - GovAuctions "other bidders" counts everyone except you seen bidding within the window (3 minutes by default). The site only shows the last 9 bids, so the integration remembers names across checks.
 - People with booked bids only show up once their bids actually fire; anyone who bid before the entry limit can come back (except in No Re-Entry auctions).

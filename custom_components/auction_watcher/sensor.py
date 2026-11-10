@@ -12,6 +12,7 @@ from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from . import proxy_manager
 from . import AuctionWatcherConfigEntry
 from .const import DOMAIN
 from .coordinator import AuctionWatcherCoordinator
@@ -222,5 +223,7 @@ class AuctionSensor(_Base):
         attrs["topup_at"] = auto.topup_at
         attrs["max_price"] = auto.max_price
         attrs["auto_status"] = self.coordinator.auto_status(self.auction_id)
+        if (p := proxy_manager.get(self.hass)) is not None and p.enabled:
+            attrs["proxy"] = p.summary(s.site, self.auction_id)  # for someone else: who, their max, agreed or not
         attrs["auction_watcher"] = True  # lets dashboards find these entities
         return attrs

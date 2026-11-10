@@ -88,12 +88,40 @@ class AuctionWatcherPanel extends HTMLElement {
 
   connectedCallback() {
     this._timer = setInterval(() => this._tick(), 1000);
+    // Accounts that can't sign in: show a banner with a way to sign in again
+    this._entriesTimer = setInterval(() => this._checkEntries(), 60000);
+    setTimeout(() => this._checkEntries(), 1500);
+    setTimeout(() => { if (!this._pv && !this._pvLoading && this._hass) this._loadProxy(); }, 1000);
     // While you're looking at the page and a penny auction is in its 5-second phase,
     // ask for a check every 3 s so the clock and bidders keep up with the site.
     this._live = setInterval(() => this._liveRefresh(), 3000);
     this._maybeRender(true);
   }
-  disconnectedCallback() { clearInterval(this._timer); clearInterval(this._live); this._stopSearchWatch(); }
+  disconnectedCallback() { clearInterval(this._timer); clearInterval(this._live); clearInterval(this._entriesTimer); this._stopSearchWatch(); }
+
+  async _checkEntries() {
+    if (!this._hass || document.visibilityState !== "visible") return;
+    try {
+      const entries = await this._hass.callWS({ type: "config_entries/get", domain: "auction_watcher" });
+      const bad = entries.filter((e) => !e.disabled_by && e.state !== "loaded" && e.state !== "not_loaded");
+      const sig = JSON.stringify(bad.map((e) => [e.entry_id, e.state, e.reason]));
+      if (sig !== JSON.stringify((this._badEntries || []).map((e) => [e.entry_id, e.state, e.reason]))) {
+        this._badEntries = bad; this._maybeRender(true);
+      }
+    } catch (e) { /* older Home Assistant: no banner */ }
+  }
+
+  _entryBanner() {
+    return (this._badEntries || []).map((e) => {
+      const login = e.state === "setup_error" || /sign in|log ?in|auth|refused the login|token/i.test(e.reason || "");
+      return `<div class="banner">
+        <b>${esc(e.title)}</b> ${login ? "needs you to sign in again." : "isn't working right now."}
+        <span class="muted">${esc(e.reason || e.state)}</span>
+        <a class="btn" href="/config/integrations/integration/auction_watcher">${login ? "Sign in again" : "Open the integration"}</a>
+        <span class="muted">${login ? "Use Reconfigure there (no need to delete it: deleting loses its saved max bids and settings)." : ""}</span>
+      </div>`;
+    }).join("");
+  }
 
   _liveRefresh() {
     if (!this._hass || document.visibilityState !== "visible") return;
@@ -212,6 +240,9 @@ class AuctionWatcherPanel extends HTMLElement {
       { id: "pickup", label: "Awaiting pickup", filter: (a) => a.status === "awaiting_pickup" },
       { id: "ended", label: "Ended", filter: (a) => a.status === "ended" },
       { id: "searches", label: "Saved searches", filter: () => false, searches: true },
+      ...(this._pv?.enabled && this._pv.people.length ? [{ id: "others", label: "For others", others: true,
+        filter: (a) => !!a.proxy && ["asked", "confirming", "confirmed", "watching"].includes(a.proxy.state)
+          && (!this._subtab || ["all", "following"].includes(this._subtab) || this._subtab === a.proxy.person_id || this._tab !== "others") }] : []),
       { id: "settings", label: "⚙ Settings", filter: () => false, settings: true },
       ...sites.map((site) => ({ id: "site-" + site, label: SITE_NAMES[site] || site, filter: (a) => a.site === site })),
     ];
@@ -235,9 +266,9 @@ class AuctionWatcherPanel extends HTMLElement {
     }
     const auctions = this._auctions();
     const accounts = this._accounts();
-    const signature = JSON.stringify([this._tab, this._subtab, this._sort, auctions.map((a) => [a.entity_id, a.price, a.updated, a.bid_limit,
+    const signature = JSON.stringify([this._pv?.people, this._badEntries, this._tab, this._subtab, this._sort, auctions.map((a) => [a.entity_id, a.price, a.updated, a.bid_limit,
       a.auto_cancel, a.auto_rebook, a.rebook_mode, a.rebook_amount, a.topup_at, a.max_price, a.auto_status, a.your_booked_left,
-      a.mb_mode, a.mb_placed, a.mb_status, a.winning, a.has_assurance, a.mb_assurance, (a.condition_notes || []).length]),
+      a.mb_mode, a.mb_placed, a.mb_status, a.proxy, a.winning, a.has_assurance, a.mb_assurance, (a.condition_notes || []).length]),
       accounts, this._saved, this._subtab === "packs" ? [this._packs(), this._showLocked] : null,
       this._tab === "searches" ? [this._sd?.version, !!this._sd, this._sfilter, this._sLimit, this._serr, this._sbusy] : null,
       this._tab === "settings" ? [this._gs, this._gmsg, this._gbusy] : null,
@@ -253,6 +284,7 @@ class AuctionWatcherPanel extends HTMLElement {
     if (!tabs.find((t) => t.id === this._tab)) this._tab = "active";
     const tab = tabs.find((t) => t.id === this._tab);
     const shown = auctions.filter(tab.filter);
+    if (tab.others && this._subtab === "following") this._subtab = "all";
     // Sub-tab of a site tab; Point packs only exists on GovAuctions
     let sub = tab.id.startsWith("site-") ? (this._subtab || "following") : "";
     if (sub === "packs" && !(tab.id === "site-govauctions" && this._packs())) sub = "following";
@@ -265,6 +297,7 @@ class AuctionWatcherPanel extends HTMLElement {
         <div class="title">Auctions</div>
         <button class="icon" data-action="refresh" title="Check now">⟳</button>
       </div>
+      ${this._entryBanner()}
       <div class="summary">
         ${accounts.map((acc) => `
           <div class="pill"><b>${esc(acc.auction_watcher_account)}</b>
@@ -286,6 +319,12 @@ class AuctionWatcherPanel extends HTMLElement {
         }).join("")}
       </div>`).join("")}
       ${tab.id === "active" ? this._tally(accounts) : ""}
+      ${tab.others ? `<div class="subtabs">
+        <button class="subtab ${!this._subtab || this._subtab === "all" || this._subtab === "following" ? "on" : ""}" data-subtab="all">Everyone</button>
+        ${this._pv.people.map((p) => {
+          const n = auctions.filter((a) => a.proxy?.person_id === p.id && ["asked", "confirming", "confirmed", "watching"].includes(a.proxy.state)).length;
+          return `<button class="subtab ${this._subtab === p.id ? "on" : ""}" data-subtab="${esc(p.id)}">💬 ${esc(p.name)} <span class="count">${n}</span></button>`;
+        }).join("")}</div>` : ""}
       ${tab.id.startsWith("site-") ? `<div class="subtabs">
         <button class="subtab ${sub === "following" ? "on" : ""}" data-subtab="following">Following <span class="count">${shown.length}</span></button>
         ${tab.id === "site-govauctions" && this._packs() ? `<button class="subtab ${sub === "packs" ? "on" : ""}" data-subtab="packs">Point packs
@@ -347,7 +386,9 @@ class AuctionWatcherPanel extends HTMLElement {
     root.querySelectorAll("details.booking").forEach((d) =>
       d.addEventListener("toggle", () => { this._open[d.dataset.id] = d.open; }));
     root.querySelectorAll("[data-act]").forEach((b) =>
-      b.addEventListener("click", () => this._action(b.dataset.act, b.dataset.id)));
+      b.addEventListener("click", () => this._action(b.dataset.act, b.dataset.id, b.dataset.site)));
+    root.querySelectorAll("[data-field=proxy_mode]").forEach((el) =>
+      el.addEventListener("change", () => { (this._drafts[el.dataset.id] ||= {}).proxy_mode = el.value; this._maybeRender(true); }));
     if (tab.settings) this._mountGlobalSettings(root.querySelector(".gs-slot"));
     if (sub === "settings") this._mountSiteSettings(root.querySelector(".ss-slot"), tab.id.slice(5), accounts);
     if (tab.searches) {
@@ -401,12 +442,13 @@ class AuctionWatcherPanel extends HTMLElement {
     try {
       this._gs = await this._hass.callWS({ type: "auction_watcher/settings" });
       this._gdraft = null;
+      try { this._pv = await this._hass.callWS({ type: "auction_watcher/proxy" }); } catch (e) { /* older backend */ }
     } catch (e) { this._gmsg = { warn: true, text: this._wsError(e) }; }
     this._maybeRender(true);
   }
 
   _mountGlobalSettings(slot) {
-    const sig = JSON.stringify([this._gs, this._gmsg, this._gbusy]);
+    const sig = JSON.stringify([this._gs, this._gmsg, this._gbusy, this._pv]);
     if (this._gsNode && this._gsSig === sig) { slot.replaceWith(this._gsNode); return; }
     if (!this._gs && !this._gLoading) { this._gLoading = true; this._loadGlobal().finally(() => { this._gLoading = false; }); }
     slot.innerHTML = this._globalView();
@@ -419,6 +461,24 @@ class AuctionWatcherPanel extends HTMLElement {
       if (el.checked && !list.includes(v)) list.push(v);
       if (!el.checked) list.splice(list.indexOf(v), 1);
       const btn = slot.querySelector("[data-gact=save]"); if (btn) btn.disabled = false;
+    }));
+    slot.querySelectorAll("[data-pact]").forEach((el) => el.addEventListener(el.type === "checkbox" ? "change" : "click", async () => {
+      const act = el.dataset.pact, msg = { type: "auction_watcher/proxy/change", action: "set" };
+      if (act === "enable") msg.enabled = el.checked;
+      if (act === "remove") {
+        const p = this._pv.people.find((x) => x.id === el.dataset.pid);
+        if (!confirm(`Remove ${p?.name || "this person"}? Open requests for them stop.`)) return;
+        msg.remove = el.dataset.pid;
+      }
+      if (act === "add") {
+        const name = slot.querySelector("[data-pform=name]").value.trim();
+        const chat = slot.querySelector("[data-pform=chat_id]").value.trim();
+        if (!name || !/^-?\d+$/.test(chat)) { this._gmsg = { warn: true, text: "A person needs a name and their numeric Telegram chat id" }; this._gsSig = null; return this._maybeRender(true); }
+        msg.add = { name, chat_id: chat };
+      }
+      try { this._pv = await this._hass.callWS(msg); this._gmsg = null; }
+      catch (e) { this._gmsg = { warn: true, text: e?.message || String(e) }; }
+      this._gsSig = null; this._maybeRender(true);
     }));
     slot.querySelectorAll("[data-gcap]").forEach((el) => el.addEventListener(el.type === "number" ? "input" : "change", () => {
       if (el.type === "radio" && !el.checked) return;
@@ -441,6 +501,30 @@ class AuctionWatcherPanel extends HTMLElement {
       } catch (e) { this._gmsg = { warn: true, text: this._wsError(e) }; }
       this._gbusy = false; this._maybeRender(true);
     }));
+  }
+
+  _proxySettings() {
+    const v = this._pv;
+    if (!v) return `<section class="gs-sec"><h3>Bid for others (Mac.bid)</h3><div class="muted">Loading…</div></section>`;
+    return `<section class="gs-sec"><h3>Bid for others (Mac.bid)</h3>
+      <label class="chk"><input type="checkbox" data-pact="enable" ${v.enabled ? "checked" : ""}> Let me bid on Mac.bid items for people on this list</label>
+      ${v.enabled && !v.telegram_ready ? `<div class="warn">Needs Home Assistant's Telegram bot integration (telegram_bot) for the questions and "I agree" buttons.</div>` : ""}
+      ${v.enabled ? `<div class="gs-list">${v.people.map((p) => `<span class="chk gs-item">💬 ${esc(p.name)} <span class="muted">${esc(p.chat_id)}</span>
+          <button class="schip-x" data-pact="remove" data-pid="${esc(p.id)}" title="Remove ${esc(p.name)}">×</button></span>`).join("")
+          || `<span class="muted">Nobody yet.</span>`}</div>
+        <div class="sadd" style="border:0;padding:0">
+          <input type="text" placeholder="Name" data-pform="name" style="flex:0 1 160px">
+          <input type="text" placeholder="Telegram chat id" data-pform="chat_id" style="flex:0 1 180px">
+          <button data-pact="add">Add person</button>
+        </div>
+        <div class="note">They must have pressed /start with your Home Assistant Telegram bot, and their chat must be allowed in the
+          bot's setup. Their chat id is the number HA shows in the <i>telegram_text</i> event when they message the bot
+          (Developer tools → Events → listen to telegram_text). Only these people are listened to. On a Mac.bid item, open
+          "Bid for someone", set your max and tap "Ask them". Nothing is bid until they name a max and tap "I agree to pay";
+          the bid is the lower of their max and yours, and your budgets and spending cap still apply.</div>
+        ${v.requests.length ? `<div class="k">Recent requests</div><div class="note">${v.requests.slice(0, 8).map((r) =>
+          `${esc(r.person)} · ${esc(r.title)} · ${esc(r.state)}${r.agreed_max ? ` · agreed $${num(r.agreed_max)}` : ""}`).join("<br>")}</div>` : ""}` : ""}
+    </section>`;
   }
 
   _globalView() {
@@ -470,6 +554,7 @@ class AuctionWatcherPanel extends HTMLElement {
           `${k.sites.map((x) => siteDot(x)).join("")} ${esc(k.label)}`, dr.alert_kinds.includes(k.value))).join("")}</div>
         <div class="note">Each alert is sent once, not on every check.</div>
       </section>
+      ${this._proxySettings()}
       <section class="gs-sec"><h3>Spending cap (all sites)</h3>
         <div class="sadd" style="border:0;padding:0">
           <label class="chk">Cap $ <input type="number" min="0" step="1" class="small" data-gcap="cap_amount" value="${esc(dr.cap_amount ?? g.cap.amount)}"></label>
@@ -869,6 +954,7 @@ class AuctionWatcherPanel extends HTMLElement {
           <div class="total" data-total="${id}">${this._totalText(a)}</div>
         </div>
         ${a.status === "ended" ? "" : this._bookingControls(a)}
+        ${"proxy" in a && (a.status === "live" || a.status === "upcoming" || a.proxy) ? this._proxyBlock(a, id, String(a.auction_id)) : ""}
       </div>`;
   }
 
@@ -1064,7 +1150,82 @@ class AuctionWatcherPanel extends HTMLElement {
         </div>
         <div class="note">Keeps your max hidden until near the end. Mac.bid's 2-minute extension still gives others a chance to answer.
           ${a.mb_status ? `<br><b>Status:</b> ${esc(a.mb_status)}` : ""}</div>
-      </details>`;
+      </details>
+      ${"proxy" in a && (a.status === "live" || a.status === "upcoming" || a.proxy) ? this._proxyBlock(a, id, aid) : ""}`;
+  }
+
+  _proxyBlock(a, id, aid) {
+    const p = a.proxy;
+    const people = this._pv?.people || [];
+    if (!this._pv && !this._pvLoading) this._loadProxy();
+    const canBid = a.site === "macbid";
+    const mode = this._val(aid, "proxy_mode", p?.mode || (canBid ? "bid" : "watch"));
+    const stateText = {
+      watching: "gets updates on this item (nothing is bid)",
+      asked: "asked; waiting for their max",
+      confirming: "they named a max; waiting for them to tap \"I agree to pay\"",
+      confirmed: "agreed",
+      declined: "said no thanks",
+      cancelled: "cancelled",
+    };
+    const open = p && ["asked", "confirming", "confirmed", "watching"].includes(p.state);
+    const head = p ? `<span class="badge ${p.state === "confirmed" || p.state === "watching" ? "on" : open ? "hot" : ""}">${p.mode === "watch" ? "👀 " : "for "}${esc(p.person)}${p.bid ? ` · $${num(p.bid)} max` : ""}</span>` : "";
+    return `<details class="booking proxy" ${open || this._open["proxy:" + aid] ? "open" : ""} data-id="proxy:${id}">
+      <summary>${canBid ? "Bid for someone" : "Keep someone posted"} ${head}</summary>
+      ${p ? `<div class="line"><b>${esc(p.person)}</b>: ${esc(stateText[p.state] || p.state)}</div>
+        ${p.mode === "watch" ? "" : `<div class="line"><span class="k">Your max</span> $${num(p.hard_max)}
+          ${p.their_max ? ` · <span class="k">their max</span> $${num(p.their_max)}` : ""}
+          ${p.agreed_max ? ` · <span class="k">agreed to pay up to</span> $${num(p.agreed_max)}${p.estimate ? ` (≈ ${money(p.estimate)} with fees)` : ""}` : ""}
+          ${p.bid ? ` · <b>bid $${num(p.bid)}</b>` : ""}</div>`}
+        <div class="note">${(p.log || []).map(([t, txt]) => `${esc(new Date(t * 1000).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }))}: ${esc(txt)}`).join("<br>")}</div>` : ""}
+      ${a.status === "live" || a.status === "upcoming" ? `<div class="bk-row">
+        ${canBid ? `<select data-id="${id}" data-field="proxy_mode">
+          <option value="bid" ${mode === "bid" ? "selected" : ""}>Bid for them (they confirm)</option>
+          <option value="watch" ${mode === "watch" ? "selected" : ""}>Just keep them posted</option></select>` : ""}
+        <select data-id="${id}" data-field="proxy_person">${people.map((x) => `<option value="${esc(x.id)}" ${this._val(aid, "proxy_person", p?.person_id || people[0]?.id) === x.id ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select>
+        ${mode === "bid" ? `<label>my max $<input data-id="${id}" data-field="proxy_max" type="number" min="1" step="1" class="small"
+          value="${esc(this._val(aid, "proxy_max", p?.hard_max || ""))}"></label>` : ""}
+        <button type="button" data-act="proxy_ask" data-id="${id}" data-site="${esc(a.site)}" ${people.length ? "" : "disabled"}>${
+          mode === "watch" ? (p && p.mode === "watch" && open ? "Watching" : "Keep them posted") : p && open && p.mode === "bid" ? "Update" : "Ask them"}</button>
+        ${open ? `<button type="button" class="secondary" data-act="proxy_cancel" data-id="${id}" data-site="${esc(a.site)}">${p.mode === "watch" ? "Stop updates" : "Cancel request"}</button>` : ""}
+      </div>` : ""}
+      <div class="note">${!people.length ? "Add people on the ⚙ Settings tab (Bid for others) first."
+        : mode === "watch" ? "They get a Telegram message now, another when it's about to end, and one when it ends. Nothing is bid."
+        : `They get a Telegram message, reply with their max (up to yours), then tap "I agree to pay". Only then is a max bid
+          placed from your account: the lower of theirs and yours. They also hear when they're outbid and how it ends.`}</div>
+      ${this._saved["proxy:" + aid] ? `<div class="note"><b>${esc(this._saved["proxy:" + aid])}</b></div>` : ""}
+    </details>`;
+  }
+
+  async _loadProxy() {
+    this._pvLoading = true;
+    try { this._pv = await this._hass.callWS({ type: "auction_watcher/proxy" }); } catch (e) { this._pv = null; }
+    this._pvLoading = false;
+    this._maybeRender(true);
+  }
+
+  async _proxyAction(act, id, site) {
+    const key = "proxy:" + id;
+    try {
+      if (act === "proxy_ask") {
+        const a = this._auctions().find((x) => String(x.auction_id) === String(id)) || {};
+        const mode = this._field(id, "proxy_mode", a.site === "macbid" ? "bid" : "watch");
+        const person = this._field(id, "proxy_person", this._pv?.people?.[0]?.id);
+        const max = parseInt(this._field(id, "proxy_max", 0), 10) || 0;
+        if (mode === "bid" && !max) throw new Error("set your max first");
+        this._pv = await this._hass.callWS({ type: "auction_watcher/proxy/change", action: "ask", site: site || a.site,
+          mode, lot_id: id, person_id: person, hard_max: mode === "bid" ? max : 0 });
+        const who = this._pv.people.find((x) => x.id === person)?.name || "them";
+        this._saved[key] = mode === "watch" ? `${who} will get updates on Telegram` : `Asked ${who} on Telegram`;
+        this._clearDrafts(id, ["proxy_max", "proxy_mode"]);
+      } else {
+        this._pv = await this._hass.callWS({ type: "auction_watcher/proxy/change", action: "cancel", site, lot_id: id });
+        this._saved[key] = "Stopped";
+      }
+    } catch (e) {
+      this._saved[key] = "Couldn't: " + (e?.message || e);
+    }
+    this._maybeRender(true);
   }
 
   _overtimeLine(a) {
@@ -1189,7 +1350,8 @@ class AuctionWatcherPanel extends HTMLElement {
     const a = this._auctions().find((x) => String(x.auction_id) === String(id)) || {};
     const saved = { limit: a.bid_limit, max_price: a.max_price, book_count: a.rebook_amount || 10, auto_cancel: a.auto_cancel,
       auto_rebook: a.auto_rebook, rebook_mode: a.rebook_mode || "fixed", rebook_amount: a.rebook_amount || 10, topup_at: a.topup_at || 0,
-      mb_late: a.mb_mode === "late", mb_assure: !!a.mb_assurance, mb_late_min: Math.round((a.mb_late_seconds || 180) / 60) }[field];
+      mb_late: a.mb_mode === "late", mb_assure: !!a.mb_assurance, mb_late_min: Math.round((a.mb_late_seconds || 180) / 60),
+      proxy_person: a.proxy?.person_id, proxy_max: a.proxy?.hard_max, proxy_mode: a.proxy?.mode }[field];
     const v = this._val(id, field, saved);
     return v === undefined || v === null || v === "" ? fallback : v;
   }
@@ -1232,8 +1394,9 @@ class AuctionWatcherPanel extends HTMLElement {
     setTimeout(() => { delete this._saved[key]; this._maybeRender(true); }, 8000);
   }
 
-  async _action(act, id) {
+  async _action(act, id, site) {
     if (act === "mb_place" || act === "mb_auto") return this._macbidAction(act, id);
+    if (act === "proxy_ask" || act === "proxy_cancel") return this._proxyAction(act, id, site);
     const key = (act === "limit" || act === "max_price" ? act + ":" : "auto:") + id;
     const int = (v) => Math.max(0, parseInt(v, 10) || 0);
     const dec = (v) => Math.max(0, parseFloat(v) || 0);
@@ -1321,6 +1484,9 @@ const STYLE = `
   .pack-auction .stars { margin-left: auto; }
   details.packs-intro, .packs-more { grid-column: 1 / -1; }
   details.packs-intro summary, details.hist summary { cursor: pointer; }
+  .banner { margin: 12px 16px 0; padding: 10px 14px; border-radius: 12px; border: 1px solid var(--error-color, #db4437);
+            background: rgba(219, 68, 55, .12); display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; }
+  .banner .btn { background: var(--primary-color); color: var(--text-primary-color, #fff); border-radius: 6px; padding: 5px 12px; text-decoration: none; }
   .packs-more { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
   .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 3px; vertical-align: middle; }
   .sv { padding: 16px; display: flex; flex-direction: column; gap: 12px; max-width: 1100px; }

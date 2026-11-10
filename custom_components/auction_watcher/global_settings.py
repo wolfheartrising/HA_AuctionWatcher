@@ -48,6 +48,7 @@ ALERT_KINDS = [
     {"value": "won", "label": "Auction won", "sites": ["govauctions", "macbid", "ebay"]},
     {"value": "ended", "label": "Auction ended", "sites": ["govauctions", "macbid", "ebay"]},
     {"value": "search", "label": "New matches for saved searches", "sites": ["govauctions", "macbid", "ebay"]},
+    {"value": "proxy", "label": "Bidding for others: their replies and agreements", "sites": ["macbid"]},
 ]
 
 
@@ -74,12 +75,16 @@ class GlobalSettings:
         self.cap = SpendCap(float(c.get("amount", 0) or 0), c.get("period", "week") if c.get("period") in ("week", "month") else "week",
                             c.get("mode", "block") if c.get("mode") in ("block", "warn") else "block")
         self._cap_alerted = d.get("cap_alerted")
+        known = d.get("known_kinds")
+        if known is not None:
+            self.alert_kinds += [k["value"] for k in ALERT_KINDS if k["value"] not in known and k["value"] not in self.alert_kinds]
 
     async def _save(self) -> None:
         await self._store.async_save({
             "notify_services": self.notify_services, "notify_entities": self.notify_entities,
             "alert_kinds": self.alert_kinds, "saved": self.saved, "merged": sorted(self._merged),
             "cap": vars(self.cap), "cap_alerted": self._cap_alerted,
+            "known_kinds": [k["value"] for k in ALERT_KINDS],
         })
 
     # ---------------- one spending cap across every site

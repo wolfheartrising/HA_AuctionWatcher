@@ -34,7 +34,7 @@ from .const import (
 )
 from .searches import SITE_ORDER, Hit, SavedSearch, add_search, filter_hits, hit_dict, new_matches, title_matches, to_dict
 from .sites import macbid as mb
-from .sites.base import SiteError
+from .sites.base import AuthError, SiteError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -166,7 +166,7 @@ class SearchManager:
             mine = set(await client.my_building_ids())
             self.mb_account = [b["name"] for b in self.mb_all if b["id"] in mine]
             self._buildings_at = time.time()
-        except SiteError as err:
+        except (SiteError, AuthError) as err:
             _LOGGER.debug("Mac.bid locations not loaded: %s", err)
 
     def enabled_buildings(self) -> list[str]:
@@ -182,7 +182,7 @@ class SearchManager:
         self._imported_at = time.time()
         try:
             keywords = await client.keywords()
-        except SiteError as err:
+        except (SiteError, AuthError) as err:
             self.errors[SITE_MACBID] = f"Couldn't read your Mac.bid keywords: {err}"
             return
         on_site = {k.strip().lower() for k in keywords}
@@ -228,7 +228,7 @@ class SearchManager:
                         found = await coord.client.search(s.keyword)
                     hits += filter_hits([Hit(site=site, **h) for h in found], s.max_price,
                                         s.keyword if s.title_only else None)
-                except SiteError as err:
+                except (SiteError, AuthError) as err:
                     errors[site] = str(err)
                     _LOGGER.warning("Saved search %r on %s failed: %s", s.keyword, site, err)
                 await asyncio.sleep(0.5)  # gentle on the sites
@@ -471,7 +471,7 @@ async def ws_change(hass: HomeAssistant, connection: Any, msg: dict[str, Any]) -
         else:
             await m.async_settings(msg.get("run_time"), msg.get("building"), msg.get("on"), msg["use_account"],
                                    msg.get("refresh_hours"))
-    except (SiteError, ValueError) as err:
+    except (SiteError, AuthError, ValueError) as err:
         connection.send_error(msg["id"], "failed", str(err) or "That time isn't valid (use HH:MM)")
         return
     connection.send_result(msg["id"], await m.async_view())

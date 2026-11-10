@@ -14,8 +14,10 @@ The 30-minute key goes in the Authorization header as-is (no "Bearer").
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
@@ -435,6 +437,10 @@ class MacBidClient:
         self._email = email
         self._password = password
         self.auth_changed = False
+        # Mac.bid replaces the refresh token on every renewal and the old one stops working, so:
+        # one renewal at a time, and the new login is handed over to be saved the moment it arrives.
+        self._renew_lock = asyncio.Lock()
+        self.on_auth_changed: Callable[[dict[str, Any]], None] | None = None
 
     @property
     def user_id(self) -> str:
@@ -477,7 +483,11 @@ class MacBidClient:
         if not data or not data.get("access_token"):
             raise AuthError(f"Mac.bid didn't return a login: {data.get('error') if isinstance(data, dict) else data}")
         self.auth = {**self.auth, **parse_auth({**self.auth, **data})}
+        if not data.get("expires"):  # never keep the old expiry for a new key (that would renew on every call)
+            self.auth["expires"] = time.time() + float(data.get("expires_in") or 1500)
         self.auth_changed = True
+        if self.on_auth_changed:
+            self.on_auth_changed(self.auth)
 
     async def login(self) -> None:
         """Sign in like the site does. On a device Mac.bid doesn't know yet it texts or
@@ -512,23 +522,30 @@ class MacBidClient:
             raise AuthError(str(data.get("error") or data.get("message") or "Mac.bid didn't accept that code"))
         self._store(data)
 
-    async def renew(self) -> None:
-        now = time.time()
-        refresh_ok = self.auth.get("refresh_token") and (self.auth.get("expiration_refresh") or 0) > now
-        if refresh_ok:
-            try:
+    async def renew(self, force: bool = False) -> None:
+        async with self._renew_lock:
+            # Someone else may have renewed while we waited: don't spend the new token twice
+            if not force and self._fresh():
+                return
+            now = time.time()
+            refresh_ok = self.auth.get("refresh_token") and (self.auth.get("expiration_refresh") or 0) > now
+            if refresh_ok:
                 data = await self._call("PUT", "/auth/refresh-token",
                                         {"device_id": self.device_id, "token": self.auth["refresh_token"], "remember_me": True},
-                                        auth=False)
-                self._store(data)
-                return
-            except AuthError:
-                if not self._email:
-                    raise
-        await self.login()
+                                        auth=False, any_status=True)
+                if data.get("access_token"):
+                    self._store(data)
+                    return
+                # Refused (expired, replaced, or signed out elsewhere): Mac.bid answers 4xx here
+                if not (self._email and self._password):
+                    raise AuthError(f"Mac.bid needs you to sign in again (it answered {data.get('_status')} to renewing the login)")
+            await self.login()
+
+    def _fresh(self) -> bool:
+        return bool(self.auth.get("access_token")) and (self.auth.get("expires") or 0) >= time.time() + RENEW_EARLY_SECONDS
 
     async def ensure_fresh(self) -> None:
-        if not self.auth.get("access_token") or (self.auth.get("expires") or 0) < time.time() + RENEW_EARLY_SECONDS:
+        if not self._fresh():
             await self.renew()
 
     async def get(self, path: str) -> Any:
@@ -536,7 +553,7 @@ class MacBidClient:
         try:
             return await self._call("GET", path)
         except AuthError:
-            await self.renew()  # key revoked early: renew once and retry
+            await self.renew(force=True)  # key revoked early: renew once and retry
             return await self._call("GET", path)
 
     async def watchlist(self) -> dict[str, dict[str, Any]]:

@@ -152,6 +152,10 @@ def format_alert(kind: str, d: dict[str, Any]) -> tuple[str, str, str]:
         title = f"Booking problem: {name}"
         msg = f"{d.get('reason') or 'The site refused.'} Check the auction on the site."
         spoken = f"Booking problem on {name}. Check your phone."
+    elif kind == "proxy":
+        title = d.get("title_line") or "Bidding for someone"
+        msg = d.get("text") or ""
+        spoken = f"Auction update: {msg}"
     elif kind == "test":
         title = "Auction Watcher test"
         msg = "Alerts from Auction Watcher will arrive here."
