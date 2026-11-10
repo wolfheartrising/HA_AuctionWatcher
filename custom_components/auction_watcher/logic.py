@@ -386,8 +386,8 @@ def keep_ended(
 
 # ---------------------------------------------------------------- spending and points at risk
 
-def week_start(local_now: "datetime") -> float:
-    """Monday 00:00 of the current week (local time), as a timestamp."""
+def week_start(local_now: Any) -> float:
+    """Monday 00:00 of the current week (local time, a datetime), as a timestamp."""
     from datetime import timedelta
     monday = (local_now - timedelta(days=local_now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
     return monday.timestamp()
