@@ -33,7 +33,7 @@
   "options": {
     "step": {
       "init": {
-        "title": "Auction Watcher options",
+        "title": "Auction Watcher: rules and timing",
         "data": {
           "alert_max_bidders": "Alert when active bidders (last minute) are at most",
           "alert_max_price": "Only alert below this price (0 = any price)",
@@ -42,6 +42,16 @@
           "fast_interval_seconds": "Check every N seconds while something you follow is live",
           "idle_interval_minutes": "Check every N minutes when nothing is live",
           "extra_auction_ids": "Extra auction IDs to follow (comma separated)"
+        },
+        "description": "Step 1 of 2. Next: where alerts go."
+      },
+      "alerts": {
+        "title": "Auction Watcher: where alerts go",
+        "description": "Pick any mix. Phone pushes open the auction when tapped. Telegram and other text targets get the link in the message. Alexa gets a short spoken version (Alexa Media Player services are sent as announcements; for the official Alexa Devices integration pick its Announce or Speak entity below).",
+        "data": {
+          "notify_services": "Notify services (phone push, Telegram, Alexa Media Player, ...)",
+          "notify_entities": "Notify entities (Telegram chats, Alexa Devices Announce/Speak, ...)",
+          "alert_kinds": "Which alerts to send"
         }
       }
     }

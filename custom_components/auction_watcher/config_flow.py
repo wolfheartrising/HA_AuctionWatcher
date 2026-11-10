@@ -12,8 +12,11 @@ from homeassistant.components.file_upload import process_uploaded_file
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult, OptionsFlow
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.selector import (
+    EntitySelector,
+    EntitySelectorConfig,
     FileSelector,
     FileSelectorConfig,
+    SelectSelectorMode,
     NumberSelector,
     NumberSelectorConfig,
     NumberSelectorMode,
@@ -24,7 +27,11 @@ from homeassistant.helpers.selector import (
 )
 
 from .const import (
+    CONF_ALERT_KINDS,
     CONF_ALERT_MAX_BIDDERS,
+    CONF_NOTIFY_ENTITIES,
+    CONF_NOTIFY_SERVICES,
+    DEFAULT_ALERT_KINDS,
     CONF_ALERT_MAX_PRICE,
     CONF_COOKIE,
     CONF_DEFAULT_BID_LIMIT,
@@ -148,10 +155,24 @@ def _num(min_: float, max_: float, step: float, unit: str | None = None) -> Numb
     return NumberSelector(config)
 
 
+ALERT_KIND_OPTIONS = [
+    {"value": "opportunity", "label": "Few bidders left"},
+    {"value": "bid_limit", "label": "Bid limit reached"},
+    {"value": "ended", "label": "Auction ended"},
+    {"value": "won", "label": "Auction won"},
+]
+
+
 class AuctionWatcherOptionsFlow(OptionsFlow):
+    """Two pages: rules and timing, then where alerts go."""
+
+    def __init__(self) -> None:
+        self._rules: dict[str, Any] = {}
+
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if user_input is not None:
-            return self.async_create_entry(data=user_input)
+            self._rules = user_input
+            return await self.async_step_alerts()
         o = self.config_entry.options
         schema = vol.Schema({
             vol.Required(CONF_ALERT_MAX_BIDDERS, default=o.get(CONF_ALERT_MAX_BIDDERS, DEFAULT_ALERT_MAX_BIDDERS)): _num(1, 9, 1),
@@ -163,3 +184,36 @@ class AuctionWatcherOptionsFlow(OptionsFlow):
             vol.Optional(CONF_EXTRA_IDS, default=o.get(CONF_EXTRA_IDS, "")): TextSelector(),
         })
         return self.async_show_form(step_id="init", data_schema=schema)
+
+    async def async_step_alerts(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        if user_input is not None:
+            return self.async_create_entry(data={**self._rules, **user_input})
+        o = self.config_entry.options
+        # Legacy notify services: phones (mobile_app_*), Telegram, Alexa Media Player, email, ...
+        available = sorted(s for s in self.hass.services.async_services_for_domain("notify") if s != "send_message")
+        service_options = [{"value": s, "label": _service_label(s)} for s in available]
+        saved_services = [s for s in o.get(CONF_NOTIFY_SERVICES, []) if s in available]
+        schema = vol.Schema({
+            vol.Optional(CONF_NOTIFY_SERVICES, default=saved_services): SelectSelector(
+                SelectSelectorConfig(options=service_options, multiple=True, mode=SelectSelectorMode.DROPDOWN)
+            ),
+            vol.Optional(CONF_NOTIFY_ENTITIES, default=o.get(CONF_NOTIFY_ENTITIES, [])): EntitySelector(
+                EntitySelectorConfig(domain="notify", multiple=True)
+            ),
+            vol.Optional(CONF_ALERT_KINDS, default=o.get(CONF_ALERT_KINDS, DEFAULT_ALERT_KINDS)): SelectSelector(
+                SelectSelectorConfig(options=ALERT_KIND_OPTIONS, multiple=True)
+            ),
+        })
+        return self.async_show_form(step_id="alerts", data_schema=schema)
+
+
+def _service_label(service: str) -> str:
+    if service.startswith("mobile_app_"):
+        return f"Phone push: {service.removeprefix('mobile_app_').replace('_', ' ')}"
+    if service.startswith("alexa_media"):
+        return f"Alexa announcement: {service.removeprefix('alexa_media').strip('_').replace('_', ' ') or 'all'}"
+    if "telegram" in service:
+        return f"Telegram: {service}"
+    if service == "persistent_notification":
+        return "Home Assistant notification (bell icon)"
+    return service

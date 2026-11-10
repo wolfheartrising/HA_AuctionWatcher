@@ -12,10 +12,16 @@ Auction Watcher only **reads** your auctions. It never bids for you.
 - **One sensor per auction**: state is the price. Attributes hold the clock, leader, **active bidders in the last minute** (and who they are), whether it's closed to new bidders, your bids and what they cost, booked bids left, labels (1¢, Win-Win, ...), entry limit, Buy It Now, and **what winning right now would cost you**.
 - **Price history**: past wins of the same product, with median final price, the median number of bids winners used, and the site's own cost estimate.
 - **Polls only as fast as needed**: every 10 s while something you follow is live, every minute shortly before one starts, every 45 min otherwise. The slow check also keeps the login fresh, and refreshed cookies are saved automatically.
-- **Alerts** as events, so you can build any automation (or use the included blueprint):
-  - `auction_watcher_opportunity`: an auction is down to ≤ N active bidders (default 2), under your max price, and you're allowed to bid.
-  - `auction_watcher_bid_limit_reached`: you've spent your limit on an auction.
-  - `auction_watcher_auction_ended`, `auction_watcher_auction_won`
+- **Alerts**, each sent once (not every poll):
+  - **Few bidders left**: down to ≤ N active bidders (default 2), under your max price, and you're allowed to bid.
+  - **Bid limit reached**: you've spent your limit on an auction.
+  - **Auction ended** and **auction won**.
+- **Built-in delivery**, picked in ⚙️ → second page:
+  - **Phone push** (`notify.mobile_app_…`): tapping it opens the auction.
+  - **Telegram**: its notify service or notify entities, with the auction link in the message.
+  - **Alexa**: Alexa Media Player services are sent as announcements; for the official Alexa Devices integration pick its *Announce* or *Speak* entity. Alexa gets a short spoken version.
+  - Anything else Home Assistant can notify (email, the bell-icon notification, ...).
+- **Events** too (`auction_watcher_opportunity`, `…_bid_limit_reached`, `…_auction_ended`, `…_auction_won`), so you can build your own automations, like flashing a light. The old blueprint in `blueprints/` still works but isn't needed.
 - **Bid limits**: a default limit per auction in the options, and `auction_watcher.set_bid_limit` for a single auction. At the limit you get one alert and no more "few bidders left" alerts for that auction.
 
 ## Install
@@ -23,8 +29,8 @@ Auction Watcher only **reads** your auctions. It never bids for you.
 1. Copy `custom_components/auction_watcher` into `/config/custom_components/` (or add this repo to HACS as a custom repository).
 2. Restart Home Assistant.
 3. Settings → Devices & services → **Add integration** → *Auction Watcher*.
-4. Pick the site and paste your cookies (see below).
-5. Optional: copy `blueprints/automation/auction_watcher/alerts.yaml` to `/config/blueprints/automation/auction_watcher/`, then create an automation from it and pick your phone.
+4. Pick the site and upload or paste your cookies (see below).
+5. Click the ⚙️ on the account: page 1 is alert rules and timing, page 2 is where alerts go (phone, Telegram, Alexa).
 6. Optional: create a dashboard from `dashboards/auction_watcher.yaml`. It has three tabs: Active, Watching, GovAuctions.
 
 ### Getting the cookies

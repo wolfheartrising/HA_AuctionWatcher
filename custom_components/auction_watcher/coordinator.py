@@ -13,8 +13,13 @@ from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
+from .alerts import build_calls
 from .const import (
+    CONF_ALERT_KINDS,
     CONF_ALERT_MAX_BIDDERS,
+    CONF_NOTIFY_ENTITIES,
+    CONF_NOTIFY_SERVICES,
+    DEFAULT_ALERT_KINDS,
     CONF_ALERT_MAX_PRICE,
     CONF_COOKIE,
     CONF_DEFAULT_BID_LIMIT,
@@ -113,6 +118,14 @@ class AuctionWatcherCoordinator(DataUpdateCoordinator[dict[str, AuctionState]]):
     def bid_limit(self, auction_id: str) -> int:
         return self.rules.bid_limit(auction_id)
 
+    async def _send(self, domain: str, service: str, data: dict[str, Any]) -> None:
+        """Send one alert. A broken target (phone removed, Alexa offline) never stops polling."""
+        try:
+            await self.hass.services.async_call(domain, service, data, blocking=True)
+        except Exception as err:  # noqa: BLE001
+            target = data.get("entity_id") or f"{domain}.{service}"
+            _LOGGER.warning("Couldn't send auction alert to %s: %s", target, err)
+
     async def _async_update_data(self) -> dict[str, AuctionState]:
         e = self.config_entry
         now = time.time()
@@ -157,8 +170,14 @@ class AuctionWatcherCoordinator(DataUpdateCoordinator[dict[str, AuctionState]]):
             states[aid] = ga.build_state(aid, live.get(aid), static, hist, watching, point_cost, now)
 
         events, self._snapshot = evaluate(states, self.rules, self._snapshot, self._lists["won"])
+        kinds = set(self._opt(e, CONF_ALERT_KINDS, DEFAULT_ALERT_KINDS))
+        services = list(self._opt(e, CONF_NOTIFY_SERVICES, []))
+        entities = list(self._opt(e, CONF_NOTIFY_ENTITIES, []))
         for kind, data in events:
             self.hass.bus.async_fire(EVENT_NAMES[kind], {**data, "account": e.title})
+            if kind in kinds:
+                for domain, service, service_data in build_calls(kind, data, services, entities):
+                    self.hass.async_create_task(self._send(domain, service, service_data))
 
         seconds = choose_interval(
             states, now,

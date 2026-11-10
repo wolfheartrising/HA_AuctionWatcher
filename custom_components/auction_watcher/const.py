@@ -16,6 +16,10 @@ CONF_ALERT_MAX_PRICE = "alert_max_price"
 CONF_DEFAULT_BID_LIMIT = "default_bid_limit"
 CONF_POINT_COST = "point_cost"
 CONF_EXTRA_IDS = "extra_auction_ids"
+CONF_NOTIFY_SERVICES = "notify_services"   # e.g. mobile_app_pixel_8, telegram, alexa_media_kitchen
+CONF_NOTIFY_ENTITIES = "notify_entities"   # e.g. notify.kitchen_echo_announce, Telegram chat entities
+CONF_ALERT_KINDS = "alert_kinds"           # which alerts to send: opportunity, bid_limit, ended, won
+DEFAULT_ALERT_KINDS = ["opportunity", "bid_limit", "ended", "won"]
 
 DEFAULT_FAST_INTERVAL = 10       # seconds, while something you follow is live
 DEFAULT_IDLE_INTERVAL = 45       # minutes, when nothing is live (keeps the login fresh)
