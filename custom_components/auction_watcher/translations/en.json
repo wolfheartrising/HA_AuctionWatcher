@@ -46,12 +46,13 @@
         }
       },
       "ebay": {
-        "title": "eBay developer keys",
-        "description": "From developer.ebay.com, your Production keyset. App ID and Cert ID let Home Assistant look up items. Add your RuName (User Tokens, \"Get a Token from eBay via Your Application\") to also sign in, so your watchlist and bids are followed automatically.",
+        "title": "eBay setup",
+        "description": "Use either: (A) eBay Production API keys (App ID + Cert ID), optionally with RuName to sign in for watchlist/bids, or (B) paste your own eBay browser cookies for owner-only no-API mode.",
         "data": {
           "app_id": "App ID (Client ID)",
           "cert_id": "Cert ID (Client Secret)",
           "runame": "RuName (optional: needed to sign in)",
+          "cookie": "…or paste your eBay cookies (no-API mode)",
           "extra_auction_ids": "Items to follow (item numbers or ebay.com/itm links, optional)"
         }
       },
@@ -73,7 +74,8 @@
       "macbid_bad_saved_login": "That doesn't look like Mac.bid's mac_auths value. Copy the whole value (it starts with {).",
       "macbid_bad_code": "Mac.bid didn't accept that code. Check it, or start over to get a new one.",
       "ebay_bad_keys": "eBay didn't accept those keys. Check they're from the Production keyset (not Sandbox).",
-      "ebay_bad_signin": "That sign-in didn't work. Paste the full address of the page eBay showed after signing in, within a few minutes."
+      "ebay_bad_signin": "That sign-in didn't work. Paste the full address of the page eBay showed after signing in, within a few minutes.",
+      "ebay_need_keys_or_cookie": "Enter App ID + Cert ID, or paste your eBay cookies."
     },
     "abort": {
       "already_configured": "This site is already set up.",

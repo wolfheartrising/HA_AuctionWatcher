@@ -81,7 +81,6 @@ def parse_item_id(text: str) -> str | None:
     text = (text or "").strip()
     if text.isdigit():
         return text
-    import re
     m = re.search(r"/itm/(?:[^/?#]*/)?(\d{9,15})", text) or re.search(r"[?&]item=(\d{9,15})", text)
     return m.group(1) if m else None
 
@@ -182,7 +181,7 @@ def parse_my_ebay_html(html_text: str, now: float, category: str) -> dict[str, A
     out: dict[str, AuctionState] = {}
     scripts = re.findall(r"<script[^>]*>.*?</script>", html_text, flags=re.I | re.S)
     for script in scripts:
-        if "itemId" not in script and "itemId" not in script:
+        if "itemId" not in script:
             continue
         for match in re.finditer(r'"itemId"\s*:\s*"?(\d{9,15})"?', script):
             item_id = match.group(1)
@@ -287,6 +286,10 @@ class EbayClient:
         return bool(self.user_auth.get("refresh_token") or self.cookies)
 
     @property
+    def has_api_keys(self) -> bool:
+        return bool(self.app_id and self._cert_id)
+
+    @property
     def cookie_header(self) -> str:
         return "; ".join(f"{k}={v}" for k, v in self.cookies.items())
 
@@ -294,9 +297,7 @@ class EbayClient:
         return "Basic " + base64.b64encode(f"{self.app_id}:{self._cert_id}".encode()).decode()
 
     def _request_headers(self, auth: str | None = None) -> dict[str, str]:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-        }
+        headers: dict[str, str] = {}
         if auth:
             headers["Authorization"] = auth
         if self.cookie_header:
@@ -369,7 +370,7 @@ class EbayClient:
             raise SiteError(f"Couldn't reach eBay: {err}") from err
 
     async def item(self, item_id: str) -> dict[str, Any]:
-        if not self.app_id or not self._cert_id:
+        if not self.has_api_keys:
             html_text = await self._fetch_html(f"https://www.ebay.com/itm/{item_id}")
             info = parse_my_ebay_html(html_text, time.time(), CATEGORY_WATCHING)
             item = info.get(item_id)
@@ -408,7 +409,7 @@ class EbayClient:
             raise SiteError(f"Couldn't reach eBay: {err}") from err
 
     async def search(self, query: str, limit: int = 50) -> list[dict[str, Any]]:
-        if not self.app_id or not self._cert_id:
+        if not self.has_api_keys:
             html_text = await self._fetch_html(
                 "https://www.ebay.com/sch/i.html",
                 params={"_nkw": query, "_ipg": min(limit, 50), "_pgn": 1, "rt": "nc", "LH_Complete": 1},
@@ -477,27 +478,30 @@ class EbayClient:
 
     async def watch(self, item_id: str, on: bool = True) -> None:
         """Add (or remove) an item on your eBay watch list (official Trading API; needs eBay sign-in)."""
+        if not self.has_api_keys:
+            raise SiteError("Watchlist changes need API keys; cookie mode is read-only")
         call = "AddToWatchList" if on else "RemoveFromWatchList"
         answer = await self._trading(call, f"<ItemID>{item_id}</ItemID>")
         if "<Ack>Failure</Ack>" in answer:
             raise SiteError(f"eBay refused {call}")
 
     async def my_user_id(self) -> str:
-        if not self.app_id or not self._cert_id:
+        if not self.has_api_keys:
             return ""
         return parse_user_id(await self._trading("GetUser", ""))
 
     async def my_ebay(self, my_user_id: str, now: float | None = None) -> dict[str, AuctionState]:
-        if not self.app_id or not self._cert_id:
+        when = time.time() if now is None else now
+        if not self.has_api_keys:
             watch = await self._fetch_html("https://www.ebay.com/myb/WatchList")
             bid = await self._fetch_html("https://www.ebay.com/myb/OrderList")
-            out = parse_my_ebay_html(watch, time.time() if now is None else now, CATEGORY_WATCHING)
-            out.update(parse_my_ebay_html(bid, time.time() if now is None else now, CATEGORY_BIDDING))
+            out = parse_my_ebay_html(watch, when, CATEGORY_WATCHING)
+            out.update(parse_my_ebay_html(bid, when, CATEGORY_BIDDING))
             return out
         body = ("<WatchList><Include>true</Include><Pagination><EntriesPerPage>100</EntriesPerPage></Pagination></WatchList>"
                 "<BidList><Include>true</Include><Pagination><EntriesPerPage>100</EntriesPerPage></Pagination></BidList>")
         return parse_my_ebay_buying(await self._trading("GetMyeBayBuying", body), my_user_id,
-                                    time.time() if now is None else now)
+                                    when)
 
 
 def _num(v: Any) -> float | None:
@@ -521,3 +525,4 @@ def _dt(v: Any) -> datetime | None:
         return datetime.fromisoformat(str(v).replace("Z", "+00:00")).astimezone(timezone.utc)
     except ValueError:
         return None
+

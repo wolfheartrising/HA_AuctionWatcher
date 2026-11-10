@@ -6,6 +6,13 @@ The section for a version becomes its release notes, so HACS shows them under "U
 After updating: restart Home Assistant if Python changed, then reload the Auctions page (it offers a Reload button
 when it's older than the plugin).
 
+## 1.6.1
+- eBay setup now supports either **official API keys** (App ID + Cert ID, optional RuName sign-in) **or your own
+  eBay browser cookies** for owner-only no-API mode.
+- In cookie mode, Auction Watcher can follow your own eBay watchlist, bids and saved-search-backed items without
+  developer keys.
+- eBay setup text and errors now clearly explain the two sign-in paths.
+
 ## 1.6.0
 - **Telegram fixed:** replies now go to each chat's notify entity, which newer Home Assistant requires ("Please specify
   at least 1 notify entity"), so commands and buttons finally answer.

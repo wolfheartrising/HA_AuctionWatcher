@@ -282,7 +282,7 @@ class AuctionWatcherConfigFlow(ConfigFlow, domain=DOMAIN):
                                   "extra": (user_input.get(CONF_EXTRA_IDS) or "").strip()}
                     return self._finish_ebay()
             else:
-                errors["base"] = "no_input"
+                errors["base"] = "ebay_need_keys_or_cookie"
         return self.async_show_form(step_id="ebay", data_schema=vol.Schema(_ebay_fields(user_input)), errors=errors)
 
     async def async_step_ebay_signin(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:

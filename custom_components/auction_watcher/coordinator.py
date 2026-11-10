@@ -1153,7 +1153,7 @@ class EbayCoordinator(AuctionWatcherCoordinator):
         extra = [i for i in (eb.parse_item_id(x) for x in str(self._opt(e, CONF_EXTRA_IDS, "")).replace(",", " ").split()) if i]
         try:
             if client.signed_in and now >= self._backoff_until and self._mine_due(now):
-                if client.app_id and client._cert_id and not self._ebay_user:
+                if client.has_api_keys and not self._ebay_user:
                     self._ebay_user = await client.my_user_id()
                 self._mine = await client.my_ebay(self._ebay_user, now)
                 self._mine_at = now
