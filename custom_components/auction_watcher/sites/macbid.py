@@ -113,6 +113,7 @@ def parse_watchlist(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
             "location_id": w.get("current_location_id"),
             "auction_id": w.get("auction_id"),
             "is_transferrable": bool(w.get("is_transferrable")) if w.get("is_transferrable") is not None else None,
+            "auction_type": w.get("auction_type"),
         }
     return out
 
@@ -148,6 +149,8 @@ def parse_locations(locations: list[dict[str, Any]], buildings: list[dict[str, A
     """Mac.bid pickup locations (public /locations + /buildings): name, address, hours,
     whether items there can be transferred, where to, and the building's sales tax."""
     tax = {str(b.get("id")): _num(b.get("sales_tax")) for b in buildings or []}
+    outpost = {str(b.get("id")): str(b.get("is_pickup_outpost") or "0") not in ("0", "", "False", "false")
+               for b in buildings or []}
     out: dict[str, dict[str, Any]] = {}
     for loc in locations or []:
         lid = str(loc.get("id") or "")
@@ -162,6 +165,7 @@ def parse_locations(locations: list[dict[str, Any]], buildings: list[dict[str, A
             "can_transfer": bool(loc.get("can_transfer")),
             "transfer_destinations": dests,
             "sales_tax": tax.get(str(loc.get("building_id"))),
+            "outpost": outpost.get(str(loc.get("building_id")), False),
         }
     return out
 
@@ -178,8 +182,9 @@ def location_info(loc_id: Any, locations: dict[str, dict[str, Any]], lot_transfe
         "location_hours": loc.get("hours"),
         "transferable": can,
         "transfer_to": sorted(
-            f"{locations[d]['name']} ({locations[d]['city_state']})" for d in loc.get("transfer_destinations", [])
-            if d in locations) if can else [],
+            f"{locations[d]['name']} ({locations[d]['city_state']})"
+            + (" · free (pickup outpost)" if locations[d].get("outpost") else " · $10")
+            for d in loc.get("transfer_destinations", []) if d in locations) if can else [],
         "sales_tax": loc.get("sales_tax"),
     }
 
@@ -226,6 +231,51 @@ def parse_pickups(data: Any, now: float) -> dict[str, AuctionState]:
             },
         )
     return out
+
+
+BOILERPLATE = ("We make no guarantees", "All items are sold")
+
+# Mac.bid's FAQ, shortened: what each condition label means
+CONDITION_NOTES = {
+    "LIKE NEW": "Appears new or unused; not tested. Can't be inspected until pickup: check it there and report problems before leaving.",
+    "OPEN BOX": "Returned and maybe used; may be scratched, incomplete or not working unless the notes say otherwise. Sold as-is.",
+    "DAMAGED": "May be incomplete and isn't tested. Sold as-is, no refunds, and Buyer's Assurance isn't available.",
+}
+
+
+def condition_explained(condition: str | None) -> str:
+    return CONDITION_NOTES.get(str(condition or "").strip().upper(), "")
+
+
+def parse_details(d: dict[str, Any]) -> dict[str, Any]:
+    """From the public /lot/{id}: the colored condition notes, the description, and a
+    few facts the watchlist doesn't always carry."""
+    notes = []
+    tested_note = (d.get("tested_note") or "").strip()
+    if str(d.get("is_tested") or "0") not in ("0", "", "False", "false") or tested_note:
+        notes.append({"kind": "tested", "label": "TESTED", "note": tested_note})
+    if (d.get("damaged_note") or "").strip():
+        notes.append({"kind": "damaged", "label": "DAMAGED", "note": d["damaged_note"].strip()})
+    if (d.get("partial_note") or "").strip():
+        notes.append({"kind": "partial", "label": "PARTIAL", "note": d["partial_note"].strip()})
+    desc = "\n".join(line for line in (d.get("description") or "").splitlines()
+                     if line.strip() and not line.strip().startswith(BOILERPLATE)).strip()
+    tr = d.get("is_transferrable")
+    return {
+        "condition_notes": notes,
+        "description": desc,
+        "condition": d.get("condition_name"),
+        "model": d.get("model") or None,
+        "title": d.get("title") or d.get("product_name"),
+        "image": d.get("image_url") or d.get("stock_image_url"),
+        "retail_price": _num(d.get("retail_price") or d.get("product_retail_price")),
+        "location_id": str(d.get("current_location_id") or "") or None,
+        "is_transferrable": None if tr is None else str(tr) not in ("0", "False", "false", ""),
+        "auction_id": d.get("auction_id"),
+        "lot_number": d.get("lot_number"),
+        "buyers_assurance_cost": _num(d.get("buyers_assurance_cost")),
+        "auction_type": d.get("auction_type"),
+    }
 
 
 def item_url(auction_id: Any, lot_number: Any) -> str:
@@ -296,7 +346,15 @@ def build_state(lot_id: str, lot: dict[str, Any] | None, static: dict[str, Any] 
             "on_watchlist": lot_id in watching_ids,
             "location_id": str(lot.get("location_id") or static.get("location_id") or "") or None,
             "lot_transferable": static.get("is_transferrable"),
-            "auction_id": str(lot.get("auction_id") or static.get("auction_id") or "") or None,
+            # Mac.bid's sale-event id (needed to bid). Not "auction_id": that's the item's own id.
+            "mb_auction_id": str(lot.get("auction_id") or static.get("auction_id") or "") or None,
+            "sale_type": static.get("auction_type") or lot.get("auction_type"),
+            # Buyer's Assurance is only for Open Box and Like New (FAQ), never Damaged
+            "assurance_cost": None if "DAMAGED" in str(static.get("condition") or "").upper()
+            else _num(static.get("buyers_assurance_cost")),
+            "condition_explained": condition_explained(static.get("condition")),
+            "has_assurance": bool(lot.get("has_buyer_assurance")),
+            "min_next_bid": int(_num(lot.get("current_bid")) or 0) + 1,
         },
     )
 
@@ -456,6 +514,22 @@ class MacBidClient:
             msg = (data.get("error") or data.get("message") or f"status {status}") if isinstance(data, dict) else status
             raise SiteError(f"Mac.bid refused the bid: {msg}")
         return data if isinstance(data, dict) else {}
+
+    async def lot_details(self, lot_id: str) -> dict[str, Any]:
+        """Public item details (what the item page shows): condition notes, description, location."""
+        data = await self._call("GET", f"/lot/{lot_id}", auth=False)
+        return parse_details(data if isinstance(data, dict) else {})
+
+    async def set_assurance(self, lot_id: str, on: bool = True) -> None:
+        """Buyer's Assurance (5-business-day return guarantee) on a lot you've bid on."""
+        await self.ensure_fresh()
+        data = await self._call("POST", "/map-bid/toggle-buyer-assurance", {
+            "lot_id": int(lot_id) if str(lot_id).isdigit() else lot_id,
+            "platform": "web", "device_fingerprint": "test", "ba": bool(on),
+        }, any_status=True)
+        status = data.pop("_status", 200) if isinstance(data, dict) else 200
+        if status >= 400:
+            raise SiteError(f"Mac.bid refused Buyer's Assurance: {short_answer(data)}")
 
     async def lot(self, lot_id: str) -> dict[str, Any]:
         return await self.get(f"/map-bid/ddb/lot/{lot_id}")

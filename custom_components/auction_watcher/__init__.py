@@ -128,7 +128,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         if not hasattr(coord, "async_place_bid"):
             raise ServiceValidationError("Max bids from Home Assistant are only for Mac.bid")
         try:
-            amount = await coord.async_place_bid(aid, int(call.data["amount"]))
+            amount = await coord.async_place_bid(aid, int(call.data["amount"]), bool(call.data.get("buyers_assurance", False)))
         except SiteError as err:
             raise HomeAssistantError(str(err)) from err
         return {"placed": amount}
@@ -151,6 +151,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         schema=vol.Schema({
             vol.Required("auction_id"): cv.string,
             vol.Required("amount"): vol.All(vol.Coerce(int), vol.Range(min=1, max=100000)),
+            vol.Optional("buyers_assurance", default=False): cv.boolean,
         }),
         supports_response=SupportsResponse.OPTIONAL,
     )
@@ -160,6 +161,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             vol.Required("auction_id"): cv.string,
             vol.Optional("mode"): vol.In(["off", "now", "late"]),
             vol.Optional("late_seconds"): vol.All(vol.Coerce(int), vol.Range(min=30, max=3600)),
+            vol.Optional("assurance"): cv.boolean,
         }),
     )
     hass.services.async_register(

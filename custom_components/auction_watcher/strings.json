@@ -245,12 +245,16 @@
         "amount": {
           "name": "Max bid ($)",
           "description": "Whole dollars."
+        },
+        "buyers_assurance": {
+          "name": "Add Buyer's Assurance",
+          "description": "5-business-day return guarantee; the price is on the item."
         }
       }
     },
     "set_macbid_bidding": {
       "name": "Set Mac.bid auto-bidding",
-      "description": "off, now (place your max right away) or late (place it N seconds before the end). Needs a max bid on the item.",
+      "description": "off, or late (place your max N seconds before the end). Needs a max bid on the item.",
       "fields": {
         "auction_id": {
           "name": "Lot ID",
@@ -263,6 +267,10 @@
         "late_seconds": {
           "name": "Late: seconds before the end",
           "description": "Default 180."
+        },
+        "assurance": {
+          "name": "Add Buyer's Assurance to the late bid",
+          "description": "Adds it when the late bid is placed."
         }
       }
     }

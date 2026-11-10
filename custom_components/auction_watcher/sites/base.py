@@ -91,7 +91,10 @@ class AuctionState:
             for key, value in hist.items():
                 data[f"history_{key}"] = value
         extra = data.pop("extra")
-        data.update(extra)
+        # Core fields always win: an extra with the same name (e.g. a site's own
+        # "auction_id") must never overwrite the item's id the page and services use.
+        for key, value in extra.items():
+            data.setdefault(key, value)
         return data
 
 

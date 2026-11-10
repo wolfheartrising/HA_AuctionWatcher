@@ -164,7 +164,7 @@ LOCS = [
     {"id": 13, "name": "Monroeville - A", "city_state": "Monroeville, PA", "can_transfer": 0, "transfer_destinations": "", "building_id": 3},
     {"id": 50, "name": "No-Transfer Spot", "city_state": "Akron, OH", "can_transfer": 0, "transfer_destinations": "1", "building_id": 9},
 ]
-BLDGS = [{"id": 15, "sales_tax": 0.07}, {"id": 2, "sales_tax": 0.06}]
+BLDGS = [{"id": 15, "sales_tax": 0.07}, {"id": 2, "sales_tax": 0.06}, {"id": 3, "is_pickup_outpost": "1"}]
 
 
 def test_location_and_transfers():
@@ -172,7 +172,7 @@ def test_location_and_transfers():
     info = mb.location_info(23, locs, True)
     assert info["location"] == "Robinson - A" and info["sales_tax"] == 0.07
     # destination 25 isn't in the list (unknown) -> skipped; names come back sorted
-    assert info["transfer_to"] == ["Butler - A (Butler, PA)", "Monroeville - A (Monroeville, PA)"]
+    assert info["transfer_to"] == ["Butler - A (Butler, PA) · $10", "Monroeville - A (Monroeville, PA) · free (pickup outpost)"]
     assert info["location_hours"].splitlines() == ["Monday 12:00pm - 6:00pm", "Tuesday 12:00pm - 8:00pm", "License"]
     # the lot itself can't be transferred, or the location doesn't allow it
     assert mb.location_info(23, locs, False)["transfer_to"] == [] and not mb.location_info(23, locs, False)["transferable"]
@@ -190,3 +190,36 @@ def test_item_link_matches_the_site():
     assert s.url == "https://www.mac.bid/?aid=101174&lid=3819N"
     assert mb.item_url(None, "3819N") == "https://www.mac.bid/account/watchlist"
     assert mb.short_answer({"message": "x" * 300}).endswith("…")
+
+
+def test_condition_notes_and_description():
+    d = {"is_tested": "1", "tested_note": "powers on, accelerates", "damaged_note": "", "partial_note": "",
+         "description": "This is a Segway C2 PRO\nIncludes charger\nWe make no guarantees or warranties...",
+         "condition_name": "OPEN BOX", "current_location_id": 16, "is_transferrable": 0, "title": "Segway"}
+    p = mb.parse_details(d)
+    assert p["condition_notes"] == [{"kind": "tested", "label": "TESTED", "note": "powers on, accelerates"}]
+    assert p["description"] == "This is a Segway C2 PRO\nIncludes charger"     # boilerplate dropped
+    assert p["location_id"] == "16" and p["is_transferrable"] is False
+    dmg = mb.parse_details({"is_tested": "0", "damaged_note": "Item Does Not Power On", "partial_note": "missing remote"})
+    assert [n["kind"] for n in dmg["condition_notes"]] == ["damaged", "partial"]
+    assert mb.parse_details({"is_tested": "0"})["condition_notes"] == []
+
+
+def test_item_id_never_overwritten_by_sale_id():
+    lot = {**LOT, "auction_id": "101174", "lot_number": "3819N"}
+    s = mb.build_state("67774315", lot, None, ME, set(), NOW)
+    attrs = s.as_attributes()
+    assert attrs["auction_id"] == "67774315"          # the item (what services need)
+    assert attrs["mb_auction_id"] == "101174"         # the sale event (what bidding needs)
+    assert attrs["min_next_bid"] == 23                # current bid $22 -> minimum $23
+    # even a careless extra can't overwrite a core field
+    s.extra["auction_id"] = "oops"
+    assert s.as_attributes()["auction_id"] == "67774315"
+
+
+def test_condition_rules_from_faq():
+    damaged = mb.build_state("1", LOT, {"condition": "DAMAGED", "buyers_assurance_cost": 8}, ME, set(), NOW)
+    assert damaged.extra["assurance_cost"] is None and "no refunds" in damaged.extra["condition_explained"]
+    openbox = mb.build_state("1", LOT, {"condition": "OPEN BOX", "buyers_assurance_cost": 8}, ME, set(), NOW)
+    assert openbox.extra["assurance_cost"] == 8.0 and "as-is" in openbox.extra["condition_explained"]
+    assert "pickup" in mb.condition_explained("Like New")

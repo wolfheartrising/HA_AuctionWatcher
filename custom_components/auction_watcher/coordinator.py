@@ -648,6 +648,7 @@ class MacBidCoordinator(AuctionWatcherCoordinator):
         self._lots: dict[str, tuple[float, dict[str, Any]]] = {}  # lot_id -> (fetched at, data)
         self._locs: dict[str, dict[str, Any]] = {}
         self._locs_at = 0.0
+        self._details: dict[str, tuple[float, dict[str, Any]]] = {}  # lot_id -> (fetched at, parsed /lot/{id})
         self._mb: dict[str, MacBidSettings] = {}
         self._mbmem: dict[str, MacBidMemory] = {}
         self._backoff_until = 0.0
@@ -688,7 +689,7 @@ class MacBidCoordinator(AuctionWatcherCoordinator):
                              {k: v.mode for k, v in self._mb.items()})
         return budget - c["placed"] - c["scheduled"]
 
-    async def async_place_bid(self, lot_id: str, amount: int) -> int:
+    async def async_place_bid(self, lot_id: str, amount: int, assurance: bool = False) -> int:
         """Manual max bid (the page's button / the place_bid service)."""
         aid = str(lot_id)
         s = (self.data or {}).get(aid)
@@ -697,21 +698,29 @@ class MacBidCoordinator(AuctionWatcherCoordinator):
         left = self._macbid_budget_left(self.data or {}, exclude=aid)
         if left is not None and amount > left:
             raise SiteError(f"A ${amount} max would go past your Mac.bid budget (${max(left, 0)} left)")
-        await self._place(s, int(amount), "placed by you")
+        if s.price is not None and amount <= s.price:
+            raise SiteError(f"Your max must be above the current bid (${s.price:.0f}); the minimum is ${int(s.price) + 1}")
+        await self._place(s, int(amount), "placed by you", assurance)
         await self.async_request_refresh()
         return int(amount)
 
-    async def _place(self, s: AuctionState, amount: int, reason: str) -> None:
+    async def _place(self, s: AuctionState, amount: int, reason: str, assurance: bool = False) -> None:
         client: mb.MacBidClient = self.client  # type: ignore[assignment]
         mem = self._mbmem.setdefault(s.auction_id, MacBidMemory())
         mem.last_attempt = time.time()
-        answer = await client.place_bid(s.auction_id, s.extra.get("lot_number") or "", s.extra.get("auction_id") or "", amount)
+        answer = await client.place_bid(s.auction_id, s.extra.get("lot_number") or "", s.extra.get("mb_auction_id") or "", amount)
         mem.answer = mb.short_answer(answer)
         _LOGGER.info("Mac.bid answered a $%s max bid on lot %s: %s", amount, s.auction_id, mem.answer)
         # Mac.bid accepts the request first and processes it after, so it only counts
         # once its own lot data shows you as a bidder (checked on the next updates).
         mem.pending, mem.pending_since = amount, time.time()
         mem.status = f"sent a ${amount} max ({reason}); checking that Mac.bid recorded it… (answer: {mem.answer})"
+        if assurance and not s.extra.get("has_assurance"):
+            try:
+                await client.set_assurance(s.auction_id, True)
+                mem.status += f"; Buyer's Assurance added (${s.extra.get('assurance_cost') or '?'})"
+            except SiteError as err:
+                mem.status += f"; Buyer's Assurance not added: {err}"
         self._lots.pop(s.auction_id, None)  # re-read this lot on the next check
         self._pending_reason = getattr(self, "_pending_reason", {})
         self._pending_reason[s.auction_id] = reason
@@ -757,7 +766,7 @@ class MacBidCoordinator(AuctionWatcherCoordinator):
                 mem.status = reason
                 continue
             try:
-                await self._place(s, amount, f"auto: {reason}")
+                await self._place(s, amount, f"auto: {reason}", settings.assurance)
             except AuthError:
                 raise
             except SiteError as err:
@@ -838,16 +847,41 @@ class MacBidCoordinator(AuctionWatcherCoordinator):
                 client.auth_changed = False
                 self.hass.config_entries.async_update_entry(e, data={**e.data, CONF_AUTH: client.auth})
 
+        # Item details (condition notes, description): once per item, refreshed daily, a few per check
+        fetched = 0
+        for lot_id in tracked:
+            cached = self._details.get(lot_id)
+            if (cached is None or now - cached[0] > 86400) and fetched < 5 and now >= self._backoff_until:
+                try:
+                    self._details[lot_id] = (now, await client.lot_details(lot_id))
+                    fetched += 1
+                except mb.RateLimited:
+                    self._backoff_until = now + 60
+                    break
+                except SiteError as err:
+                    _LOGGER.debug("Mac.bid details for %s not loaded: %s", lot_id, err)
+        self._details = {k: v for k, v in self._details.items() if k in tracked}
+
         states: dict[str, AuctionState] = {}
         for lot_id in tracked:
             lot = (self._lots.get(lot_id) or (0, None))[1]
-            st = mb.build_state(lot_id, lot, self._watch.get(lot_id), client.user_id, set(self._watch), now)
+            details = (self._details.get(lot_id) or (0, {}))[1]
+            # The watchlist knows most of this already; details fill gaps for lots you only bid on
+            static = {**{k: v for k, v in details.items() if v not in (None, "")}, **(self._watch.get(lot_id) or {})}
+            st = mb.build_state(lot_id, lot, static, client.user_id, set(self._watch), now)
+            st.extra["condition_notes"] = details.get("condition_notes", [])
+            st.extra["description"] = details.get("description") or None
+            st.extra["model"] = details.get("model")
+            if not st.extra.get("condition_explained"):
+                st.extra["condition_explained"] = mb.condition_explained(details.get("condition"))
+            if "DAMAGED" in str(details.get("condition") or "").upper():
+                st.extra["assurance_cost"] = None
             info = mb.location_info(st.extra.get("location_id"), self._locs, st.extra.get("lot_transferable"))
             st.extra.update(info)
             if info.get("sales_tax") is not None:
                 st.cost_if_won_now = mb.win_cost(st.price, info["sales_tax"])
             mbs, mem = self.macbid_settings(lot_id), self.macbid_memory(lot_id)
-            st.extra.update({"mb_mode": mbs.mode, "mb_late_seconds": mbs.late_seconds,
+            st.extra.update({"mb_mode": mbs.mode, "mb_late_seconds": mbs.late_seconds, "mb_assurance": mbs.assurance,
                              "mb_placed": mem.placed or None, "mb_status": mem.status})
             if st.ends_at:
                 if lot_id not in self._original_end:

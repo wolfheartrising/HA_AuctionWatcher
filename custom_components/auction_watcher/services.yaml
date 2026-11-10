@@ -110,6 +110,9 @@ place_bid:
           max: 100000
           mode: box
           unit_of_measurement: "$"
+    buyers_assurance:
+      selector:
+        boolean:
 
 set_macbid_bidding:
   fields:
@@ -133,3 +136,6 @@ set_macbid_bidding:
           max: 3600
           mode: box
           unit_of_measurement: s
+    assurance:
+      selector:
+        boolean:

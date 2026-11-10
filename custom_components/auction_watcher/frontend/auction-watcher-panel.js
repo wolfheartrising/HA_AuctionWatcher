@@ -209,7 +209,7 @@ class AuctionWatcherPanel extends HTMLElement {
     const accounts = this._accounts();
     const signature = JSON.stringify([this._tab, this._sort, auctions.map((a) => [a.entity_id, a.price, a.updated, a.bid_limit,
       a.auto_cancel, a.auto_rebook, a.rebook_mode, a.rebook_amount, a.max_price, a.auto_status, a.your_booked_left,
-      a.mb_mode, a.mb_placed, a.mb_status, a.winning]),
+      a.mb_mode, a.mb_placed, a.mb_status, a.winning, a.has_assurance, a.mb_assurance, (a.condition_notes || []).length]),
       accounts, this._saved, this._tab === "packs" ? this._packs() : null, this._autoSwitch()?.state, this._autoSwitch("macbid")?.state]);
     if (!force && signature === this._signature) return;
     this._signature = signature;
@@ -501,9 +501,15 @@ class AuctionWatcherPanel extends HTMLElement {
             <label>${esc(LIMIT_LABEL[a.site] || "Max bid ($)")}
               <input data-id="${id}" data-field="limit" type="number" min="0" step="1" inputmode="numeric"
                 value="${esc(limit)}" placeholder="none"></label>
-            <button type="button" data-act="limit" data-id="${id}">Save</button>
-            <span class="saved">${esc(this._saved["limit:" + a.auction_id] || "")}</span>
+            ${a.site === "macbid" && a.status === "live"
+              ? `<button type="button" class="bid-now" data-act="mb_place" data-id="${id}">Bid now</button>
+                 <button type="button" class="secondary" data-act="limit" data-id="${id}" title="Save the max without bidding (for alerts and late auto-bids)">Save</button>`
+              : `<button type="button" data-act="limit" data-id="${id}">Save</button>`}
+            <span class="saved">${esc(this._saved["limit:" + a.auction_id] || this._saved["mb:" + a.auction_id] || "")}</span>
           </div>
+          ${a.site === "macbid" && a.status === "live" ? `<div class="note">Minimum next bid: <b>${money(a.min_next_bid)}</b>.
+            Your max is the most you'll pay; Mac.bid raises your bid for you up to it.
+            ${a.assurance_cost ? (a.has_assurance ? ` · ✅ Buyer's Assurance added` : ` · Buyer's Assurance ${money(a.assurance_cost)}: you'll be asked when you bid.`) : ""}</div>` : ""}
           <div class="total" data-total="${id}">${this._totalText(a)}</div>
           ${a.site === "macbid" ? "" : `<div class="note">You get an alert when the price passes this. Bid on ${esc(SITE_NAMES[a.site] || a.site)} itself; this doesn't place bids.</div>`}
         </div>
@@ -514,38 +520,39 @@ class AuctionWatcherPanel extends HTMLElement {
   _macbidExtras(a) {
     const id = esc(a.auction_id);
     const aid = a.auction_id;
+    const notes = (a.condition_notes || []).map((n) => `<div class="cond ${esc(n.kind)}">
+        <span class="cond-tag">${esc(n.label)}</span>${n.note ? `<div>${esc(n.note)}</div>` : ""}</div>`).join("");
+    const condNote = a.condition_explained ? `<div class="note"><b>${esc((a.labels || [])[0] || "Condition")}:</b> ${esc(a.condition_explained)}</div>` : "";
+    const desc = a.description ? `<details class="sub-menu"><summary>Description</summary><div class="pre">${esc(a.description)}</div></details>` : "";
     const loc = a.location ? `<div class="line">📍 <b>${esc(a.location)}</b>${a.location_city ? ` · ${esc(a.location_city)}` : ""}
         ${a.location_address ? `<span class="muted"> · ${esc(a.location_address)}</span>` : ""}</div>` : "";
     const hours = a.location_hours ? `<details class="sub-menu"><summary>Pickup hours</summary><div class="pre">${esc(a.location_hours)}</div></details>` : "";
     const transfers = a.location ? `<details class="sub-menu"><summary>Transfers: ${a.transferable && (a.transfer_to || []).length
         ? `can move to ${a.transfer_to.length} location${a.transfer_to.length === 1 ? "" : "s"}` : "not available"}</summary>
         ${a.transferable && (a.transfer_to || []).length
-          ? `<ul>${a.transfer_to.map((t) => `<li>${esc(t)}</li>`).join("")}</ul><div class="note">Set up transfers on Mac.bid after you win.</div>`
-          : `<div class="note">Pick up at ${esc(a.location)}.</div>`}</details>` : "";
-    if (a.status === "ended" || a.status === "awaiting_pickup") return loc + hours + transfers;
-    const mode = this._val(aid, "mb_mode", a.mb_mode || "off");
+          ? `<ul>${a.transfer_to.map((t) => `<li>${esc(t)}</li>`).join("")}</ul><div class="note">Set up a transfer on Mac.bid after you win.
+              $10 each (free to pickup outposts and for Buyers Club members); it can take up to 7 days to arrive,
+              then you have 7 days to pick it up.</div>`
+          : `<div class="note">Pick up at ${esc(a.location)}. You can also pay Mac.bid to hold it 7 more days.</div>`}</details>` : "";
+    const pickupRule = a.status === "live" && a.location
+      ? `<div class="note">If you win: pick up within <b>3 business days</b> at ${esc(a.location)}, or transfer / pay to hold it.</div>` : "";
+    if (a.status === "ended" || a.status === "awaiting_pickup") return notes + condNote + desc + loc + hours + transfers;
+    const late = String(this._val(aid, "mb_late", a.mb_mode === "late")) === "true";
     const lateMin = this._val(aid, "mb_late_min", Math.round((a.mb_late_seconds || 180) / 60));
-    const on = mode !== "off";
-    return `${loc}${hours}${transfers}
-      <details class="booking" ${on || this._open[aid] ? "open" : ""} data-id="${id}">
-        <summary>Bidding ${on ? `<span class="badge on">auto ${esc(mode)}</span>` : ""}${a.mb_placed ? ` <span class="badge">your max $${num(a.mb_placed)}</span>` : ""}</summary>
+    const assure = String(this._val(aid, "mb_assure", !!a.mb_assurance)) === "true";
+    return `${notes}${condNote}${desc}${loc}${pickupRule}${hours}${transfers}
+      <details class="booking" ${late || this._open[aid] ? "open" : ""} data-id="${id}">
+        <summary>Auto-bid ${late ? `<span class="badge on">late bid set</span>` : ""}${a.mb_placed ? ` <span class="badge">your max $${num(a.mb_placed)}</span>` : ""}</summary>
+        <label class="bk-check"><input data-id="${id}" data-field="mb_late" type="checkbox" ${late ? "checked" : ""}>
+          Place my max automatically
+          <input data-id="${id}" data-field="mb_late_min" type="number" min="1" max="60" step="1" value="${esc(lateMin)}"> min before the end</label>
+        ${a.assurance_cost ? `<label class="bk-check"><input data-id="${id}" data-field="mb_assure" type="checkbox" ${assure ? "checked" : ""}>
+          Add Buyer's Assurance (${money(a.assurance_cost)}) when it bids</label>` : ""}
         <div class="bk-row">
-          <button type="button" data-act="mb_place" data-id="${id}">Place max bid now</button>
-          <span class="muted">uses the Max bid above; Mac.bid raises for you up to it</span>
+          <button type="button" data-act="mb_auto" data-id="${id}">Save auto-bid</button>
         </div>
-        <div class="bk-line">Auto-bid
-          <label><input data-id="${id}" data-field="mb_mode" type="radio" name="mb_mode_${id}" value="off" ${mode === "off" ? "checked" : ""}> off</label>
-          <label><input data-id="${id}" data-field="mb_mode" type="radio" name="mb_mode_${id}" value="now" ${mode === "now" ? "checked" : ""}> place my max now</label>
-          <label><input data-id="${id}" data-field="mb_mode" type="radio" name="mb_mode_${id}" value="late" ${mode === "late" ? "checked" : ""}> place it
-            <input data-id="${id}" data-field="mb_late_min" type="number" min="1" max="60" step="1" value="${esc(lateMin)}"> min before the end</label>
-        </div>
-        <div class="bk-row">
-          <button type="button" data-act="mb_auto" data-id="${id}">Save bidding settings</button>
-          <span class="saved">${esc(this._saved["mb:" + aid] || "")}</span>
-        </div>
-        <div class="note">Mac.bid bids are maximums: the site raises your bid as others bid, up to your max.
-          "Late" keeps your max hidden until near the end; Mac.bid's 2-minute extension still gives others a chance to answer.
-          ${a.mb_status ? `<br><b>Auto:</b> ${esc(a.mb_status)}` : ""}</div>
+        <div class="note">Keeps your max hidden until near the end. Mac.bid's 2-minute extension still gives others a chance to answer.
+          ${a.mb_status ? `<br><b>Status:</b> ${esc(a.mb_status)}` : ""}</div>
       </details>`;
   }
 
@@ -666,7 +673,8 @@ class AuctionWatcherPanel extends HTMLElement {
   _field(id, field, fallback) {
     const a = this._auctions().find((x) => String(x.auction_id) === String(id)) || {};
     const saved = { limit: a.bid_limit, max_price: a.max_price, book_count: a.rebook_amount || 10, auto_cancel: a.auto_cancel,
-      auto_rebook: a.auto_rebook, rebook_mode: a.rebook_mode || "fixed", rebook_amount: a.rebook_amount || 10 }[field];
+      auto_rebook: a.auto_rebook, rebook_mode: a.rebook_mode || "fixed", rebook_amount: a.rebook_amount || 10,
+      mb_late: a.mb_mode === "late", mb_assure: !!a.mb_assurance, mb_late_min: Math.round((a.mb_late_seconds || 180) / 60) }[field];
     const v = this._val(id, field, saved);
     return v === undefined || v === null || v === "" ? fallback : v;
   }
@@ -677,25 +685,36 @@ class AuctionWatcherPanel extends HTMLElement {
     const max = parseInt(this._field(id, "limit", a.bid_limit || 0), 10) || 0;
     try {
       if (act === "mb_place") {
-        if (!max) throw new Error("set a Max bid first (box above), then Save it");
+        if (!max) throw new Error("enter your max bid first");
+        if (a.min_next_bid && max < a.min_next_bid) throw new Error(`your max must be at least ${money(a.min_next_bid)}`);
         const total = (max * 1.15 + 3) * (1 + (a.sales_tax || 0));
-        if (!confirm(`Place a $${max} max bid on "${a.title}"?\nIf you win at your max you pay about ${money(total)} with the premium, fee and tax.`)) return;
-        await this._hass.callService("auction_watcher", "place_bid", { auction_id: id, amount: max }, undefined, false, true);
-        this._saved[key] = `Sent a $${max} max: checking that Mac.bid recorded it (see the status below)`;
+        if (!confirm(`Bid on "${a.title}" with a max of $${max}?\n\nMac.bid raises your bid for you up to $${max}. If you win at your max you pay about ${money(total)} with the 15% premium, $3 fee and tax.\n\nBids can't be cancelled. (You can only lower your max to the current bid later.)`)) return;
+        let assurance = false;
+        if (a.assurance_cost && !a.has_assurance) {
+          assurance = confirm(`Add Buyer's Assurance for ${money(a.assurance_cost)}?\n\nGet a 5-business-day return guarantee on this item. Without it, items are sold as-is.\n\nOK = Add protection for ${money(a.assurance_cost)}\nCancel = I'll take the risk`);
+        }
+        // the max also becomes this item's max (alerts, auto-bid)
+        await this._hass.callService("auction_watcher", "set_bid_limit", { auction_id: id, limit: max });
+        this._clearDrafts(id, ["limit"]);
+        await this._hass.callService("auction_watcher", "place_bid", { auction_id: id, amount: max, buyers_assurance: assurance }, undefined, false, true);
+        this._saved[key] = `Sent a $${max} max${assurance ? " + Buyer's Assurance" : ""}: checking Mac.bid recorded it (see Auto-bid status)`;
       } else {
-        const mode = this._field(id, "mb_mode", a.mb_mode || "off");
+        const late = String(this._field(id, "mb_late", a.mb_mode === "late")) === "true";
         const lateMin = Math.max(1, parseInt(this._field(id, "mb_late_min", Math.round((a.mb_late_seconds || 180) / 60)), 10) || 3);
-        if (mode !== "off" && !max) throw new Error("set a Max bid first (box above), then Save it");
-        await this._hass.callService("auction_watcher", "set_macbid_bidding", { auction_id: id, mode, late_seconds: lateMin * 60 });
-        this._clearDrafts(id, ["mb_mode", "mb_late_min"]);
-        this._saved[key] = mode === "off" ? "Auto-bid off" : mode === "now" ? "Saved: placing your max now" : `Saved: bids ${lateMin} min before the end`;
+        const assure = String(this._field(id, "mb_assure", !!a.mb_assurance)) === "true";
+        if (late && !max) throw new Error("enter your max bid above and Save it first");
+        if (late && max) await this._hass.callService("auction_watcher", "set_bid_limit", { auction_id: id, limit: max });
+        await this._hass.callService("auction_watcher", "set_macbid_bidding",
+          { auction_id: id, mode: late ? "late" : "off", late_seconds: lateMin * 60, assurance: assure });
+        this._clearDrafts(id, ["mb_late", "mb_late_min", "mb_assure", "limit"]);
+        this._saved[key] = late ? `Saved: bids $${max} about ${lateMin} min before the end` : "Auto-bid off";
       }
     } catch (err) {
       this._saved[key] = "Couldn't do that: " + (err?.message || err);
     }
     this._open[id] = true;
     this._maybeRender(true);
-    setTimeout(() => { delete this._saved[key]; this._maybeRender(true); }, 6000);
+    setTimeout(() => { delete this._saved[key]; this._maybeRender(true); }, 8000);
   }
 
   async _action(act, id) {
@@ -835,6 +854,15 @@ const STYLE = `
   .stars { color: var(--warning-color, #ff9800); font-size: 15px; letter-spacing: 1px; white-space: nowrap; }
   .warn { color: var(--error-color, #db4437); }
   .sub-menu { font-size: 13px; }
+  button.bid-now { background: #7cb02d; font-weight: 600; }
+  .cond { border-radius: 10px; padding: 8px 10px; font-size: 13px; border: 1px solid; }
+  .cond.tested { background: rgba(124, 176, 45, 0.12); border-color: #7cb02d; }
+  .cond.damaged { background: rgba(255, 69, 91, 0.10); border-color: #ff455b; }
+  .cond.partial { background: rgba(255, 193, 7, 0.12); border-color: #ffc107; }
+  .cond-tag { display: inline-block; border-radius: 12px; padding: 1px 10px; margin-bottom: 4px; font-size: 12px; color: #fff; }
+  .cond.tested .cond-tag { background: #7cb02d; }
+  .cond.damaged .cond-tag { background: #ff455b; }
+  .cond.partial .cond-tag { background: #e0a800; color: #000; }
   .sub-menu summary { cursor: pointer; color: var(--primary-color); }
   .sub-menu ul { margin: 6px 0 0 18px; padding: 0; }
   .pre { white-space: pre-line; color: var(--secondary-text-color); margin-top: 4px; }

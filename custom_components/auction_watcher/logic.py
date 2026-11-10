@@ -451,13 +451,15 @@ MB_RETRY_SECONDS = 30
 class MacBidSettings:
     mode: str = MB_MODE_OFF
     late_seconds: int = 180  # "late": place the max this long before the end
+    assurance: bool = False  # add Buyer's Assurance when the late bid is placed
 
     @classmethod
     def from_dict(cls, d: dict[str, Any] | None) -> "MacBidSettings":
         d = d or {}
         mode = d.get("mode", MB_MODE_OFF)
         return cls(mode=mode if mode in (MB_MODE_OFF, MB_MODE_NOW, MB_MODE_LATE) else MB_MODE_OFF,
-                   late_seconds=max(30, int(d.get("late_seconds", 180) or 180)))
+                   late_seconds=max(30, int(d.get("late_seconds", 180) or 180)),
+                   assurance=bool(d.get("assurance", False)))
 
 
 @dataclass
