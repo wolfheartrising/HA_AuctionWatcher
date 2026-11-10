@@ -125,12 +125,14 @@
           "fast_interval_seconds": "Check every N seconds in an item's last 15 minutes",
           "idle_interval_minutes": "Check every N minutes when nothing is ending soon (max 15)",
           "keep_ended_days": "Keep ended auctions on the Auctions page for this many days",
-          "extra_auction_ids": "Extra Mac.bid lot IDs to follow (comma separated)"
+          "extra_auction_ids": "Extra Mac.bid lot IDs to follow (comma separated)",
+          "macbid_budget_dollars": "Most dollars tied up in Mac.bid max bids at once (0 = no limit)"
         },
         "data_description": {
           "default_bid_limit": "You get an alert when the price passes it. You can set it per item on the Auctions page.",
           "notify_entities": "Alexa gets a short spoken version; text targets like Telegram get the auction link.",
-          "keep_ended_days": "Then they're removed, including their sensors. Auctions you stop following are kept too, marked 'no longer followed'."
+          "keep_ended_days": "Then they're removed, including their sensors. Auctions you stop following are kept too, marked 'no longer followed'.",
+          "macbid_budget_dollars": "Counts max bids you've placed on items still live (winning or still in) plus scheduled late bids. Automatic and manual bids stop once a new max would go past it."
         }
       },
       "ebay_options": {
@@ -229,6 +231,38 @@
         "max_price": {
           "name": "Max price",
           "description": "Passed to the site so your booked bids stop above this price (0 = none)."
+        }
+      }
+    },
+    "place_bid": {
+      "name": "Place Mac.bid max bid",
+      "description": "Place a max bid (whole dollars) on a Mac.bid item you follow. Mac.bid raises your bid for you up to it. You pay if you win.",
+      "fields": {
+        "auction_id": {
+          "name": "Lot ID",
+          "description": "The Mac.bid lot id (shown on the card)."
+        },
+        "amount": {
+          "name": "Max bid ($)",
+          "description": "Whole dollars."
+        }
+      }
+    },
+    "set_macbid_bidding": {
+      "name": "Set Mac.bid auto-bidding",
+      "description": "off, now (place your max right away) or late (place it N seconds before the end). Needs a max bid on the item.",
+      "fields": {
+        "auction_id": {
+          "name": "Lot ID",
+          "description": "The Mac.bid lot id."
+        },
+        "mode": {
+          "name": "Mode",
+          "description": "off, now or late."
+        },
+        "late_seconds": {
+          "name": "Late: seconds before the end",
+          "description": "Default 180."
         }
       }
     }

@@ -112,6 +112,7 @@ def parse_watchlist(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
             "buyers_assurance_cost": _num(w.get("buyers_assurance_cost")),
             "location_id": w.get("current_location_id"),
             "auction_id": w.get("auction_id"),
+            "is_transferrable": bool(w.get("is_transferrable")) if w.get("is_transferrable") is not None else None,
         }
     return out
 
@@ -136,9 +137,58 @@ BUYERS_PREMIUM = 0.15
 LOT_FEE = 3.0
 
 
-def win_cost(bid: float | None) -> float | None:
-    """What winning at `bid` costs before tax: bid + 15% buyer's premium + $3 lot fee."""
-    return None if bid is None else round(bid * (1 + BUYERS_PREMIUM) + LOT_FEE, 2)
+def win_cost(bid: float | None, tax: float | None = None) -> float | None:
+    """What winning at `bid` costs: bid + 15% buyer's premium + $3 lot fee, plus sales tax if known."""
+    if bid is None:
+        return None
+    return round((bid * (1 + BUYERS_PREMIUM) + LOT_FEE) * (1 + (tax or 0)), 2)
+
+
+def parse_locations(locations: list[dict[str, Any]], buildings: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Mac.bid pickup locations (public /locations + /buildings): name, address, hours,
+    whether items there can be transferred, where to, and the building's sales tax."""
+    tax = {str(b.get("id")): _num(b.get("sales_tax")) for b in buildings or []}
+    out: dict[str, dict[str, Any]] = {}
+    for loc in locations or []:
+        lid = str(loc.get("id") or "")
+        if not lid:
+            continue
+        dests = [d.strip() for d in str(loc.get("transfer_destinations") or "").split(",") if d.strip()]
+        out[lid] = {
+            "name": loc.get("name"),
+            "city_state": loc.get("city_state"),
+            "address": loc.get("address"),
+            "hours": _strip_html(loc.get("hours") or ""),
+            "can_transfer": bool(loc.get("can_transfer")),
+            "transfer_destinations": dests,
+            "sales_tax": tax.get(str(loc.get("building_id"))),
+        }
+    return out
+
+
+def location_info(loc_id: Any, locations: dict[str, dict[str, Any]], lot_transferable: bool | None) -> dict[str, Any]:
+    """What the card shows: pickup location, and where it can be transferred (names)."""
+    loc = locations.get(str(loc_id or "")) or {}
+    can = bool(loc.get("can_transfer")) and lot_transferable is not False
+    return {
+        "location_id": str(loc_id or "") or None,
+        "location": loc.get("name"),
+        "location_city": loc.get("city_state"),
+        "location_address": loc.get("address"),
+        "location_hours": loc.get("hours"),
+        "transferable": can,
+        "transfer_to": sorted(
+            f"{locations[d]['name']} ({locations[d]['city_state']})" for d in loc.get("transfer_destinations", [])
+            if d in locations) if can else [],
+        "sales_tax": loc.get("sales_tax"),
+    }
+
+
+def _strip_html(text: str) -> str:
+    import re
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)
+    text = re.sub(r"<[^>]+>", "", text)
+    return "\n".join(line.strip() for line in text.splitlines() if line.strip())
 
 
 def parse_pickups(data: Any, now: float) -> dict[str, AuctionState]:
@@ -231,6 +281,9 @@ def build_state(lot_id: str, lot: dict[str, Any] | None, static: dict[str, Any] 
             "category_name": static.get("category_name"),
             "buyers_assurance_cost": static.get("buyers_assurance_cost"),
             "on_watchlist": lot_id in watching_ids,
+            "location_id": str(lot.get("location_id") or static.get("location_id") or "") or None,
+            "lot_transferable": static.get("is_transferrable"),
+            "auction_id": str(lot.get("auction_id") or static.get("auction_id") or "") or None,
         },
     )
 
@@ -366,6 +419,30 @@ class MacBidClient:
     async def pickups(self, now: float | None = None) -> dict[str, AuctionState]:
         """Won items waiting for you to pick them up, with the pickup deadline."""
         return parse_pickups(await self.get(f"/user/{self.user_id}/active"), time.time() if now is None else now)
+
+    async def locations(self) -> dict[str, dict[str, Any]]:
+        """Public: all pickup locations with transfer destinations and sales tax."""
+        locs = await self._call("GET", "/locations", auth=False)
+        blds = await self._call("GET", "/buildings", auth=False)
+        return parse_locations(locs if isinstance(locs, list) else [], blds if isinstance(blds, list) else [])
+
+    async def place_bid(self, lot_id: str, lot_number: str, auction_id: str, amount: int) -> dict[str, Any]:
+        """Place a max bid (whole dollars), same call as the site's Bid button.
+        Mac.bid raises your bid for you as others bid, up to this amount. Spends money if you win."""
+        if amount < 1:
+            raise SiteError("Bid must be at least $1")
+        await self.ensure_fresh()
+        data = await self._call("POST", "/map-bid/bid", {
+            "bidder_id": int(self.user_id) if self.user_id.isdigit() else self.user_id,
+            "lot_id": int(lot_id) if str(lot_id).isdigit() else lot_id,
+            "lot_number": lot_number, "auction_id": int(auction_id) if str(auction_id).isdigit() else auction_id,
+            "bid_amount": int(amount), "platform": "web", "device_fingerprint": "test",
+        }, any_status=True)
+        status = data.pop("_status", 200) if isinstance(data, dict) else 200
+        if status >= 400 or (isinstance(data, dict) and (data.get("error") or data.get("success") is False)):
+            msg = (data.get("error") or data.get("message") or f"status {status}") if isinstance(data, dict) else status
+            raise SiteError(f"Mac.bid refused the bid: {msg}")
+        return data if isinstance(data, dict) else {}
 
     async def lot(self, lot_id: str) -> dict[str, Any]:
         return await self.get(f"/map-bid/ddb/lot/{lot_id}")

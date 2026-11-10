@@ -432,3 +432,87 @@ def points_at_risk(states: dict[str, AuctionState], auto: dict[str, "AutoSetting
             earmarked += room
             per[aid] = room
     return {"booked": booked, "earmarked": earmarked, "earmarked_by_auction": per}
+
+
+# ---------------------------------------------------------------- Mac.bid max bids
+#
+# On Mac.bid a bid is a MAXIMUM: the site raises your bid for you as others bid,
+# up to that amount. So "auto raise" = placing your max, either right away or
+# late (a few minutes before the end, so you don't start a bidding war early).
+# Every rule here errs on the side of not bidding.
+
+MB_MODE_OFF = "off"
+MB_MODE_NOW = "now"
+MB_MODE_LATE = "late"
+MB_RETRY_SECONDS = 30
+
+
+@dataclass
+class MacBidSettings:
+    mode: str = MB_MODE_OFF
+    late_seconds: int = 180  # "late": place the max this long before the end
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any] | None) -> "MacBidSettings":
+        d = d or {}
+        mode = d.get("mode", MB_MODE_OFF)
+        return cls(mode=mode if mode in (MB_MODE_OFF, MB_MODE_NOW, MB_MODE_LATE) else MB_MODE_OFF,
+                   late_seconds=max(30, int(d.get("late_seconds", 180) or 180)))
+
+
+@dataclass
+class MacBidMemory:
+    placed: int = 0           # the max we last placed on this lot
+    last_attempt: float = 0.0
+    status: str = ""
+
+
+def decide_macbid(
+    s: AuctionState,
+    settings: MacBidSettings,
+    mem: MacBidMemory,
+    max_bid: int,
+    now: float,
+    budget_left: int | None = None,
+    paused: bool = False,
+) -> tuple[str, int, str]:
+    """Return ("place", amount, reason) or ("", 0, reason)."""
+    if settings.mode == MB_MODE_OFF:
+        return "", 0, ""
+    if not max_bid:
+        return "", 0, "set a max bid first"
+    if s.status != STATUS_LIVE:
+        return "", 0, "not live"
+    if s.extra.get("winning"):
+        return "", 0, f"you're winning (your max ${max(mem.placed, max_bid)})"
+    if s.price is not None and s.price >= max_bid:
+        return "", 0, f"price ${s.price:.0f} is at or past your max ${max_bid}"
+    if mem.placed >= max_bid:
+        return "", 0, f"outbid: someone's max is above your ${mem.placed}"
+    left = s.ends_at.timestamp() - now if s.ends_at else None
+    if settings.mode == MB_MODE_LATE and (left is None or left > settings.late_seconds):
+        mins = settings.late_seconds // 60
+        return "", 0, f"will bid ${max_bid} about {mins} min before the end"
+    if paused:
+        return "", 0, "auto-bidding is switched off"
+    if budget_left is not None and max_bid > budget_left:
+        return "", 0, f"a ${max_bid} max would go past your Mac.bid budget (${max(budget_left, 0)} left)"
+    if now - mem.last_attempt < MB_RETRY_SECONDS:
+        return "", 0, mem.status
+    return "place", int(max_bid), "late bid" if settings.mode == MB_MODE_LATE else "max bid"
+
+
+def macbid_committed(states: dict[str, AuctionState], placed: dict[str, int], limits: dict[str, int],
+                     modes: dict[str, str]) -> dict[str, int]:
+    """Dollars tied up: maxes already placed on live lots you're winning or still in,
+    plus maxes scheduled as late bids."""
+    placed_total = scheduled = 0
+    for aid, s in states.items():
+        if s.status != STATUS_LIVE:
+            continue
+        p = placed.get(aid, 0)
+        if p and (s.extra.get("winning") or (s.price or 0) < p):
+            placed_total += p
+        elif modes.get(aid) == MB_MODE_LATE and limits.get(aid):
+            scheduled += limits[aid]
+    return {"placed": placed_total, "scheduled": scheduled}

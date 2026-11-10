@@ -29,6 +29,7 @@ from homeassistant.helpers.selector import (
 )
 
 from .const import (
+    CONF_MACBID_BUDGET,
     CONF_WEEKLY_BUDGET,
     CONF_PACKS_ENABLED,
     CONF_APP_ID,
@@ -381,7 +382,7 @@ ALERT_KIND_OPTIONS = [
 
 
 GOV_KINDS = {"opportunity", "bid_limit", "ended", "won", "booking", "pack", "budget"}
-MACBID_KINDS = {"outbid", "ending_soon", "over_max", "won", "ended", "pickup"}
+MACBID_KINDS = {"outbid", "ending_soon", "over_max", "won", "ended", "pickup", "booking"}
 EBAY_KINDS = {"outbid", "ending_soon", "over_max", "won", "ended"}
 
 
@@ -464,6 +465,7 @@ class AuctionWatcherOptionsFlow(OptionsFlow):
             vol.Required(CONF_ENDING_MINUTES, default=o.get(CONF_ENDING_MINUTES, DEFAULT_ENDING_MINUTES)): _num(0, 240, 1, "min"),
             vol.Required(CONF_PICKUP_HOURS, default=o.get(CONF_PICKUP_HOURS, DEFAULT_PICKUP_HOURS)): _num(1, 168, 1, "h"),
             vol.Required(CONF_DEFAULT_BID_LIMIT, default=o.get(CONF_DEFAULT_BID_LIMIT, DEFAULT_BID_LIMIT)): _num(0, 100000, 1, "$"),
+            vol.Required(CONF_MACBID_BUDGET, default=o.get(CONF_MACBID_BUDGET, 0)): _num(0, 1000000, 1, "$"),
             # Where alerts go
             **self._alert_fields(MACBID_KINDS),
             # Timing, page

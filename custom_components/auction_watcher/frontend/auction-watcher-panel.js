@@ -111,16 +111,39 @@ class AuctionWatcherPanel extends HTMLElement {
     });
   }
 
-  _autoSwitch() {
-    return Object.values(this._hass?.states || {}).find((x) => x.attributes?.auction_watcher_autoswitch);
+  _autoSwitch(site = "govauctions") {
+    return Object.values(this._hass?.states || {}).find((x) => x.attributes?.auction_watcher_autoswitch
+      && (x.attributes.site || "govauctions") === site);
   }
 
   // Balance per the site, what's tied up, what could still be spent, and the weekly budget
   _tally(accounts) {
-    const acc = accounts.find((a) => a.spending);
-    if (!acc) return "";
-    const m = acc.spending;
-    const sw = this._autoSwitch();
+    return accounts.filter((a) => a.spending).map((acc) =>
+      acc.spending.site === "macbid" ? this._macbidTally(acc.spending) : this._govTally(acc.spending)).join("");
+  }
+
+  _macbidTally(m) {
+    const sw = this._autoSwitch("macbid");
+    const on = sw ? sw.state === "on" : !m.auto_paused;
+    return `<div class="tally">
+      <div class="k"><b>Mac.bid</b></div>
+      <div class="tally-grid">
+        <div><div class="k">Max bids placed</div><div class="v">${money(m.committed)}</div><div class="k">on items still live</div></div>
+        <div><div class="k">Scheduled</div><div class="v">${money(m.scheduled)}</div><div class="k">late bids waiting</div></div>
+        <div><div class="k">Budget</div><div class="v">${m.budget ? money(m.budget) : "none"}</div>
+          <div class="k">${m.budget_left !== null && m.budget_left !== undefined ? money(Math.max(0, m.budget_left)) + " left" : ""}</div></div>
+        <div><div class="k">Won, awaiting pickup</div><div class="v">${money(m.won_awaiting_pickup)}</div><div class="k">bid amounts</div></div>
+      </div>
+      <div class="tally-row">
+        <span class="badge ${on ? "on" : "cap"}">${on ? "Auto-bidding on" : "Auto-bidding paused"}</span>
+        ${sw ? `<button type="button" class="${on ? "secondary" : ""}" data-action="toggle-auto" data-site="macbid">${on ? "Pause Mac.bid auto-bidding" : "Resume auto-bidding"}</button>` : ""}
+        <span class="muted">Max bids are the most you'd pay before the 15% premium, $3 fee and tax.</span>
+      </div>
+    </div>`;
+  }
+
+  _govTally(m) {
+    const sw = this._autoSwitch("govauctions");
     const on = sw ? sw.state === "on" : !m.auto_paused;
     const budget = m.weekly_budget
       ? `<div><div class="k">This week</div><div class="v">${num(m.spent_week)} / ${num(m.weekly_budget)}</div>
@@ -137,7 +160,7 @@ class AuctionWatcherPanel extends HTMLElement {
       </div>
       <div class="tally-row">
         <span class="badge ${on ? "on" : "cap"}">${on ? "Auto-booking on" : "Auto-booking paused"}</span>
-        ${sw ? `<button type="button" class="${on ? "secondary" : ""}" data-action="toggle-auto">${on ? "Pause all auto-booking" : "Resume auto-booking"}</button>` : ""}
+        ${sw ? `<button type="button" class="${on ? "secondary" : ""}" data-action="toggle-auto" data-site="govauctions">${on ? "Pause all auto-booking" : "Resume auto-booking"}</button>` : ""}
         ${m.at_risk > (m.balance || 0) + m.booked ? `<span class="warn">Your max bids add up to more than you have: auctions will compete for the same points.</span>` : ""}
       </div>
     </div>`;
@@ -185,8 +208,9 @@ class AuctionWatcherPanel extends HTMLElement {
     const auctions = this._auctions();
     const accounts = this._accounts();
     const signature = JSON.stringify([this._tab, this._sort, auctions.map((a) => [a.entity_id, a.price, a.updated, a.bid_limit,
-      a.auto_cancel, a.auto_rebook, a.rebook_mode, a.rebook_amount, a.max_price, a.auto_status, a.your_booked_left]),
-      accounts, this._saved, this._tab === "packs" ? this._packs() : null, this._autoSwitch()?.state]);
+      a.auto_cancel, a.auto_rebook, a.rebook_mode, a.rebook_amount, a.max_price, a.auto_status, a.your_booked_left,
+      a.mb_mode, a.mb_placed, a.mb_status, a.winning]),
+      accounts, this._saved, this._tab === "packs" ? this._packs() : null, this._autoSwitch()?.state, this._autoSwitch("macbid")?.state]);
     if (!force && signature === this._signature) return;
     this._signature = signature;
     this._pending = false;
@@ -241,10 +265,10 @@ class AuctionWatcherPanel extends HTMLElement {
       b.addEventListener("click", () => { this._tab = b.dataset.tab; this._maybeRender(true); }));
     root.querySelector("[data-action=refresh]").addEventListener("click", () =>
       this._hass.callService("auction_watcher", "refresh", {}));
-    root.querySelector("[data-action=toggle-auto]")?.addEventListener("click", () => {
-      const sw = this._autoSwitch();
+    root.querySelectorAll("[data-action=toggle-auto]").forEach((b) => b.addEventListener("click", () => {
+      const sw = this._autoSwitch(b.dataset.site);
       if (sw) this._hass.callService("switch", sw.state === "on" ? "turn_off" : "turn_on", { entity_id: sw.entity_id });
-    });
+    }));
     root.querySelector("[data-action=sort]").addEventListener("change", (ev) => {
       this._sort = ev.target.value; store("auction_watcher_sort", this._sort); this._maybeRender(true);
     });
@@ -481,9 +505,48 @@ class AuctionWatcherPanel extends HTMLElement {
             <span class="saved">${esc(this._saved["limit:" + a.auction_id] || "")}</span>
           </div>
           <div class="total" data-total="${id}">${this._totalText(a)}</div>
-          <div class="note">You get an alert when the price passes this. Bid on ${esc(SITE_NAMES[a.site] || a.site)} itself; this doesn't place bids.</div>
+          ${a.site === "macbid" ? "" : `<div class="note">You get an alert when the price passes this. Bid on ${esc(SITE_NAMES[a.site] || a.site)} itself; this doesn't place bids.</div>`}
         </div>
+        ${a.site === "macbid" ? this._macbidExtras(a) : ""}
       </div>`;
+  }
+
+  _macbidExtras(a) {
+    const id = esc(a.auction_id);
+    const aid = a.auction_id;
+    const loc = a.location ? `<div class="line">📍 <b>${esc(a.location)}</b>${a.location_city ? ` · ${esc(a.location_city)}` : ""}
+        ${a.location_address ? `<span class="muted"> · ${esc(a.location_address)}</span>` : ""}</div>` : "";
+    const hours = a.location_hours ? `<details class="sub-menu"><summary>Pickup hours</summary><div class="pre">${esc(a.location_hours)}</div></details>` : "";
+    const transfers = a.location ? `<details class="sub-menu"><summary>Transfers: ${a.transferable && (a.transfer_to || []).length
+        ? `can move to ${a.transfer_to.length} location${a.transfer_to.length === 1 ? "" : "s"}` : "not available"}</summary>
+        ${a.transferable && (a.transfer_to || []).length
+          ? `<ul>${a.transfer_to.map((t) => `<li>${esc(t)}</li>`).join("")}</ul><div class="note">Set up transfers on Mac.bid after you win.</div>`
+          : `<div class="note">Pick up at ${esc(a.location)}.</div>`}</details>` : "";
+    if (a.status === "ended" || a.status === "awaiting_pickup") return loc + hours + transfers;
+    const mode = this._val(aid, "mb_mode", a.mb_mode || "off");
+    const lateMin = this._val(aid, "mb_late_min", Math.round((a.mb_late_seconds || 180) / 60));
+    const on = mode !== "off";
+    return `${loc}${hours}${transfers}
+      <details class="booking" ${on || this._open[aid] ? "open" : ""} data-id="${id}">
+        <summary>Bidding ${on ? `<span class="badge on">auto ${esc(mode)}</span>` : ""}${a.mb_placed ? ` <span class="badge">your max $${num(a.mb_placed)}</span>` : ""}</summary>
+        <div class="bk-row">
+          <button type="button" data-act="mb_place" data-id="${id}">Place max bid now</button>
+          <span class="muted">uses the Max bid above; Mac.bid raises for you up to it</span>
+        </div>
+        <div class="bk-line">Auto-bid
+          <label><input data-id="${id}" data-field="mb_mode" type="radio" name="mb_mode_${id}" value="off" ${mode === "off" ? "checked" : ""}> off</label>
+          <label><input data-id="${id}" data-field="mb_mode" type="radio" name="mb_mode_${id}" value="now" ${mode === "now" ? "checked" : ""}> place my max now</label>
+          <label><input data-id="${id}" data-field="mb_mode" type="radio" name="mb_mode_${id}" value="late" ${mode === "late" ? "checked" : ""}> place it
+            <input data-id="${id}" data-field="mb_late_min" type="number" min="1" max="60" step="1" value="${esc(lateMin)}"> min before the end</label>
+        </div>
+        <div class="bk-row">
+          <button type="button" data-act="mb_auto" data-id="${id}">Save bidding settings</button>
+          <span class="saved">${esc(this._saved["mb:" + aid] || "")}</span>
+        </div>
+        <div class="note">Mac.bid bids are maximums: the site raises your bid as others bid, up to your max.
+          "Late" keeps your max hidden until near the end; Mac.bid's 2-minute extension still gives others a chance to answer.
+          ${a.mb_status ? `<br><b>Auto:</b> ${esc(a.mb_status)}` : ""}</div>
+      </details>`;
   }
 
   _overtimeLine(a) {
@@ -608,7 +671,35 @@ class AuctionWatcherPanel extends HTMLElement {
     return v === undefined || v === null || v === "" ? fallback : v;
   }
 
+  async _macbidAction(act, id) {
+    const key = "mb:" + id;
+    const a = this._auctions().find((x) => String(x.auction_id) === String(id)) || {};
+    const max = parseInt(this._field(id, "limit", a.bid_limit || 0), 10) || 0;
+    try {
+      if (act === "mb_place") {
+        if (!max) throw new Error("set a Max bid first (box above), then Save it");
+        const total = (max * 1.15 + 3) * (1 + (a.sales_tax || 0));
+        if (!confirm(`Place a $${max} max bid on "${a.title}"?\nIf you win at your max you pay about ${money(total)} with the premium, fee and tax.`)) return;
+        await this._hass.callService("auction_watcher", "place_bid", { auction_id: id, amount: max }, undefined, false, true);
+        this._saved[key] = `Max bid $${max} placed`;
+      } else {
+        const mode = this._field(id, "mb_mode", a.mb_mode || "off");
+        const lateMin = Math.max(1, parseInt(this._field(id, "mb_late_min", Math.round((a.mb_late_seconds || 180) / 60)), 10) || 3);
+        if (mode !== "off" && !max) throw new Error("set a Max bid first (box above), then Save it");
+        await this._hass.callService("auction_watcher", "set_macbid_bidding", { auction_id: id, mode, late_seconds: lateMin * 60 });
+        this._clearDrafts(id, ["mb_mode", "mb_late_min"]);
+        this._saved[key] = mode === "off" ? "Auto-bid off" : mode === "now" ? "Saved: placing your max now" : `Saved: bids ${lateMin} min before the end`;
+      }
+    } catch (err) {
+      this._saved[key] = "Couldn't do that: " + (err?.message || err);
+    }
+    this._open[id] = true;
+    this._maybeRender(true);
+    setTimeout(() => { delete this._saved[key]; this._maybeRender(true); }, 6000);
+  }
+
   async _action(act, id) {
+    if (act === "mb_place" || act === "mb_auto") return this._macbidAction(act, id);
     const key = (act === "limit" || act === "max_price" ? act + ":" : "auto:") + id;
     const int = (v) => Math.max(0, parseInt(v, 10) || 0);
     const dec = (v) => Math.max(0, parseFloat(v) || 0);
@@ -743,6 +834,10 @@ const STYLE = `
   .packs-intro { grid-column: 1 / -1; font-size: 13px; }
   .stars { color: var(--warning-color, #ff9800); font-size: 15px; letter-spacing: 1px; white-space: nowrap; }
   .warn { color: var(--error-color, #db4437); }
+  .sub-menu { font-size: 13px; }
+  .sub-menu summary { cursor: pointer; color: var(--primary-color); }
+  .sub-menu ul { margin: 6px 0 0 18px; padding: 0; }
+  .pre { white-space: pre-line; color: var(--secondary-text-color); margin-top: 4px; }
   .tally { margin: 12px 16px 0; padding: 12px; border-radius: 12px; background: var(--card-background-color); border: 1px solid var(--divider-color); }
   .tally-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; text-align: center; }
   .tally-grid .v { font-size: 20px; font-weight: 500; font-variant-numeric: tabular-nums; }

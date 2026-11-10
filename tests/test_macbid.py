@@ -154,3 +154,32 @@ def test_login_wrong_password():
     c, _, run = _client_with([{"error": "Invalid credentials.", "_status": 401}])
     with pytest.raises(AuthError):
         run(c.login())
+
+
+LOCS = [
+    {"id": 23, "name": "Robinson - A", "city_state": "Pittsburgh, PA", "address": "800 Vista Park Drive",
+     "hours": "Monday 12:00pm - 6:00pm<br>\r\nTuesday 12:00pm - 8:00pm<br/><strong>License</strong>", "can_transfer": 1,
+     "transfer_destinations": "6,13,25", "building_id": 15},
+    {"id": 6, "name": "Butler - A", "city_state": "Butler, PA", "can_transfer": 1, "transfer_destinations": "", "building_id": 2},
+    {"id": 13, "name": "Monroeville - A", "city_state": "Monroeville, PA", "can_transfer": 0, "transfer_destinations": "", "building_id": 3},
+    {"id": 50, "name": "No-Transfer Spot", "city_state": "Akron, OH", "can_transfer": 0, "transfer_destinations": "1", "building_id": 9},
+]
+BLDGS = [{"id": 15, "sales_tax": 0.07}, {"id": 2, "sales_tax": 0.06}]
+
+
+def test_location_and_transfers():
+    locs = mb.parse_locations(LOCS, BLDGS)
+    info = mb.location_info(23, locs, True)
+    assert info["location"] == "Robinson - A" and info["sales_tax"] == 0.07
+    # destination 25 isn't in the list (unknown) -> skipped; names come back sorted
+    assert info["transfer_to"] == ["Butler - A (Butler, PA)", "Monroeville - A (Monroeville, PA)"]
+    assert info["location_hours"].splitlines() == ["Monday 12:00pm - 6:00pm", "Tuesday 12:00pm - 8:00pm", "License"]
+    # the lot itself can't be transferred, or the location doesn't allow it
+    assert mb.location_info(23, locs, False)["transfer_to"] == [] and not mb.location_info(23, locs, False)["transferable"]
+    assert mb.location_info(50, locs, True)["transferable"] is False
+    assert mb.location_info(None, locs, True)["location"] is None
+
+
+def test_win_cost_with_tax():
+    assert mb.win_cost(160) == 187.0
+    assert mb.win_cost(160, 0.07) == 200.09

@@ -14,7 +14,7 @@ from __future__ import annotations
 from typing import Any
 
 KINDS = ("opportunity", "bid_limit", "ended", "won", "booked", "cancelled", "booking_failed",
-         "outbid", "ending_soon", "over_max", "pickup", "pack", "budget")
+         "outbid", "ending_soon", "over_max", "pickup", "pack", "budget", "bid_placed", "bid_failed")
 SPOKEN_HINTS = ("announce", "speak", "alexa", "echo")
 
 
@@ -122,6 +122,14 @@ def format_alert(kind: str, d: dict[str, Any]) -> tuple[str, str, str]:
         if d.get("bids_to_lock") is not None:
             msg += f" Open to new bidders for about {d['bids_to_lock']} more bids."
         spoken = f"A good point pack is open: {name}."
+    elif kind == "bid_placed":
+        title = f"Max bid ${d.get('amount')} placed: {name}"
+        msg = f"{d.get('reason') or ''}. Mac.bid raises your bid for you up to ${d.get('amount')}. Now {_money(d.get('price'))}."
+        spoken = f"Placed a {d.get('amount')} dollar max bid on {name}."
+    elif kind == "bid_failed":
+        title = f"Bid problem: {name}"
+        msg = f"{d.get('reason') or 'Mac.bid refused the bid.'} Check the item on Mac.bid."
+        spoken = f"Bid problem on {name}. Check your phone."
     elif kind == "booked":
         title = f"Booked {d.get('count')} bids: {name}"
         msg = f"{d.get('reason') or ''}. Price {_money(d.get('price'))}, {d.get('active_bidders')} bidders."

@@ -17,6 +17,8 @@ from .const import (
     CONF_COOKIE,
     DOMAIN,
     SERVICE_BOOK,
+    SERVICE_PLACE_BID,
+    SERVICE_SET_MACBID,
     SERVICE_CANCEL,
     SERVICE_REFRESH,
     SERVICE_SET_AUTO,
@@ -39,7 +41,7 @@ from .coordinator import AuctionWatcherCoordinator, EbayCoordinator, MacBidCoord
 from .cookies import parse_cookie_input
 from .sites import ebay as eb
 from .sites import macbid as mb
-from .logic import AutoSettings
+from .logic import AutoSettings, MacBidSettings
 from .sites.base import SiteError
 from .panel import async_register_panel, async_remove_panel
 from .sites import govauctions as ga
@@ -119,6 +121,47 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         except SiteError as err:
             raise ServiceValidationError(str(err)) from err
 
+    async def place_bid(call: ServiceCall) -> ServiceResponse:
+        await _require_admin(call)
+        aid = str(call.data["auction_id"]).strip()
+        coord = _owner(aid)
+        if not hasattr(coord, "async_place_bid"):
+            raise ServiceValidationError("Max bids from Home Assistant are only for Mac.bid")
+        try:
+            amount = await coord.async_place_bid(aid, int(call.data["amount"]))
+        except SiteError as err:
+            raise HomeAssistantError(str(err)) from err
+        return {"placed": amount}
+
+    async def set_macbid(call: ServiceCall) -> None:
+        await _require_admin(call)
+        aid = str(call.data["auction_id"]).strip()
+        coord = _owner(aid)
+        if not hasattr(coord, "async_set_macbid"):
+            raise ServiceValidationError("Auto-bidding settings are only for Mac.bid")
+        current = vars(coord.macbid_settings(aid))
+        settings = MacBidSettings.from_dict({**current, **{k: v for k, v in call.data.items() if k != "auction_id"}})
+        try:
+            await coord.async_set_macbid(aid, settings)
+        except SiteError as err:
+            raise ServiceValidationError(str(err)) from err
+
+    hass.services.async_register(
+        DOMAIN, SERVICE_PLACE_BID, place_bid,
+        schema=vol.Schema({
+            vol.Required("auction_id"): cv.string,
+            vol.Required("amount"): vol.All(vol.Coerce(int), vol.Range(min=1, max=100000)),
+        }),
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN, SERVICE_SET_MACBID, set_macbid,
+        schema=vol.Schema({
+            vol.Required("auction_id"): cv.string,
+            vol.Optional("mode"): vol.In(["off", "now", "late"]),
+            vol.Optional("late_seconds"): vol.All(vol.Coerce(int), vol.Range(min=30, max=3600)),
+        }),
+    )
     hass.services.async_register(
         DOMAIN, SERVICE_BOOK, book_bids,
         schema=vol.Schema({

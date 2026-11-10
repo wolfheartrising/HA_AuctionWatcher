@@ -17,7 +17,7 @@ from .sensor import _device
 async def async_setup_entry(
     hass: HomeAssistant, entry: AuctionWatcherConfigEntry, async_add_entities: AddConfigEntryEntitiesCallback
 ) -> None:
-    if entry.data.get("site", "govauctions") == "govauctions":
+    if entry.data.get("site", "govauctions") in ("govauctions", "macbid"):
         async_add_entities([AutoBookingSwitch(entry.runtime_data)])
 
 
@@ -25,7 +25,9 @@ class AutoBookingSwitch(CoordinatorEntity[AuctionWatcherCoordinator], SwitchEnti
     """Off = no automatic booking anywhere (auto-cancel still works, so nothing keeps spending)."""
 
     _attr_has_entity_name = True
-    _attr_name = "Auto-booking"
+    @property
+    def name(self) -> str:
+        return "Auto-bidding" if self.coordinator.config_entry.data.get("site") == "macbid" else "Auto-booking"
     _attr_icon = "mdi:robot"
 
     def __init__(self, coord: AuctionWatcherCoordinator) -> None:
@@ -39,7 +41,7 @@ class AutoBookingSwitch(CoordinatorEntity[AuctionWatcherCoordinator], SwitchEnti
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        return {"auction_watcher_autoswitch": True}
+        return {"auction_watcher_autoswitch": True, "site": self.coordinator.config_entry.data.get("site", "govauctions")}
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         await self.coordinator.async_set_auto_paused(False)

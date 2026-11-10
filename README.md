@@ -48,7 +48,14 @@ Timed liquidation auctions: you pay what you bid, plus fees, and pick up in pers
 - **Login**: your Mac.bid email and password (recommended; the first time, Mac.bid texts or emails a verification code, which the setup asks for), or your browser's saved login (`mac_auths` + `device_id` from the browser's Local Storage). Mac.bid's login lasts 30 minutes and is renewed automatically; the renewal chain lasts 60 days and extends itself, and with email + password it can always log in fresh. Mac.bid hands out a new renewal token every time, so a pasted browser login is taken over by Home Assistant: log in again in your browser afterwards.
 - **Follows** your watchlist and the lots in your recent bid history (plus any extra lot IDs you add). Each lot is checked only as often as it needs: every check in its last 15 minutes, every 2 minutes in its last 2 hours, every 15 minutes otherwise. If Mac.bid says "too many requests", the last known data is kept and it backs off.
 - **Cards** show a real countdown to the end (with an *extended* badge when late bids push it back), **you're winning / outbid**, other bidders, watchers, retail and Buy Now prices, and **what winning costs**: the bid plus Mac.bid's 15% buyer's premium and $3 lot fee (before tax).
-- **Max bid ($)** per lot, with what winning at it would cost. Auction Watcher doesn't place Mac.bid bids.
+- **Location**: pickup spot with address and hours, and a **Transfers** sub-menu (whether the item can be moved, and to which locations). "If you win" includes that building's sales tax.
+- **Bidding**: Mac.bid bids are *maximums*; the site raises your bid as others bid, up to your max. Per item:
+  - **Place max bid now** (asks you to confirm, showing what a win at that max costs with fees and tax).
+  - **Auto-bid**: *now* (place your max right away) or *late* (keep it hidden and place it N minutes before the end; default 3, before Mac.bid's 2-minute extension window).
+  - Never bids without a max, never past your max, and doesn't keep bidding once someone's max beats yours.
+  - **Mac.bid budget** (setting): the most dollars tied up in max bids at once (placed bids still live + scheduled late bids).
+  - **Pause switch** (*Auto-bidding*) and an alert for every bid placed or failed.
+
 - **Awaiting pickup** tab: won items with a countdown to the pickup deadline, checked every 6 hours.
 - **Alerts**: outbid, ending soon (default 10 minutes before), price passed your max, won / ended, and a pickup reminder (default 24 hours before the deadline).
 
@@ -62,6 +69,14 @@ Uses eBay's **official APIs** only (no page scraping, which eBay blocks and its 
 - **Alerts**: outbid, ending soon, price passed your max, won, ended. Checks every 10 s in an item's last 15 minutes, every 2 minutes in its last 2 hours, otherwise every 15 minutes.
 - **No bidding**: eBay only lets approved apps bid through its API. Use eBay's own max bid.
 - *Status*: built from eBay's documented formats and tested on sample data; not yet run against live eBay.
+
+## Money overview and budgets
+
+The **Active** tab starts with a tally per site:
+- **GovAuctions**: balance (per the site; booked bids are already taken out of it), **booked**, **earmarked** (what auto-rebook could still book under your max bids), **at risk**, spent today and this week. Set a **weekly budget** in the settings: when it's used up, auto-booking stops and the Book button refuses until Monday. Several auctions booking at once draw from one shared balance, so they can't spend the same points twice.
+- **Mac.bid**: max bids placed on live items, scheduled late bids, your Mac.bid budget, and won items awaiting pickup.
+- A **pause/resume** button per site (also a switch entity for automations).
+- *Item + points* bundles show the bonus points' value and the net cost of winning.
 
 ## Booking and auto-booking (GovAuctions)
 

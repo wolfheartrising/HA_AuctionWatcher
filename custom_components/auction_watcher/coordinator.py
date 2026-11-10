@@ -18,6 +18,7 @@ from homeassistant.util import dt as dt_util
 
 from .alerts import build_calls, human_time
 from .const import (
+    CONF_MACBID_BUDGET,
     CONF_WEEKLY_BUDGET,
     CONF_PACKS_ENABLED,
     PACKS_LIVE_SECONDS,
@@ -125,9 +126,12 @@ EVENT_NAMES = {
     "pickup": EVENT_PICKUP,
     "pack": EVENT_PACK,
     "budget": EVENT_BUDGET,
+    "bid_placed": EVENT_BOOKING,
+    "bid_failed": EVENT_BOOKING,
 }
 # Which "Which alerts to send" choice covers each event
-ALERT_KIND_OF = {"booked": "booking", "cancelled": "booking", "booking_failed": "booking"}
+ALERT_KIND_OF = {"booked": "booking", "cancelled": "booking", "booking_failed": "booking",
+                 "bid_placed": "booking", "bid_failed": "booking"}
 
 
 class AuctionWatcherCoordinator(DataUpdateCoordinator[dict[str, AuctionState]]):
@@ -637,7 +641,102 @@ class MacBidCoordinator(AuctionWatcherCoordinator):
         self._timed = TimedSnapshot()
         self._known_lots: set[str] = set()
         self._lots: dict[str, tuple[float, dict[str, Any]]] = {}  # lot_id -> (fetched at, data)
+        self._locs: dict[str, dict[str, Any]] = {}
+        self._locs_at = 0.0
+        self._mb: dict[str, MacBidSettings] = {}
+        self._mbmem: dict[str, MacBidMemory] = {}
         self._backoff_until = 0.0
+
+    async def async_load(self) -> None:
+        await super().async_load()
+        stored = await self._store.async_load() or {}
+        self._mb = {str(k): MacBidSettings.from_dict(v) for k, v in (stored.get("macbid_bids") or {}).items()}
+        self._mbmem = {str(k): MacBidMemory(placed=int(v)) for k, v in (stored.get("macbid_placed") or {}).items()}
+
+    async def _save(self) -> None:
+        await super()._save()
+        data = await self._store.async_load() or {}
+        data["macbid_bids"] = {k: vars(v) for k, v in self._mb.items() if v.mode != MB_MODE_OFF}
+        data["macbid_placed"] = {k: m.placed for k, m in self._mbmem.items() if m.placed}
+        await self._store.async_save(data)
+
+    def macbid_settings(self, lot_id: str) -> MacBidSettings:
+        return self._mb.get(str(lot_id), MacBidSettings())
+
+    def macbid_memory(self, lot_id: str) -> MacBidMemory:
+        return self._mbmem.get(str(lot_id), MacBidMemory())
+
+    async def async_set_macbid(self, lot_id: str, settings: MacBidSettings) -> None:
+        aid = str(lot_id)
+        if settings.mode != MB_MODE_OFF and not self.bid_limit(aid):
+            raise SiteError("Set a max bid for this item first")
+        self._mb[aid] = settings
+        await self._save()
+        self.async_update_listeners()
+
+    def _macbid_budget_left(self, states: dict[str, AuctionState], exclude: str | None = None) -> int | None:
+        budget = int(self._opt(self.config_entry, CONF_MACBID_BUDGET, 0) or 0)
+        if not budget:
+            return None
+        others = {k: v for k, v in states.items() if k != exclude}
+        c = macbid_committed(others, {k: m.placed for k, m in self._mbmem.items()}, self._limits,
+                             {k: v.mode for k, v in self._mb.items()})
+        return budget - c["placed"] - c["scheduled"]
+
+    async def async_place_bid(self, lot_id: str, amount: int) -> int:
+        """Manual max bid (the page's button / the place_bid service)."""
+        aid = str(lot_id)
+        s = (self.data or {}).get(aid)
+        if s is None or s.status != STATUS_LIVE:
+            raise SiteError("That item isn't live")
+        left = self._macbid_budget_left(self.data or {}, exclude=aid)
+        if left is not None and amount > left:
+            raise SiteError(f"A ${amount} max would go past your Mac.bid budget (${max(left, 0)} left)")
+        await self._place(s, int(amount), "placed by you")
+        await self.async_request_refresh()
+        return int(amount)
+
+    async def _place(self, s: AuctionState, amount: int, reason: str) -> None:
+        client: mb.MacBidClient = self.client  # type: ignore[assignment]
+        mem = self._mbmem.setdefault(s.auction_id, MacBidMemory())
+        mem.last_attempt = time.time()
+        await client.place_bid(s.auction_id, s.extra.get("lot_number") or "", s.extra.get("auction_id") or "", amount)
+        mem.placed = amount
+        mem.status = f"max bid ${amount} placed ({reason}); Mac.bid raises for you up to it"
+        await self._save()
+        self._emit("bid_placed", {**self._booking_data(s.auction_id, amount, reason, s), "amount": amount})
+
+    async def _run_macbid(self, states: dict[str, AuctionState], now: float) -> None:
+        for aid, settings in list(self._mb.items()):
+            s = states.get(aid)
+            if s is None or settings.mode == MB_MODE_OFF:
+                continue
+            mem = self._mbmem.setdefault(aid, MacBidMemory())
+            action, amount, reason = decide_macbid(
+                s, settings, mem, self.bid_limit(aid), now,
+                budget_left=self._macbid_budget_left(states, exclude=aid), paused=self.auto_paused)
+            if not action:
+                mem.status = reason
+                continue
+            try:
+                await self._place(s, amount, f"auto: {reason}")
+                s.extra["winning"] = True  # until the next check says otherwise
+            except AuthError:
+                raise
+            except SiteError as err:
+                mem.status = f"bid failed: {err}"
+                _LOGGER.warning("Mac.bid auto-bid on %s failed: %s", aid, err)
+                self._emit("bid_failed", {**self._booking_data(aid, amount, str(err), s), "amount": amount})
+        # the money tally on the page
+        c = macbid_committed(states, {k: m.placed for k, m in self._mbmem.items()}, self._limits,
+                             {k: v.mode for k, v in self._mb.items()})
+        budget = int(self._opt(self.config_entry, CONF_MACBID_BUDGET, 0) or 0)
+        self.spending = {
+            "site": "macbid", "committed": c["placed"], "scheduled": c["scheduled"],
+            "budget": budget or None, "budget_left": (budget - c["placed"] - c["scheduled"]) if budget else None,
+            "won_awaiting_pickup": round(sum(s.price or 0 for s in states.values() if s.status == "awaiting_pickup"), 2),
+            "auto_paused": self.auto_paused,
+        }
 
     @staticmethod
     def _seconds_left(lot: dict[str, Any], now: float) -> float | None:
@@ -663,6 +762,12 @@ class MacBidCoordinator(AuctionWatcherCoordinator):
                 self._watch = await client.watchlist()
                 self._known_lots |= set(await client.active_ids())
                 self._watch_at = now
+            if not self._locs_at or now - self._locs_at >= 86400:
+                try:
+                    self._locs = await client.locations()
+                    self._locs_at = now
+                except SiteError as err:
+                    _LOGGER.debug("Mac.bid locations not loaded: %s", err)
             if not self._pickups_at or now - self._pickups_at >= PICKUP_REFRESH_SECONDS:
                 self._pickups = await client.pickups(now)
                 self._pickups_at = now
@@ -700,6 +805,13 @@ class MacBidCoordinator(AuctionWatcherCoordinator):
         for lot_id in tracked:
             lot = (self._lots.get(lot_id) or (0, None))[1]
             st = mb.build_state(lot_id, lot, self._watch.get(lot_id), client.user_id, set(self._watch), now)
+            info = mb.location_info(st.extra.get("location_id"), self._locs, st.extra.get("lot_transferable"))
+            st.extra.update(info)
+            if info.get("sales_tax") is not None:
+                st.cost_if_won_now = mb.win_cost(st.price, info["sales_tax"])
+            mbs, mem = self.macbid_settings(lot_id), self.macbid_memory(lot_id)
+            st.extra.update({"mb_mode": mbs.mode, "mb_late_seconds": mbs.late_seconds,
+                             "mb_placed": mem.placed or None, "mb_status": mem.status})
             if st.ends_at:
                 if lot_id not in self._original_end:
                     self._original_end[lot_id] = st.ends_at.timestamp()
@@ -725,6 +837,10 @@ class MacBidCoordinator(AuctionWatcherCoordinator):
             if data.get("ends_at"):
                 data["ends_local"] = human_time(dt_util.as_local(dt_util.parse_datetime(data["ends_at"])))
             self._emit(kind, data)
+        try:
+            await self._run_macbid(states, now)
+        except AuthError as err:
+            raise ConfigEntryAuthFailed(str(err)) from err
 
         seconds = choose_timed_interval(
             states, now,

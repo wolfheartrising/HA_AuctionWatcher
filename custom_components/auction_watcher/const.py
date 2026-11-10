@@ -1,7 +1,7 @@
 """Constants for Auction Watcher."""
 
 DOMAIN = "auction_watcher"
-VERSION = "0.8.0"  # keep in sync with manifest.json (a test checks this)
+VERSION = "0.9.0"  # keep in sync with manifest.json (a test checks this)
 
 CONF_SITE = "site"
 CONF_COOKIE = "cookie"
@@ -54,6 +54,9 @@ EVENT_PACK = f"{DOMAIN}_good_point_pack"
 EVENT_BUDGET = f"{DOMAIN}_budget_reached"
 CONF_PACKS_ENABLED = "scan_point_packs"
 CONF_WEEKLY_BUDGET = "weekly_budget_points"  # 0 = no budget
+CONF_MACBID_BUDGET = "macbid_budget_dollars"  # most dollars tied up in Mac.bid max bids at once (0 = none)
+SERVICE_PLACE_BID = "place_bid"
+SERVICE_SET_MACBID = "set_macbid_bidding"
 PACKS_SCAN_SECONDS = 3600   # full Packs list + history, hourly
 PACKS_LIVE_SECONDS = 600    # live price / entry state of known packs
 

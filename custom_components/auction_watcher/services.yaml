@@ -93,3 +93,43 @@ set_auto_booking:
           step: 0.01
           mode: box
           unit_of_measurement: "$"
+
+place_bid:
+  fields:
+    auction_id:
+      required: true
+      example: "67465504"
+      selector:
+        text:
+    amount:
+      required: true
+      example: 40
+      selector:
+        number:
+          min: 1
+          max: 100000
+          mode: box
+          unit_of_measurement: "$"
+
+set_macbid_bidding:
+  fields:
+    auction_id:
+      required: true
+      example: "67465504"
+      selector:
+        text:
+    mode:
+      selector:
+        select:
+          options:
+            - "off"
+            - now
+            - late
+    late_seconds:
+      example: 180
+      selector:
+        number:
+          min: 30
+          max: 3600
+          mode: box
+          unit_of_measurement: s
