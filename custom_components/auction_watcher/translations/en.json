@@ -33,25 +33,26 @@
   "options": {
     "step": {
       "init": {
-        "title": "Auction Watcher: rules and timing",
+        "title": "Auction Watcher settings",
+        "description": "When to alert, where alerts go, and how often to check.",
         "data": {
-          "alert_max_bidders": "Alert when active bidders (last minute) are at most",
+          "alert_max_bidders": "Alert when active bidders are at most",
+          "active_window_minutes": "Count anyone who bid within the last N minutes",
+          "stable_seconds": "…and only after it stays that low for N seconds (0 = right away)",
           "alert_max_price": "Only alert below this price (0 = any price)",
           "default_bid_limit": "Default bid limit per auction (0 = none)",
+          "notify_services": "Send alerts to (phone push, Telegram, Alexa Media Player, ...)",
+          "notify_entities": "Also send to notify entities (Telegram chats, Alexa Devices Announce/Speak, ...)",
+          "alert_kinds": "Which alerts to send",
           "point_cost": "What one point/bid costs you",
           "fast_interval_seconds": "Check every N seconds while something you follow is live",
           "idle_interval_minutes": "Check every N minutes when nothing is live",
           "extra_auction_ids": "Extra auction IDs to follow (comma separated)"
         },
-        "description": "Step 1 of 2. Next: where alerts go."
-      },
-      "alerts": {
-        "title": "Auction Watcher: where alerts go",
-        "description": "Pick any mix. Phone pushes open the auction when tapped. Telegram and other text targets get the link in the message. Alexa gets a short spoken version (Alexa Media Player services are sent as announcements; for the official Alexa Devices integration pick its Announce or Speak entity below).",
-        "data": {
-          "notify_services": "Notify services (phone push, Telegram, Alexa Media Player, ...)",
-          "notify_entities": "Notify entities (Telegram chats, Alexa Devices Announce/Speak, ...)",
-          "alert_kinds": "Which alerts to send"
+        "data_description": {
+          "active_window_minutes": "The site only shows the last 9 bids. Counting a few minutes back catches people who pause and jump back in.",
+          "stable_seconds": "With 2 bidders an auction can end in seconds, so 0 alerts as soon as it qualifies.",
+          "notify_entities": "Alexa gets a short spoken version; text targets like Telegram get the auction link."
         }
       }
     }
@@ -74,6 +75,64 @@
     "refresh": {
       "name": "Refresh now",
       "description": "Check every followed auction right away."
+    },
+    "book_bids": {
+      "name": "Book bids",
+      "description": "Book bids on an auction you're following, like the site's Book button. Spends points. Never books past the auction's bid limit or your balance.",
+      "fields": {
+        "auction_id": {
+          "name": "Auction ID",
+          "description": "The number in the auction's address."
+        },
+        "count": {
+          "name": "Number of bids",
+          "description": "How many bids to book."
+        },
+        "max_price": {
+          "name": "Max price",
+          "description": "Optional: the site stops bidding for you above this price."
+        }
+      }
+    },
+    "cancel_booked_bids": {
+      "name": "Cancel booked bids",
+      "description": "Cancel your booked bids on an auction. Unused points go back to your balance.",
+      "fields": {
+        "auction_id": {
+          "name": "Auction ID",
+          "description": "The number in the auction's address."
+        }
+      }
+    },
+    "set_auto_booking": {
+      "name": "Set auto-booking",
+      "description": "Turn automatic cancel/rebook on or off for one auction. Needs a bid limit on that auction first.",
+      "fields": {
+        "auction_id": {
+          "name": "Auction ID",
+          "description": "The number in the auction's address."
+        },
+        "auto_cancel": {
+          "name": "Auto-cancel when crowded",
+          "description": "Cancel your booked bids when there are more bidders than your alert number."
+        },
+        "auto_rebook": {
+          "name": "Auto-rebook when it thins out",
+          "description": "Book again when it's back down to your alert number and you have none booked."
+        },
+        "rebook_mode": {
+          "name": "Rebook amount",
+          "description": "fixed = the amount below; remaining = however many were left when it auto-cancelled."
+        },
+        "rebook_amount": {
+          "name": "Fixed rebook amount",
+          "description": "Bids to book each time in fixed mode."
+        },
+        "max_price": {
+          "name": "Max price",
+          "description": "Passed to the site so your booked bids stop above this price (0 = none)."
+        }
+      }
     }
   }
 }

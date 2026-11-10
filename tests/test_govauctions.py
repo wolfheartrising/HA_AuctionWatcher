@@ -101,6 +101,47 @@ def test_opportunity_fires_once_then_again_after_leaving():
     assert [k for k, _ in events] == ["opportunity"]
 
 
+def test_no_alert_during_first_long_countdown():
+    s = _states()["17782125"]
+    assert is_opportunity(s, Rules(max_bidders=2))  # clock 4 s: real bidding phase
+    s.clock_seconds = 10594  # ~3 hours left on the first countdown, like the iPad auction
+    assert not is_opportunity(s, Rules(max_bidders=2))
+    s.clock_seconds = 15
+    assert is_opportunity(s, Rules(max_bidders=2))
+
+
+def test_tracker_catches_people_who_jump_back_in():
+    from aw.logic import BidderTracker
+    t = BidderTracker()
+    # zanenab bids, then pauses long enough to fall out of the site's last-9 list
+    t.add("1", [(NOW - 100, "zanenab"), (NOW - 95, "SnLB"), (NOW - 90, "Robert")])
+    t.add("1", [(NOW - 10, "SnLB"), (NOW - 5, "Robert")])
+    assert t.active("1", NOW, 60) == ["Robert", "SnLB"]             # 60 s window misses zanenab
+    assert t.active("1", NOW, 180) == ["Robert", "SnLB", "zanenab"]  # 3 min window counts them
+    assert t.active("1", NOW + 200, 180) == []                       # and forgets old ones
+
+
+def test_stable_seconds_waits_but_zero_alerts_immediately():
+    states = _states()
+    events, snap = evaluate(states, Rules(max_bidders=2, stable_seconds=0), Snapshot(), [], NOW)
+    assert [k for k, _ in events] == ["opportunity"]
+    rules = Rules(max_bidders=2, stable_seconds=20)
+    events, snap = evaluate(states, rules, Snapshot(), [], NOW)
+    assert events == []                                   # qualifies, but only just
+    events, snap = evaluate(states, rules, snap, [], NOW + 10)
+    assert events == []
+    events, snap = evaluate(states, rules, snap, [], NOW + 20)
+    assert [k for k, _ in events] == ["opportunity"]      # stayed low for 20 s
+
+
+def test_manifest_version_matches_const():
+    import json
+    from pathlib import Path
+    from aw.const import VERSION
+    manifest = json.loads((Path(__file__).resolve().parent.parent / "custom_components/auction_watcher/manifest.json").read_text())
+    assert manifest["version"] == VERSION
+
+
 def test_closed_auction_needs_you_to_be_in_it():
     s = _states(steak_bids=0)["17782125"]
     assert s.closed_to_new and not is_opportunity(s, Rules(max_bidders=2))

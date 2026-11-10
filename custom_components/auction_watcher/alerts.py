@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Any
 
-KINDS = ("opportunity", "bid_limit", "ended", "won")
+KINDS = ("opportunity", "bid_limit", "ended", "won", "booked", "cancelled", "booking_failed")
 SPOKEN_HINTS = ("announce", "speak", "alexa", "echo")
 
 
@@ -58,6 +58,20 @@ def format_alert(kind: str, d: dict[str, Any]) -> tuple[str, str, str]:
         if d.get("buy_it_now") and bids:
             msg += f" Buy It Now {_money(d['buy_it_now'])} returns your points, for a limited time."
         spoken = f"Auction ended. {name} finished at {_spoken_money(d.get('price'))}."
+    elif kind == "booked":
+        title = f"Booked {d.get('count')} bids: {name}"
+        msg = f"{d.get('reason') or ''}. Price {_money(d.get('price'))}, {d.get('active_bidders')} bidders."
+        if limit:
+            msg += f" You've used {bids} of your {limit} limit."
+        spoken = f"Booked {d.get('count')} bids on {name}."
+    elif kind == "cancelled":
+        title = f"Cancelled booked bids: {name}"
+        msg = f"{d.get('reason') or ''}. {d.get('count')} unused bids go back to your balance."
+        spoken = f"Cancelled your booked bids on {name}."
+    elif kind == "booking_failed":
+        title = f"Booking problem: {name}"
+        msg = f"{d.get('reason') or 'The site refused.'} Check the auction on the site."
+        spoken = f"Booking problem on {name}. Check your phone."
     else:  # won
         title = f"You won: {name}"
         msg = "Open the site to pay or exchange it."

@@ -13,6 +13,7 @@ class Rules:
     max_bidders: int = 2
     max_price: float = 0.0       # 0 = any price
     default_bid_limit: int = 0   # 0 = no limit
+    stable_seconds: int = 0      # how long it must stay at <= max_bidders before alerting (0 = right away)
     limits: dict[str, int] = field(default_factory=dict)  # per-auction overrides
 
     def bid_limit(self, auction_id: str) -> int:
@@ -24,15 +25,56 @@ class Snapshot:
     """What we'd already alerted about, so each alert fires once."""
 
     opportunities: set[str] = field(default_factory=set)
+    candidate_since: dict[str, float] = field(default_factory=dict)
     live: set[str] = field(default_factory=set)
     limit_fired: set[tuple[str, int]] = field(default_factory=set)
     won: set[str] | None = None  # None until the first update (don't alert on old wins)
 
 
+class BidderTracker:
+    """Remembers who bid when, across polls.
+
+    The site only shows the last 9 bids, so a bidder who pauses for a minute
+    drops out of that list and would look gone. Counting everyone seen within
+    a longer window (default 3 minutes) catches people who jump back in.
+    """
+
+    def __init__(self) -> None:
+        self._seen: dict[str, dict[str, float]] = {}
+
+    def add(self, auction_id: str, rows: list[tuple[float, str]]) -> None:
+        seen = self._seen.setdefault(auction_id, {})
+        for ts, user in rows:
+            if ts > seen.get(user, 0):
+                seen[user] = ts
+
+    KEEP_SECONDS = 3600  # longer than any window the settings allow
+
+    def active(self, auction_id: str, now: float, window_seconds: float) -> list[str]:
+        """Bidders seen within the window, most recent first."""
+        seen = self._seen.get(auction_id, {})
+        for user in [u for u, ts in seen.items() if ts <= now - self.KEEP_SECONDS]:
+            del seen[user]
+        recent = [(u, ts) for u, ts in seen.items() if ts > now - window_seconds]
+        return [u for u, _ in sorted(recent, key=lambda kv: -kv[1])]
+
+    def forget_except(self, auction_ids: set[str]) -> None:
+        for aid in [a for a in self._seen if a not in auction_ids]:
+            del self._seen[aid]
+
+
+# Penny auctions run a long first countdown (hours) before the real 5-6 second
+# resets begin. "2 bidders" during that first countdown means nothing, so only
+# alert once the clock is in the short-reset phase.
+FINAL_PHASE_MAX_CLOCK = 15
+
+
 def is_opportunity(s: AuctionState, rules: Rules) -> bool:
-    """Down to a few people, under your price, and you're allowed in."""
+    """Down to a few people, in the real bidding phase, under your price, and you're allowed in."""
     if s.status != STATUS_LIVE or s.active_bidders is None:
         return False
+    if s.clock_seconds is not None and s.clock_seconds > FINAL_PHASE_MAX_CLOCK:
+        return False  # still in the first long countdown
     if not 1 <= s.active_bidders <= rules.max_bidders:
         return False
     if rules.max_price and (s.price is None or s.price >= rules.max_price):
@@ -50,11 +92,15 @@ def evaluate(
     rules: Rules,
     prev: Snapshot,
     won_ids: list[str],
+    now: float = 0.0,
 ) -> tuple[list[tuple[str, dict[str, Any]]], Snapshot]:
     """Return (events to fire as (kind, data)), new snapshot)."""
     events: list[tuple[str, dict[str, Any]]] = []
 
-    opps = {aid for aid, s in states.items() if is_opportunity(s, rules)}
+    # Qualifies now; and has it stayed qualifying for stable_seconds?
+    candidates = {aid for aid, s in states.items() if is_opportunity(s, rules)}
+    since = {aid: prev.candidate_since.get(aid, now) for aid in candidates}
+    opps = {aid for aid in candidates if now - since[aid] >= rules.stable_seconds}
     for aid in sorted(opps - prev.opportunities):
         events.append(("opportunity", _data(states[aid], rules)))
 
@@ -76,7 +122,7 @@ def evaluate(
             data = _data(states[aid], rules) if aid in states else {"auction_id": aid}
             events.append(("won", data))
 
-    return events, Snapshot(opportunities=opps, live=live, limit_fired=limit_fired, won=won)
+    return events, Snapshot(opportunities=opps, candidate_since=since, live=live, limit_fired=limit_fired, won=won)
 
 
 def choose_interval(states: dict[str, AuctionState], now: float, fast: int, idle_minutes: int, upcoming: int, window: int) -> int:
@@ -107,3 +153,104 @@ def _data(s: AuctionState, rules: Rules) -> dict[str, Any]:
         "median_final_price": s.history.median_final_price if s.history else None,
         "median_winner_bids": s.history.median_winner_bids if s.history else None,
     }
+
+
+# ---------------------------------------------------------------- auto booking
+#
+# Per-auction, opt-in. Spends real points, so every rule errs on the side of
+# doing nothing:
+#   * nothing happens without a bid limit for that auction
+#   * only in the real bidding phase (short clock), never in the first countdown
+#   * never auto-cancels where cancelling would lock you out
+#     (No Re-Entry auctions, or closed auctions you haven't bid in yet)
+#   * never books past the bid limit or your point balance
+#   * waits between attempts on the same auction
+
+REBOOK_FIXED = "fixed"
+REBOOK_REMAINING = "remaining"
+AUTO_RETRY_SECONDS = 30
+
+
+@dataclass
+class AutoSettings:
+    auto_cancel: bool = False
+    auto_rebook: bool = False
+    rebook_mode: str = REBOOK_FIXED      # "fixed" -> rebook_amount; "remaining" -> what was left when cancelled
+    rebook_amount: int = 10
+    max_price: float = 0.0               # passed to the site's own price cap (0 = none)
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any] | None) -> "AutoSettings":
+        d = d or {}
+        mode = d.get("rebook_mode", REBOOK_FIXED)
+        return cls(
+            auto_cancel=bool(d.get("auto_cancel", False)),
+            auto_rebook=bool(d.get("auto_rebook", False)),
+            rebook_mode=mode if mode in (REBOOK_FIXED, REBOOK_REMAINING) else REBOOK_FIXED,
+            rebook_amount=max(0, int(d.get("rebook_amount", 10) or 0)),
+            max_price=max(0.0, float(d.get("max_price", 0) or 0)),
+        )
+
+    @property
+    def any_auto(self) -> bool:
+        return self.auto_cancel or self.auto_rebook
+
+
+@dataclass
+class AutoMemory:
+    cancelled_with: int = 0        # booked bids left when we last auto-cancelled
+    last_attempt: float = 0.0
+    status: str = ""               # shown on the Auctions page
+
+
+def can_cancel_safely(s: AuctionState) -> tuple[bool, str]:
+    labels = " ".join(s.labels).lower()
+    if "no re-entry" in labels:
+        return False, "No Re-Entry auction: cancelling could lock you out"
+    if s.closed_to_new and s.your_bids == 0:
+        return False, "closed to new bidders and you haven't bid yet"
+    return True, ""
+
+
+def decide_auto(
+    s: AuctionState,
+    settings: AutoSettings,
+    mem: AutoMemory,
+    rules: Rules,
+    points: int | None,
+    now: float,
+) -> tuple[str, int, str]:
+    """Return (action, count, reason). action is "", "cancel" or "book"."""
+    if not settings.any_auto:
+        return "", 0, ""
+    limit = rules.bid_limit(s.auction_id)
+    if not limit:
+        return "", 0, "auto is off until you set a bid limit for this auction"
+    if s.status != STATUS_LIVE or s.active_bidders is None:
+        return "", 0, "waiting for the auction to go live"
+    if s.clock_seconds is not None and s.clock_seconds > FINAL_PHASE_MAX_CLOCK:
+        return "", 0, "waiting for the first countdown to end"
+    if now - mem.last_attempt < AUTO_RETRY_SECONDS:
+        return "", 0, mem.status
+
+    crowded = s.active_bidders > rules.max_bidders
+    if crowded:
+        if settings.auto_cancel and s.your_booked_left > 0:
+            ok, why = can_cancel_safely(s)
+            if not ok:
+                return "", 0, f"not cancelling: {why}"
+            return "cancel", s.your_booked_left, f"{s.active_bidders} bidders > {rules.max_bidders}"
+        return "", 0, f"crowded ({s.active_bidders} bidders), holding off"
+
+    if settings.auto_rebook and s.your_booked_left == 0 and s.active_bidders >= 1:
+        if s.closed_to_new and s.your_bids == 0:
+            return "", 0, "closed to new bidders and you haven't bid yet"
+        want = mem.cancelled_with if settings.rebook_mode == REBOOK_REMAINING and mem.cancelled_with else settings.rebook_amount
+        room = limit - s.your_bids
+        if room <= 0:
+            return "", 0, "bid limit reached"
+        count = min(want, room, points if points is not None else want)
+        if count < 1:
+            return "", 0, "no points left to book"
+        return "book", count, f"down to {s.active_bidders} bidder{'' if s.active_bidders == 1 else 's'}"
+    return "", 0, mem.status or "watching"

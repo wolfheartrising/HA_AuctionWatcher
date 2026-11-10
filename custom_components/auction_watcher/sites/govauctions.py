@@ -63,11 +63,13 @@ def parse_live(data: dict[str, Any], now: float) -> tuple[dict[str, dict[str, An
     for a in data.get("auctions") or []:
         aid = str(a.get("i"))
         recent: list[str] = []
+        rows: list[tuple[float, str]] = []
         for row in histories.get(aid, []):
             try:
                 ts, user = float(row[1]), str(row[2])
             except (IndexError, TypeError, ValueError):
                 continue
+            rows.append((ts, user))
             if ts > now - ACTIVE_WINDOW_SECONDS and user not in recent:
                 recent.append(user)
         booked = a.get("bb") or {}
@@ -83,6 +85,9 @@ def parse_live(data: dict[str, Any], now: float) -> tuple[dict[str, dict[str, An
             "recent_bidders": recent,
             # Only meaningful if we got the bid history for this auction
             "active_bidders": len(recent) if aid in histories else None,
+            # Every bid the site showed us: [(unix time, username)], for the
+            # coordinator's longer-window bidder count
+            "bid_rows": rows if aid in histories else None,
         }
     return out, _int(account.get("bc"))
 
@@ -229,6 +234,9 @@ class GovAuctionsClient:
         self.cookies_changed = False
 
     async def _get(self, path: str, params: Any = None) -> Any:
+        return await self._request("GET", path, params=params)
+
+    async def _request(self, method: str, path: str, params: Any = None, json_body: Any = None) -> Any:
         headers = {
             "Cookie": cookie_header(self.cookies),
             "Accept": "application/json, text/plain, */*",
@@ -236,9 +244,11 @@ class GovAuctionsClient:
             "Referer": f"{BASE_URL}/my-bids",
             "User-Agent": USER_AGENT,
         }
+        if json_body is not None:
+            headers["Origin"] = BASE_URL
         try:
-            async with self._session.get(
-                BASE_URL + path, params=params, headers=headers,
+            async with self._session.request(
+                method, BASE_URL + path, params=params, json=json_body, headers=headers,
                 timeout=aiohttp.ClientTimeout(total=10), allow_redirects=False,
             ) as resp:
                 self._keep_cookies(resp)
@@ -285,6 +295,38 @@ class GovAuctionsClient:
     async def history(self, auction_id: str) -> PriceHistory | None:
         data = await self._get("/api/v2/auction/extraStaticData", params={"auctionId": auction_id})
         return parse_history(data, auction_id)
+
+    # ---- booking: these spend points. Same calls the site's own Book / Cancel buttons make.
+
+    async def book(self, auction_id: str, count: int, max_price: float | None = None) -> dict[str, Any]:
+        """Book `count` bids. With max_price the site stops bidding past that price."""
+        if count < 1:
+            raise SiteError("Nothing to book")
+        body: dict[str, Any] = {"bid_count": int(count), "book_partial": False}
+        if max_price:
+            body["max_price"] = float(max_price)
+        data = await self._request("POST", f"/api/v1/auction/{auction_id}/bidBuddy", json_body=body)
+        return booking_result(data, "book")
+
+    async def cancel_booked(self, auction_id: str) -> dict[str, Any]:
+        """Cancel your booked bids. Unused points go back to your balance."""
+        data = await self._request("DELETE", f"/api/v1/auction/{auction_id}/bidBuddy")
+        return booking_result(data, "cancel")
+
+
+def booking_result(data: Any, action: str) -> dict[str, Any]:
+    """The site answers {"success": true, ...} or an error; turn errors into SiteError."""
+    if isinstance(data, dict) and data.get("success"):
+        return data
+    message = None
+    if isinstance(data, dict):
+        err = data.get("error")
+        if isinstance(err, dict):
+            message = err.get("message") or err.get("title")
+        elif isinstance(err, str):
+            message = err
+        message = message or data.get("message")
+    raise SiteError(f"GovAuctions refused to {action}: {message or 'no reason given'}")
 
 
 def _float(v: Any) -> float | None:

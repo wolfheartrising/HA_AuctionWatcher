@@ -27,6 +27,10 @@ from homeassistant.helpers.selector import (
 )
 
 from .const import (
+    CONF_ACTIVE_WINDOW,
+    CONF_STABLE_SECONDS,
+    DEFAULT_ACTIVE_WINDOW,
+    DEFAULT_STABLE_SECONDS,
     CONF_ALERT_KINDS,
     CONF_ALERT_MAX_BIDDERS,
     CONF_NOTIFY_ENTITIES,
@@ -160,40 +164,29 @@ ALERT_KIND_OPTIONS = [
     {"value": "bid_limit", "label": "Bid limit reached"},
     {"value": "ended", "label": "Auction ended"},
     {"value": "won", "label": "Auction won"},
+    {"value": "booking", "label": "Bids booked or cancelled (including automatic)"},
 ]
 
 
 class AuctionWatcherOptionsFlow(OptionsFlow):
-    """Two pages: rules and timing, then where alerts go."""
-
-    def __init__(self) -> None:
-        self._rules: dict[str, Any] = {}
+    """Everything on one page: alert rules, where alerts go, timing."""
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if user_input is not None:
-            self._rules = user_input
-            return await self.async_step_alerts()
-        o = self.config_entry.options
-        schema = vol.Schema({
-            vol.Required(CONF_ALERT_MAX_BIDDERS, default=o.get(CONF_ALERT_MAX_BIDDERS, DEFAULT_ALERT_MAX_BIDDERS)): _num(1, 9, 1),
-            vol.Required(CONF_ALERT_MAX_PRICE, default=o.get(CONF_ALERT_MAX_PRICE, DEFAULT_ALERT_MAX_PRICE)): _num(0, 100000, 0.01, "$"),
-            vol.Required(CONF_DEFAULT_BID_LIMIT, default=o.get(CONF_DEFAULT_BID_LIMIT, DEFAULT_BID_LIMIT)): _num(0, 100000, 1, "bids"),
-            vol.Required(CONF_POINT_COST, default=o.get(CONF_POINT_COST, DEFAULT_POINT_COST)): _num(0, 5, 0.01, "$"),
-            vol.Required(CONF_FAST_INTERVAL, default=o.get(CONF_FAST_INTERVAL, DEFAULT_FAST_INTERVAL)): _num(5, 120, 1, "s"),
-            vol.Required(CONF_IDLE_INTERVAL, default=o.get(CONF_IDLE_INTERVAL, DEFAULT_IDLE_INTERVAL)): _num(5, 240, 1, "min"),
-            vol.Optional(CONF_EXTRA_IDS, default=o.get(CONF_EXTRA_IDS, "")): TextSelector(),
-        })
-        return self.async_show_form(step_id="init", data_schema=schema)
-
-    async def async_step_alerts(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        if user_input is not None:
-            return self.async_create_entry(data={**self._rules, **user_input})
+            return self.async_create_entry(data=user_input)
         o = self.config_entry.options
         # Legacy notify services: phones (mobile_app_*), Telegram, Alexa Media Player, email, ...
         available = sorted(s for s in self.hass.services.async_services_for_domain("notify") if s != "send_message")
         service_options = [{"value": s, "label": _service_label(s)} for s in available]
         saved_services = [s for s in o.get(CONF_NOTIFY_SERVICES, []) if s in available]
         schema = vol.Schema({
+            # When to alert
+            vol.Required(CONF_ALERT_MAX_BIDDERS, default=o.get(CONF_ALERT_MAX_BIDDERS, DEFAULT_ALERT_MAX_BIDDERS)): _num(1, 9, 1),
+            vol.Required(CONF_ACTIVE_WINDOW, default=o.get(CONF_ACTIVE_WINDOW, DEFAULT_ACTIVE_WINDOW)): _num(1, 30, 1, "min"),
+            vol.Required(CONF_STABLE_SECONDS, default=o.get(CONF_STABLE_SECONDS, DEFAULT_STABLE_SECONDS)): _num(0, 600, 1, "s"),
+            vol.Required(CONF_ALERT_MAX_PRICE, default=o.get(CONF_ALERT_MAX_PRICE, DEFAULT_ALERT_MAX_PRICE)): _num(0, 100000, 0.01, "$"),
+            vol.Required(CONF_DEFAULT_BID_LIMIT, default=o.get(CONF_DEFAULT_BID_LIMIT, DEFAULT_BID_LIMIT)): _num(0, 100000, 1, "bids"),
+            # Where alerts go
             vol.Optional(CONF_NOTIFY_SERVICES, default=saved_services): SelectSelector(
                 SelectSelectorConfig(options=service_options, multiple=True, mode=SelectSelectorMode.DROPDOWN)
             ),
@@ -203,8 +196,13 @@ class AuctionWatcherOptionsFlow(OptionsFlow):
             vol.Optional(CONF_ALERT_KINDS, default=o.get(CONF_ALERT_KINDS, DEFAULT_ALERT_KINDS)): SelectSelector(
                 SelectSelectorConfig(options=ALERT_KIND_OPTIONS, multiple=True)
             ),
+            # Costs and timing
+            vol.Required(CONF_POINT_COST, default=o.get(CONF_POINT_COST, DEFAULT_POINT_COST)): _num(0, 5, 0.01, "$"),
+            vol.Required(CONF_FAST_INTERVAL, default=o.get(CONF_FAST_INTERVAL, DEFAULT_FAST_INTERVAL)): _num(5, 120, 1, "s"),
+            vol.Required(CONF_IDLE_INTERVAL, default=o.get(CONF_IDLE_INTERVAL, DEFAULT_IDLE_INTERVAL)): _num(5, 240, 1, "min"),
+            vol.Optional(CONF_EXTRA_IDS, default=o.get(CONF_EXTRA_IDS, "")): TextSelector(),
         })
-        return self.async_show_form(step_id="alerts", data_schema=schema)
+        return self.async_show_form(step_id="init", data_schema=schema)
 
 
 def _service_label(service: str) -> str:

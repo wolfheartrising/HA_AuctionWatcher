@@ -15,6 +15,10 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .alerts import build_calls
 from .const import (
+    CONF_ACTIVE_WINDOW,
+    CONF_STABLE_SECONDS,
+    DEFAULT_ACTIVE_WINDOW,
+    DEFAULT_STABLE_SECONDS,
     CONF_ALERT_KINDS,
     CONF_ALERT_MAX_BIDDERS,
     CONF_NOTIFY_ENTITIES,
@@ -35,6 +39,7 @@ from .const import (
     DEFAULT_POINT_COST,
     DOMAIN,
     EVENT_BID_LIMIT,
+    EVENT_BOOKING,
     EVENT_ENDED,
     EVENT_OPPORTUNITY,
     EVENT_WON,
@@ -46,7 +51,16 @@ from .const import (
     UPCOMING_WINDOW,
 )
 from .cookies import cookie_header
-from .logic import Rules, Snapshot, choose_interval, evaluate
+from .logic import (
+    AutoMemory,
+    AutoSettings,
+    BidderTracker,
+    Rules,
+    Snapshot,
+    choose_interval,
+    decide_auto,
+    evaluate,
+)
 from .sites.base import STATUS_LIVE, STATUS_UPCOMING, AuctionState, AuthError, PriceHistory, SiteError
 from .sites import govauctions as ga
 
@@ -57,7 +71,12 @@ EVENT_NAMES = {
     "ended": EVENT_ENDED,
     "bid_limit": EVENT_BID_LIMIT,
     "won": EVENT_WON,
+    "booked": EVENT_BOOKING,
+    "cancelled": EVENT_BOOKING,
+    "booking_failed": EVENT_BOOKING,
 }
+# Which "Which alerts to send" choice covers each event
+ALERT_KIND_OF = {"booked": "booking", "cancelled": "booking", "booking_failed": "booking"}
 
 
 class AuctionWatcherCoordinator(DataUpdateCoordinator[dict[str, AuctionState]]):
@@ -84,6 +103,9 @@ class AuctionWatcherCoordinator(DataUpdateCoordinator[dict[str, AuctionState]]):
         self._static: dict[str, dict[str, Any]] = {}
         self._history: dict[str, tuple[float, PriceHistory | None]] = {}
         self._snapshot = Snapshot()
+        self._bidders = BidderTracker()
+        self._auto: dict[str, AutoSettings] = {}
+        self._mem: dict[str, AutoMemory] = {}
 
     @staticmethod
     def _opt(entry: ConfigEntry, key: str, default: Any) -> Any:
@@ -96,6 +118,7 @@ class AuctionWatcherCoordinator(DataUpdateCoordinator[dict[str, AuctionState]]):
             max_bidders=int(self._opt(e, CONF_ALERT_MAX_BIDDERS, DEFAULT_ALERT_MAX_BIDDERS)),
             max_price=float(self._opt(e, CONF_ALERT_MAX_PRICE, DEFAULT_ALERT_MAX_PRICE)),
             default_bid_limit=int(self._opt(e, CONF_DEFAULT_BID_LIMIT, DEFAULT_BID_LIMIT)),
+            stable_seconds=int(self._opt(e, CONF_STABLE_SECONDS, DEFAULT_STABLE_SECONDS)),
             limits=self._limits,
         )
 
@@ -106,17 +129,142 @@ class AuctionWatcherCoordinator(DataUpdateCoordinator[dict[str, AuctionState]]):
     async def async_load(self) -> None:
         stored = await self._store.async_load() or {}
         self._limits = {str(k): int(v) for k, v in (stored.get("limits") or {}).items()}
+        self._auto = {str(k): AutoSettings.from_dict(v) for k, v in (stored.get("auto") or {}).items()}
+        self._mem = {str(k): AutoMemory(cancelled_with=int(v)) for k, v in (stored.get("cancelled_with") or {}).items()}
+
+    async def _save(self) -> None:
+        await self._store.async_save({
+            "limits": self._limits,
+            "auto": {k: vars(v) for k, v in self._auto.items()},
+            "cancelled_with": {k: m.cancelled_with for k, m in self._mem.items() if m.cancelled_with},
+        })
 
     async def async_set_bid_limit(self, auction_id: str, limit: int) -> None:
         if limit > 0:
             self._limits[str(auction_id)] = int(limit)
         else:
             self._limits.pop(str(auction_id), None)
-        await self._store.async_save({"limits": self._limits})
+        await self._save()
         self.async_update_listeners()
 
     def bid_limit(self, auction_id: str) -> int:
         return self.rules.bid_limit(auction_id)
+
+    def auto_settings(self, auction_id: str) -> AutoSettings:
+        return self._auto.get(str(auction_id), AutoSettings())
+
+    def auto_status(self, auction_id: str) -> str:
+        return self._mem.get(str(auction_id), AutoMemory()).status
+
+    async def async_set_auto(self, auction_id: str, settings: AutoSettings) -> None:
+        aid = str(auction_id)
+        if settings.any_auto and not self.bid_limit(aid):
+            raise SiteError("Set a bid limit for this auction before turning on auto-booking")
+        if settings == AutoSettings():
+            self._auto.pop(aid, None)
+        else:
+            self._auto[aid] = settings
+        await self._save()
+        self.async_update_listeners()
+
+    # ---- booking (spends points)
+
+    def _booking_guard(self, auction_id: str, count: int) -> int:
+        """Clamp a manual booking to the bid limit and balance; raise if nothing is allowed."""
+        s = (self.data or {}).get(auction_id)
+        if s is None:
+            raise SiteError(f"Auction {auction_id} isn't one you're following")
+        limit = self.bid_limit(auction_id)
+        if limit:
+            room = limit - s.your_bids - s.your_booked_left
+            if room <= 0:
+                raise SiteError(f"Bid limit reached ({s.your_bids} used, {s.your_booked_left} booked, limit {limit})")
+            count = min(count, room)
+        if self.points is not None:
+            count = min(count, self.points)
+        if count < 1:
+            raise SiteError("No points left to book")
+        return count
+
+    async def async_book(self, auction_id: str, count: int, max_price: float | None = None) -> int:
+        aid = str(auction_id)
+        count = self._booking_guard(aid, int(count))
+        if max_price is None:
+            max_price = self.auto_settings(aid).max_price or None
+        await self.client.book(aid, count, max_price)
+        self._emit("booked", self._booking_data(aid, count, "booked by you"))
+        await self.async_request_refresh()
+        return count
+
+    async def async_cancel(self, auction_id: str) -> None:
+        aid = str(auction_id)
+        s = (self.data or {}).get(aid)
+        if s is None:
+            raise SiteError(f"Auction {aid} isn't one you're following")
+        await self.client.cancel_booked(aid)
+        self._emit("cancelled", self._booking_data(aid, s.your_booked_left, "cancelled by you"))
+        await self.async_request_refresh()
+
+    def _booking_data(self, aid: str, count: int, reason: str, state: AuctionState | None = None) -> dict[str, Any]:
+        s = state or (self.data or {}).get(aid)
+        return {
+            "site": s.site if s else "",
+            "auction_id": aid,
+            "title": s.title if s else f"Auction {aid}",
+            "url": s.url if s else "",
+            "price": s.price if s else None,
+            "active_bidders": s.active_bidders if s else None,
+            "your_bids": s.your_bids if s else 0,
+            "bid_limit": self.bid_limit(aid),
+            "count": count,
+            "reason": reason,
+        }
+
+    def _emit(self, kind: str, data: dict[str, Any]) -> None:
+        e = self.config_entry
+        payload = {**data, "account": e.title}
+        if EVENT_NAMES[kind] == EVENT_BOOKING:
+            payload["action"] = kind
+        self.hass.bus.async_fire(EVENT_NAMES[kind], payload)
+        if ALERT_KIND_OF.get(kind, kind) in set(self._opt(e, CONF_ALERT_KINDS, DEFAULT_ALERT_KINDS)):
+            services = list(self._opt(e, CONF_NOTIFY_SERVICES, []))
+            entities = list(self._opt(e, CONF_NOTIFY_ENTITIES, []))
+            for domain, service, service_data in build_calls(kind, data, services, entities):
+                self.hass.async_create_task(self._send(domain, service, service_data))
+
+    async def _run_auto(self, states: dict[str, AuctionState], now: float) -> None:
+        """Opt-in auto-cancel / auto-rebook, one decision per auction per check."""
+        rules = self.rules
+        for aid, settings in list(self._auto.items()):
+            s = states.get(aid)
+            if s is None:
+                continue
+            mem = self._mem.setdefault(aid, AutoMemory())
+            action, count, reason = decide_auto(s, settings, mem, rules, self.points, now)
+            mem.status = reason
+            if not action:
+                continue
+            mem.last_attempt = now
+            try:
+                if action == "cancel":
+                    await self.client.cancel_booked(aid)
+                    mem.cancelled_with = count
+                    mem.status = f"cancelled {count} booked bids ({reason}); will rebook when it thins out"
+                    s.your_booked_left = 0
+                    self._emit("cancelled", self._booking_data(aid, count, f"auto: {reason}", s))
+                else:
+                    await self.client.book(aid, count, settings.max_price or None)
+                    mem.cancelled_with = 0
+                    mem.status = f"booked {count} bids ({reason})"
+                    s.your_booked_left = count
+                    self._emit("booked", self._booking_data(aid, count, f"auto: {reason}", s))
+                await self._save()
+            except AuthError:
+                raise
+            except SiteError as err:
+                mem.status = f"{action} failed: {err}"
+                _LOGGER.warning("Auto-%s on auction %s failed: %s", action, aid, err)
+                self._emit("booking_failed", self._booking_data(aid, count, str(err), s))
 
     async def _send(self, domain: str, service: str, data: dict[str, Any]) -> None:
         """Send one alert. A broken target (phone removed, Alexa offline) never stops polling."""
@@ -162,22 +310,31 @@ class AuctionWatcherCoordinator(DataUpdateCoordinator[dict[str, AuctionState]]):
 
         point_cost = float(self._opt(e, CONF_POINT_COST, DEFAULT_POINT_COST))
         watching = set(self._lists["watching"])
+        window_min = float(self._opt(e, CONF_ACTIVE_WINDOW, DEFAULT_ACTIVE_WINDOW))
         states: dict[str, AuctionState] = {}
         for aid in tracked:
             static = self._static.get(aid)
             key = (static or {}).get("product_id") or aid
             hist = (self._history.get(key) or (0, None))[1]
-            states[aid] = ga.build_state(aid, live.get(aid), static, hist, watching, point_cost, now)
+            st = ga.build_state(aid, live.get(aid), static, hist, watching, point_cost, now)
+            rows = (live.get(aid) or {}).get("bid_rows")
+            if rows is not None:
+                # Count everyone seen in the last few minutes, not just the last 9 bids
+                self._bidders.add(aid, rows)
+                active = self._bidders.active(aid, now, window_min * 60)
+                st.active_bidders, st.recent_bidders = len(active), active
+            st.extra["active_window_minutes"] = window_min
+            states[aid] = st
+        self._bidders.forget_except(set(tracked))
 
-        events, self._snapshot = evaluate(states, self.rules, self._snapshot, self._lists["won"])
-        kinds = set(self._opt(e, CONF_ALERT_KINDS, DEFAULT_ALERT_KINDS))
-        services = list(self._opt(e, CONF_NOTIFY_SERVICES, []))
-        entities = list(self._opt(e, CONF_NOTIFY_ENTITIES, []))
+        events, self._snapshot = evaluate(states, self.rules, self._snapshot, self._lists["won"], now)
         for kind, data in events:
-            self.hass.bus.async_fire(EVENT_NAMES[kind], {**data, "account": e.title})
-            if kind in kinds:
-                for domain, service, service_data in build_calls(kind, data, services, entities):
-                    self.hass.async_create_task(self._send(domain, service, service_data))
+            self._emit(kind, data)
+
+        try:
+            await self._run_auto(states, now)
+        except AuthError as err:
+            raise ConfigEntryAuthFailed(str(err)) from err
 
         seconds = choose_interval(
             states, now,
