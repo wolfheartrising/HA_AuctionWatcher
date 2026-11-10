@@ -36,7 +36,7 @@ async def async_setup_entry(
     coord = entry.runtime_data
     if entry.data.get("site") == "macbid":
         async_add_entities([PickupsSensor(coord), FollowingSensor(coord)])
-    elif entry.data.get("site") == "ebay":
+    elif entry.data.get("site") in ("ebay", "ola"):
         async_add_entities([WinningSensor(coord), FollowingSensor(coord)])
     else:
         async_add_entities([PointsSensor(coord), OpportunitiesSensor(coord), FollowingSensor(coord), PacksSensor(coord)])
@@ -88,7 +88,7 @@ class PointsSensor(_Base):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         interval = self.coordinator.update_interval
-        return {
+        attrs = {
             "polling_mode": self.coordinator.mode,
             "poll_every_seconds": int(interval.total_seconds()) if interval else None,
             # Lets the Auctions page find each site's account sensor
@@ -98,6 +98,9 @@ class PointsSensor(_Base):
             "site": self.coordinator.config_entry.data.get("site"),
             **({"spending": self.coordinator.spending} if self.coordinator.spending else {}),
         }
+        if hasattr(self.coordinator, "ebay_diagnostics"):
+            attrs["ebay_diagnostics"] = getattr(self.coordinator, "ebay_diagnostics")
+        return attrs
 
 
 class PickupsSensor(PointsSensor):

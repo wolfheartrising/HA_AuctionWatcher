@@ -10,7 +10,7 @@
  * until you save it, and the page re-draws from those drafts.
  */
 
-const PANEL_VERSION = "1.6.2";  // must match const.py VERSION (a test checks)
+const PANEL_VERSION = "1.7.0";  // must match const.py VERSION (a test checks)
 const SITE_NAMES = { govauctions: "GovAuctions", macbid: "Mac.bid", ebay: "eBay" };
 // What the per-auction spending cap is called on each site
 const LIMIT_LABEL = { govauctions: "Max bids", macbid: "Max bid ($)", ebay: "Max price ($)" };
@@ -949,7 +949,7 @@ class AuctionWatcherPanel extends HTMLElement {
   }
 
   _card(a) {
-    if (a.site === "macbid" || a.site === "ebay") return this._macbidCard(a);
+    if (a.site === "macbid" || a.site === "ebay" || a.site === "ola") return this._macbidCard(a);
     const id = esc(a.auction_id);
     const c = this._clock(a);
     const img = safeUrl(a.image);
@@ -1158,7 +1158,7 @@ class AuctionWatcherPanel extends HTMLElement {
         </div>
         ${this._overtimeLine(a)}
         <div class="rows">
-          ${a.site === "ebay"
+          ${a.site === "ebay" || a.site === "ola"
             ? `<div><span class="k">Your max bid</span> ${a.your_max_bid ? money(a.your_max_bid) : "–"}</div>
                <div><span class="k">Shipping</span> ${a.shipping === 0 ? "free" : money(a.shipping)}</div>`
             : `<div><span class="k">If you win now</span> ${money(a.cost_if_won_now)} <span class="muted">(+15% + $3, before tax)</span></div>

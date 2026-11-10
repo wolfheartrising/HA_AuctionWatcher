@@ -49,6 +49,7 @@ from .const import (
     CONF_EMAIL,
     CONF_PASSWORD,
     SITE_MACBID,
+    SITE_OLA,
     CONF_ACTIVE_WINDOW,
     CONF_STABLE_SECONDS,
     DEFAULT_ACTIVE_WINDOW,
@@ -80,6 +81,7 @@ from .cookies import cookie_header, parse_cookie_input
 from .sites import govauctions as ga
 from .sites import ebay as eb
 from .sites import macbid as mb
+from .sites import ola as ola
 from .sites.base import AuthError, SiteError
 
 CONF_COOKIE_FILE = "cookie_file"
@@ -125,6 +127,29 @@ async def _validate(cookie_text: str) -> tuple[str, dict[str, str]]:
 
 
 CONF_AUTH_TEXT = "saved_login"
+
+
+def _ola_fields() -> dict:
+    return {
+        vol.Required(CONF_EMAIL): TextSelector(TextSelectorConfig(type=TextSelectorType.EMAIL, autocomplete="username")),
+        vol.Required(CONF_PASSWORD): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD, autocomplete="current-password")),
+    }
+
+
+async def _validate_ola(user_input: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    email = (user_input.get(CONF_EMAIL) or "").strip()
+    password = user_input.get(CONF_PASSWORD) or ""
+    if not email or not password:
+        return "Enter your OLA email and password", {}
+    async with aiohttp.ClientSession(cookie_jar=aiohttp.DummyCookieJar()) as session:
+        client = ola.OlaClient(session, email=email, password=password)
+        try:
+            await client.sign_in()
+        except AuthError as err:
+            return str(err), {}
+        except SiteError as err:
+            return f"Couldn't reach OLA: {err}", {}
+    return "", {CONF_SITE: SITE_OLA, CONF_AUTH: client.auth, CONF_EMAIL: email, CONF_PASSWORD: password}
 
 
 def _macbid_fields() -> dict:
@@ -223,6 +248,8 @@ class AuctionWatcherConfigFlow(ConfigFlow, domain=DOMAIN):
             self._abort_if_unique_id_configured()
             if site == SITE_EBAY:
                 return await self.async_step_ebay()
+            if site == SITE_OLA:
+                return await self.async_step_ola()
             return await (self.async_step_macbid() if site == SITE_MACBID else self.async_step_govauctions())
         schema = vol.Schema({
             vol.Required(CONF_SITE, default=SITE_GOVAUCTIONS): SelectSelector(
@@ -242,6 +269,17 @@ class AuctionWatcherConfigFlow(ConfigFlow, domain=DOMAIN):
                 )
             errors["base"] = error
         return self.async_show_form(step_id="govauctions", data_schema=vol.Schema(_cookie_fields()), errors=errors)
+
+    async def async_step_ola(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            error, data = await _validate_ola(user_input)
+            if not error:
+                if self.source == SOURCE_REAUTH:
+                    return self.async_update_reload_and_abort(self._get_reauth_entry(), data=data)
+                return self.async_create_entry(title=SITES[SITE_OLA], data=data)
+            errors["base"] = error
+        return self.async_show_form(step_id="ola", data_schema=vol.Schema(_ola_fields()), errors=errors)
 
     async def async_step_macbid(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         errors: dict[str, str] = {}
@@ -343,6 +381,8 @@ class AuctionWatcherConfigFlow(ConfigFlow, domain=DOMAIN):
             if self._ebay.get(CONF_RUNAME):
                 return await self.async_step_ebay_signin()
             return await self.async_step_ebay()
+        if entry.data.get(CONF_SITE) == SITE_OLA:
+            return await self.async_step_ola()
         is_macbid = entry.data.get(CONF_SITE) == SITE_MACBID
         if user_input is not None:
             if is_macbid:

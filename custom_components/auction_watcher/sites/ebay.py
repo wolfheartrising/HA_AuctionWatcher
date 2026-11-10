@@ -196,6 +196,14 @@ def _suspicious_title(title: str) -> bool:
     return bool(re.fullmatch(r"[A-Z_]{4,}", t))
 
 
+def _has_item_details(s: AuctionState) -> bool:
+    if s.price is not None or s.ends_at is not None:
+        return True
+    if s.extra.get("total_bids") is not None:
+        return True
+    return bool(s.image)
+
+
 def _item_from_html(item_id: str, html_text: str) -> dict[str, Any]:
     title = _meta_content(html_text, "og:title") or _meta_content(html_text, "twitter:title")
     if not title:
@@ -204,7 +212,12 @@ def _item_from_html(item_id: str, html_text: str) -> dict[str, Any]:
 
     url = _meta_content(html_text, "og:url") or f"https://www.ebay.com/itm/{item_id}"
     image = _meta_content(html_text, "og:image")
-    currency = (_json_string(html_text, "currency") or "USD").upper()
+    currency = (
+        _json_string(html_text, "currency")
+        or _meta_content(html_text, "product:price:currency")
+        or _meta_content(html_text, "twitter:data1")
+        or "USD"
+    ).upper()
     price = (
         _json_number(html_text, "currentPrice")
         or _json_number(html_text, "currentBidPrice")
@@ -214,6 +227,14 @@ def _item_from_html(item_id: str, html_text: str) -> dict[str, Any]:
         m_price = re.search(r'"(?:currentPrice|currentBidPrice|price)"\s*:\s*\{[^\}]*"value"\s*:\s*"(\d+(?:\.\d+)?)"', html_text)
         if m_price:
             price = _num(m_price.group(1))
+    if price is None:
+        m_price2 = re.search(r'<meta[^>]+property=["\']product:price:amount["\'][^>]+content=["\'](\d+(?:\.\d+)?)["\']', html_text, flags=re.I)
+        if m_price2:
+            price = _num(m_price2.group(1))
+    if price is None:
+        m_price3 = re.search(r'<span[^>]+itemprop=["\']price["\'][^>]*content=["\'](\d+(?:\.\d+)?)["\']', html_text, flags=re.I)
+        if m_price3:
+            price = _num(m_price3.group(1))
     end_raw = _json_string(html_text, "endTime") or _json_string(html_text, "listingEndTime") or _json_string(html_text, "endDate")
     min_next = _json_number(html_text, "minimumPriceToBid")
     bids = _int(_json_string(html_text, "bidCount"))
@@ -287,6 +308,24 @@ def parse_my_ebay_html(html_text: str, now: float, category: str) -> dict[str, A
                 },
             )
             out[item_id] = st
+    for m in re.finditer(r'https?://(?:www\.)?ebay\.com/itm/[^"\'>\s]*/(\d{9,15})', html_text, flags=re.I):
+        item_id = m.group(1)
+        if item_id in out:
+            continue
+        out[item_id] = AuctionState(
+            site=SITE,
+            auction_id=item_id,
+            title=f"eBay item {item_id}",
+            url=html.unescape(m.group(0)),
+            category=category,
+            status=STATUS_LIVE,
+            extra={
+                "winning": False,
+                "you_are_bidding": category == CATEGORY_BIDDING,
+                "total_bids": None,
+                "on_watchlist": category == CATEGORY_WATCHING,
+            },
+        )
     return out
 
 
@@ -310,7 +349,7 @@ def _state_from_trading(it: ET.Element, bidding: bool, me: str, now: float) -> A
         status=status,
         price=price,
         currency=currency or "USD",
-        image=f("e:PictureDetails/e:GalleryURL") or None,
+        image=f("e:PictureDetails/e:PictureURL") or f("e:PictureDetails/e:GalleryURL") or None,
         leader="you" if winning else (high or None),
         ends_at=ends,
         original_end=ends,
@@ -321,6 +360,7 @@ def _state_from_trading(it: ET.Element, bidding: bool, me: str, now: float) -> A
             "winning": winning,
             "you_are_bidding": bidding,
             "total_bids": _int(f("e:SellingStatus/e:BidCount")),
+            "watchers": _int(f("e:WatchCount")),
             "your_max_bid": _num(f("e:BiddingDetails/e:MaxBid")),
             "shipping": _num(f("e:ShippingDetails/e:ShippingServiceOptions/e:ShippingServiceCost")),
             "on_watchlist": not bidding,
@@ -439,7 +479,7 @@ class EbayClient:
             html_text = await self._fetch_html(f"https://www.ebay.com/itm/{item_id}")
             info = parse_my_ebay_html(html_text, time.time(), CATEGORY_WATCHING)
             item = info.get(item_id)
-            if item is not None and not (_suspicious_title(item.title) and item.price is None and item.ends_at is None):
+            if item is not None and _has_item_details(item):
                 return {
                     "itemId": item_id,
                     "legacyItemId": item_id,

@@ -1,13 +1,13 @@
 """Constants for Auction Watcher."""
 
 DOMAIN = "auction_watcher"
-VERSION = "1.6.2"  # keep in sync with manifest.json (a test checks this)
+VERSION = "1.7.0"  # keep in sync with manifest.json (a test checks this)
 
 CONF_SITE = "site"
 CONF_COOKIE = "cookie"
 
 SITE_GOVAUCTIONS = "govauctions"
-SITES = {SITE_GOVAUCTIONS: "GovAuctions", "macbid": "Mac.bid", "ebay": "eBay"}
+SITES = {SITE_GOVAUCTIONS: "GovAuctions", "macbid": "Mac.bid", "ebay": "eBay", "ola": "OLA"}
 
 # Options
 CONF_FAST_INTERVAL = "fast_interval_seconds"
@@ -64,6 +64,7 @@ PACKS_LIVE_SECONDS = 600    # live price / entry state of known packs
 
 SITE_MACBID = "macbid"
 SITE_EBAY = "ebay"
+SITE_OLA = "ola"
 CONF_APP_ID = "app_id"
 CONF_CERT_ID = "cert_id"
 CONF_RUNAME = "runame"

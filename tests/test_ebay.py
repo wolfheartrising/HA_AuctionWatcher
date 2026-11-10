@@ -90,3 +90,44 @@ def test_item_ids_from_links():
     assert eb.parse_item_id("https://www.ebay.com/itm/187654321098?hash=x") == "187654321098"
     assert eb.parse_item_id("https://www.ebay.com/itm/Vintage-Seiko/187654321098") == "187654321098"
     assert eb.parse_item_id("not a link") is None
+
+
+def test_api_cards_get_watchers_and_full_size_picture():
+    from aw.sites import ebay as eb
+    xml = """<?xml version="1.0" encoding="UTF-8"?>
+<GetMyeBayBuyingResponse xmlns="urn:ebay:apis:eBLBaseComponents"><Ack>Success</Ack>
+  <WatchList><ItemArray><Item>
+    <ItemID>111</ItemID><Title>Camera</Title><WatchCount>17</WatchCount>
+    <ListingDetails><EndTime>2099-01-01T00:00:00.000Z</EndTime></ListingDetails>
+    <SellingStatus><CurrentPrice currencyID="USD">42.00</CurrentPrice><BidCount>5</BidCount></SellingStatus>
+    <PictureDetails><GalleryURL>https://i.ebayimg.com/small.jpg</GalleryURL><PictureURL>https://i.ebayimg.com/big.jpg</PictureURL></PictureDetails>
+  </Item></ItemArray></WatchList></GetMyeBayBuyingResponse>"""
+    st = eb.parse_my_ebay_buying(xml, "me", 0)["111"]
+    assert st.extra["watchers"] == 17 and st.extra["total_bids"] == 5 and st.price == 42.0
+    assert st.image == "https://i.ebayimg.com/big.jpg"
+
+
+def test_cookie_html_falls_back_to_item_links():
+    html = """
+<html><body>
+  <a href="https://www.ebay.com/itm/Fancy-Thing/123456789012">Open item</a>
+</body></html>
+"""
+    items = eb.parse_my_ebay_html(html, NOW, "watching")
+    assert "123456789012" in items
+    assert items["123456789012"].title == "eBay item 123456789012"
+
+
+def test_item_from_html_reads_meta_price_and_currency():
+    html = """
+<html><head>
+  <meta property="og:title" content="Super Camera">
+  <meta property="og:url" content="https://www.ebay.com/itm/Super-Camera/123456789012">
+  <meta property="product:price:amount" content="149.99">
+  <meta property="product:price:currency" content="USD">
+</head></html>
+"""
+    item = eb._item_from_html("123456789012", html)
+    assert item["title"] == "Super Camera"
+    assert item["currentBidPrice"]["value"] == "149.99"
+    assert item["currentBidPrice"]["currency"] == "USD"

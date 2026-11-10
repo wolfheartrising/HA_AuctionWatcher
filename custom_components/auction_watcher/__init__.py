@@ -30,6 +30,7 @@ from .const import (
     CONF_EBAY_TOKENS,
     CONF_RUNAME,
     SITE_EBAY,
+    SITE_OLA,
     CONF_AUTH,
     CONF_DEVICE_ID,
     CONF_EMAIL,
@@ -37,10 +38,11 @@ from .const import (
     CONF_SITE,
     SITE_MACBID,
 )
-from .coordinator import AuctionWatcherCoordinator, EbayCoordinator, MacBidCoordinator
+from .coordinator import AuctionWatcherCoordinator, EbayCoordinator, MacBidCoordinator, OlaCoordinator
 from .cookies import parse_cookie_input
 from .sites import ebay as eb
 from .sites import macbid as mb
+from .sites import ola as ola
 from .logic import AutoSettings, MacBidSettings
 from .sites.base import SiteError
 from .panel import async_register_panel, async_remove_panel
@@ -294,6 +296,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: AuctionWatcherConfigEntr
             cookies=cookies,
         )
         coordinator: AuctionWatcherCoordinator = EbayCoordinator(hass, entry, client_e)
+    elif entry.data.get(CONF_SITE) == SITE_OLA:
+        client_o = ola.OlaClient(session, entry.data.get(CONF_AUTH),
+                                 email=entry.data.get(CONF_EMAIL), password=entry.data.get(CONF_PASSWORD))
+        coordinator = OlaCoordinator(hass, entry, client_o)
     elif entry.data.get(CONF_SITE) == SITE_MACBID:
         client = mb.MacBidClient(
             session, entry.data.get(CONF_AUTH), entry.data[CONF_DEVICE_ID],

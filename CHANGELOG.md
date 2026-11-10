@@ -6,6 +6,16 @@ The section for a version becomes its release notes, so HACS shows them under "U
 After updating: restart Home Assistant if Python changed, then reload the Auctions page (it offers a Reload button
 when it's older than the plugin).
 
+## 1.7.0
+- **New site: OLA (olabid.com), read-only.** Sign in with your OLA email and password to see your watchlist, winning
+  items and bid history on the Auctions page, with ending-soon / outbid / won alerts. Uses OLA's own app API with
+  their endpoints (honest client, no app impersonation). Bidding is over OLA's SignalR hub and isn't built yet, so you
+  still bid in the OLA app. The handler logs the raw item field names once (INFO "OLA item fields") to finalise mapping.
+
+## 1.6.3
+- eBay (official API): cards now get the watcher count (WatchCount) and the full-size picture instead of the small
+  gallery thumbnail, so API mode fills every field on the Following / Watching cards once your keys work.
+
 ## 1.6.2
 - eBay cookie-mode Following/Watching cards now recover full item details when My eBay page blocks are sparse
   (fixes placeholder titles like `EDIT_NOTE` and blank bid/clock fields).

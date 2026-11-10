@@ -120,6 +120,7 @@ from . import packs as packs_mod
 from .sites import govauctions as ga
 from .sites import ebay as eb
 from .sites import macbid as mb
+from .sites import ola as ola
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1131,6 +1132,10 @@ class EbayCoordinator(AuctionWatcherCoordinator):
         self._timed = TimedSnapshot()
         self._backoff_until = 0.0
         self._ebay_user = entry.data.get(CONF_EBAY_USER) or ""
+        self._source_mode = "init"
+        self._last_error = ""
+        self._last_success = 0.0
+        self._last_fill_count = 0
 
     @property
     def opportunities(self) -> list[str]:
@@ -1143,6 +1148,8 @@ class EbayCoordinator(AuctionWatcherCoordinator):
         raise SiteError("Bidding isn't available for eBay")
 
     def _mine_due(self, now: float) -> bool:
+        if any(self._needs_fill(s) for s in self._mine.values()):
+            return not self._mine_at or now - self._mine_at >= 30
         lefts = [s.ends_at.timestamp() - now for s in self._mine.values() if s.status == STATUS_LIVE and s.ends_at]
         return not self._mine_at or now - self._mine_at >= mb.lot_refresh_seconds(min(lefts) if lefts else None)
 
@@ -1151,6 +1158,18 @@ class EbayCoordinator(AuctionWatcherCoordinator):
         return (not (st.title or "").strip() or st.title == "EDIT_NOTE"
                 or (st.price is None and st.ends_at is None))
 
+    @property
+    def ebay_diagnostics(self) -> dict[str, Any]:
+        return {
+            "source_mode": self._source_mode,
+            "last_error": self._last_error or None,
+            "last_success": dt_util.utc_from_timestamp(self._last_success).isoformat() if self._last_success else None,
+            "last_fill_count": self._last_fill_count,
+            "backoff_seconds": max(0, int(self._backoff_until - time.time())) if self._backoff_until else 0,
+            "has_api_keys": bool(getattr(self.client, "has_api_keys", False)),
+            "has_cookies": bool(getattr(self.client, "cookies", None)),
+        }
+
     async def _async_update_data(self) -> dict[str, AuctionState]:
         e = self.config_entry
         now = time.time()
@@ -1158,13 +1177,14 @@ class EbayCoordinator(AuctionWatcherCoordinator):
         extra = [i for i in (eb.parse_item_id(x) for x in str(self._opt(e, CONF_EXTRA_IDS, "")).replace(",", " ").split()) if i]
         try:
             if client.signed_in and now >= self._backoff_until and self._mine_due(now):
+                self._source_mode = "api-trading" if client.has_api_keys else "cookie-html"
                 if client.has_api_keys and not self._ebay_user:
                     self._ebay_user = await client.my_user_id()
                 self._mine = await client.my_ebay(self._ebay_user, now)
                 if not client.has_api_keys:
                     filled = 0
                     for item_id, st in list(self._mine.items()):
-                        if not self._needs_fill(st) or filled >= 4:
+                        if not self._needs_fill(st) or filled >= 20:
                             continue
                         cached = self._items.get(item_id)
                         if cached and now - cached[0] < 300:
@@ -1180,7 +1200,12 @@ class EbayCoordinator(AuctionWatcherCoordinator):
                         })
                         self._mine[item_id] = full
                         filled += 1
+                    self._last_fill_count = filled
+                    if filled:
+                        self._source_mode = "cookie-html+item-fill"
                 self._mine_at = now
+                self._last_success = now
+                self._last_error = ""
             for item_id in extra:
                 if item_id in self._mine or now < self._backoff_until:
                     continue
@@ -1196,10 +1221,13 @@ class EbayCoordinator(AuctionWatcherCoordinator):
                     _LOGGER.warning("eBay item %s: %s", item_id, err)
         except eb.RateLimited:
             self._backoff_until = now + 120
+            self._last_error = "rate_limited"
             _LOGGER.info("eBay asked to slow down; using last known data for 2 minutes")
         except AuthError as err:
+            self._last_error = str(err)
             raise ConfigEntryAuthFailed(str(err)) from err
         except SiteError as err:
+            self._last_error = str(err)
             raise UpdateFailed(str(err)) from err
         finally:
             if client.user_auth_changed:
@@ -1212,9 +1240,85 @@ class EbayCoordinator(AuctionWatcherCoordinator):
             if item_id not in states and item_id in extra:
                 if st.ends_at:
                     st.status = STATUS_LIVE if st.ends_at.timestamp() > now else STATUS_ENDED
+                st.extra.setdefault("source_mode", self._source_mode)
                 states[item_id] = st
         states = await self._apply_keep_ended(states, now)
+        for st in states.values():
+            st.extra.setdefault("source_mode", self._source_mode)
 
+        events, self._timed = evaluate_timed(
+            states, self.rules, self._timed, now,
+            ending_minutes=int(self._opt(e, CONF_ENDING_MINUTES, DEFAULT_ENDING_MINUTES)),
+        )
+        for kind, data in events:
+            if data.get("ends_at"):
+                data["ends_local"] = human_time(dt_util.as_local(dt_util.parse_datetime(data["ends_at"])))
+            self._emit(kind, data)
+
+        seconds = choose_timed_interval(
+            states, now,
+            fast=int(self._opt(e, CONF_FAST_INTERVAL, DEFAULT_FAST_INTERVAL)),
+            idle_minutes=int(self._opt(e, CONF_IDLE_INTERVAL, DEFAULT_IDLE_INTERVAL)),
+        )
+        self.mode = "fast" if seconds <= 60 else ("watching" if seconds <= 15 * 60 else "idle")
+        self.update_interval = timedelta(seconds=seconds)
+        return states
+
+
+class OlaCoordinator(AuctionWatcherCoordinator):
+    """OLA (olabid.com) via its app API: your watchlist, winning items and bid history.
+    Read-only for now (bidding is over OLA's SignalR hub, not built yet)."""
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, client: "ola.OlaClient") -> None:
+        super().__init__(hass, entry, client)  # type: ignore[arg-type]
+        self._mine: dict[str, AuctionState] = {}
+        self._timed = TimedSnapshot()
+        self._backoff_until = 0.0
+
+    @property
+    def opportunities(self) -> list[str]:
+        return []
+
+    def dollars_used(self, since: float, exclude: str | None = None) -> float:
+        return 0.0  # no bidding from here yet, so nothing counts toward the spending cap
+
+    async def async_quick_bid(self, auction_id: str) -> str:
+        raise SiteError("Bidding on OLA from here isn't built yet; bid in the OLA app")
+
+    async def async_book(self, auction_id: str, count: int, max_price: float | None = None) -> int:
+        raise SiteError("Bidding on OLA from here isn't built yet; bid in the OLA app")
+
+    async def async_cancel(self, auction_id: str) -> None:
+        raise SiteError("Bidding on OLA from here isn't built yet")
+
+    async def _async_update_data(self) -> dict[str, AuctionState]:
+        e = self.config_entry
+        now = time.time()
+        client: ola.OlaClient = self.client  # type: ignore[assignment]
+        try:
+            watch = await client.watchlist(now)
+            winning = await client.winning(now)
+            try:
+                history = await client.bids_history(now)
+            except SiteError as err:
+                _LOGGER.debug("OLA bid history not loaded: %s", err)
+                history = {}
+            self._mine = ola.build_states(watch, winning, history)
+            try:
+                acct = await client.account()
+                self.username = ola._first(acct, "username", "firstName", "name", "email") or self.username
+            except SiteError:
+                pass
+        except AuthError as err:
+            raise ConfigEntryAuthFailed(str(err)) from err
+        except SiteError as err:
+            raise UpdateFailed(str(err)) from err
+        finally:
+            if client.auth_changed:
+                client.auth_changed = False
+                self.hass.config_entries.async_update_entry(e, data={**e.data, CONF_AUTH: client.auth})
+
+        states = await self._apply_keep_ended(dict(self._mine), now)
         events, self._timed = evaluate_timed(
             states, self.rules, self._timed, now,
             ending_minutes=int(self._opt(e, CONF_ENDING_MINUTES, DEFAULT_ENDING_MINUTES)),

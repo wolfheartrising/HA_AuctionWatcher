@@ -62,6 +62,14 @@
         "data": {
           "signed_in_address": "Address of the page you landed on"
         }
+      },
+      "ola": {
+        "title": "OLA sign-in",
+        "description": "Sign in with your OLA (olabid.com) email and password. Read-only for now: your watchlist, winning items and bids show on the Auctions page; you still bid in the OLA app.",
+        "data": {
+          "email": "Email",
+          "password": "Password"
+        }
       }
     },
     "error": {
