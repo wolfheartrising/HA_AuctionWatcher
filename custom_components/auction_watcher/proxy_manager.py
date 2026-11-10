@@ -30,6 +30,11 @@ _LOGGER = logging.getLogger(__name__)
 
 DATA_KEY = f"{DOMAIN}_proxy"
 AGREE, DECLINE = "/aw_agree", "/aw_no"
+HELP_TEXT = ("Hi {name}! This bot bids on auctions for you, but only after you agree.\n\n"
+             "• When I ask about an item, tap an amount (or Other amount), then \"I agree to pay\". Nothing is bid before that.\n"
+             "• If you're outbid, tap a higher amount or Stop.\n"
+             "• Items I'm only watching for you: tap \"I'd like to bid\" if you want in.\n\n"
+             "/items: what's open for you\n/stop: stop an item (I'll ask which if there are several)\n/help: this message")
 RELAYED = {"bid_placed", "bid_failed", "outbid", "ending_soon", "won", "ended", "bid_limit"}
 
 
@@ -49,6 +54,7 @@ class ProxyManager:
     async def async_load(self) -> None:
         d = await self._store.async_load() or {}
         self.enabled = bool(d.get("enabled"))
+        self.bot_entry: str | None = d.get("bot_entry")  # which Telegram bot (HA config entry) talks to them
         self.people = [Person.from_dict(p) for p in d.get("people", [])]
         self.requests = {r.key: r for r in (ProxyRequest.from_dict(v) for v in (d.get("requests") or {}).values())}
         self._unsubs = [self.hass.bus.async_listen("telegram_text", self._on_text),
@@ -60,7 +66,7 @@ class ProxyManager:
             coord.async_update_listeners()  # item cards show the request's state
         cutoff = time.time() - 30 * 86400
         self.requests = {k: r for k, r in self.requests.items() if r.state in OPEN or r.created >= cutoff}
-        await self._store.async_save({"enabled": self.enabled, "people": [to_dict(p) for p in self.people],
+        await self._store.async_save({"enabled": self.enabled, "bot_entry": self.bot_entry, "people": [to_dict(p) for p in self.people],
                                       "requests": {k: to_dict(r) for k, r in self.requests.items()}})
 
     @callback
@@ -83,6 +89,15 @@ class ProxyManager:
                 out.setdefault(e.data.get(CONF_SITE, SITE_GOVAUCTIONS), e.runtime_data)
         return out
 
+    def bots(self) -> list[dict[str, str]]:
+        return [{"entry_id": e.entry_id, "title": e.title} for e in self.hass.config_entries.async_entries("telegram_bot")]
+
+    def _bot(self) -> dict[str, str]:
+        """Send through the bot chosen in Settings (needed when Home Assistant has more than one bot)."""
+        if self.bot_entry and any(b["entry_id"] == self.bot_entry for b in self.bots()):
+            return {"config_entry_id": self.bot_entry}
+        return {}
+
     def telegram_ready(self) -> bool:
         return self.hass.services.has_service("telegram_bot", "send_message")
 
@@ -90,7 +105,7 @@ class ProxyManager:
         """A message headed "🔔 Auction Watcher"; with the item's picture when there is one."""
         target = int(chat_id) if str(chat_id).lstrip("-").isdigit() else chat_id
         body = f"{HEADER}\n\n{text}"
-        extra: dict[str, Any] = {"target": [target]}
+        extra: dict[str, Any] = {"target": [target], **self._bot()}
         if keyboard:
             extra["inline_keyboard"] = keyboard
         if photo and photo.startswith("https://") and len(body) <= 1000:
@@ -264,14 +279,29 @@ class ProxyManager:
         if by_them:
             self._tell_owner(person, req, f"{name} stopped it. " + msg)
 
-    async def async_set(self, enabled: bool | None = None, add: dict[str, Any] | None = None, remove: str | None = None) -> None:
+    async def async_set(self, enabled: bool | None = None, add: dict[str, Any] | None = None, remove: str | None = None,
+                        bot_entry: str | None = None, change: dict[str, Any] | None = None) -> None:
         if enabled is not None:
             self.enabled = enabled
+        if bot_entry is not None:
+            self.bot_entry = bot_entry or None
         if add:
             p = Person.from_dict(add)
             if not p.name or not p.chat_id.lstrip("-").isdigit():
                 raise SiteError("A person needs a name and their numeric Telegram chat id")
             self.people.append(p)
+        if change:
+            # Rename or fix someone's chat id; their open items stay with them
+            p = self._person(person_id=str(change.get("id") or ""))
+            if p is None:
+                raise SiteError("That person isn't on the list")
+            name = clean_name(change.get("name")) if change.get("name") is not None else p.name
+            chat = str(change.get("chat_id") if change.get("chat_id") is not None else p.chat_id).strip()
+            if not name or not chat.lstrip("-").isdigit():
+                raise SiteError("A person needs a name and their numeric Telegram chat id")
+            if any(o.chat_id == chat and o.id != p.id for o in self.people):
+                raise SiteError("Someone else on the list already uses that chat")
+            p.name, p.chat_id = name, chat
         if remove:
             for req in [r for r in self.requests.values() if r.person_id == remove]:
                 await self._stop(req, by_them=False)
@@ -279,11 +309,15 @@ class ProxyManager:
         await self._save()
 
     # ---------------- from Telegram
-    async def _on_text(self, event: Event) -> None:
+    def _note_seen(self, event: Event) -> None:
+        """Remember who messaged the bot (for the person dropdown); kept in memory only."""
         cid = event.data.get("chat_id")
         if cid is not None and len(self._seen) < 50:
             name = " ".join(x for x in (event.data.get("from_first"), event.data.get("from_last")) if x)
             self._seen[str(cid)] = name or str(cid)
+
+    async def _on_text(self, event: Event) -> None:
+        self._note_seen(event)
         if not self.enabled:
             return
         person = self._person(chat_id=event.data.get("chat_id"))
@@ -511,13 +545,33 @@ class ProxyManager:
                            amount_rows(req, live["min_next"] if live else None))
 
     async def _on_command(self, event: Event) -> None:
-        """/items (or /auctions): your open items, each with its own buttons."""
-        if not self.enabled or str(event.data.get("command") or "").split("@")[0] not in ("/items", "/auctions"):
+        """Bot menu commands: /items (or /auctions), /stop, /help, /start."""
+        self._note_seen(event)  # pressing Start counts: they show up in the person dropdown
+        command = str(event.data.get("command") or "").split("@")[0].lower()
+        if not self.enabled or command not in ("/items", "/auctions", "/stop", "/help", "/start"):
             return
         person = self._person(chat_id=event.data.get("chat_id"))
         if person is None:
+            if command == "/start" and event.data.get("chat_id") is not None:
+                name = event.data.get("from_first") or "there"
+                await self._tg(str(event.data["chat_id"]),
+                               f"Hi {name}! You're not set up yet. Ask the person who runs this bot to add you; "
+                               "after that, send /help to see how it works.")
+            return
+        if command in ("/help", "/start"):
+            await self._tg(person.chat_id, HELP_TEXT.format(name=person.name))
             return
         mine = self._open_for(person)
+        if command == "/stop":
+            if not mine:
+                await self._tg(person.chat_id, "Nothing open for you right now.")
+            elif len(mine) == 1:
+                await self._stop(mine[0], by_them=True)
+            else:
+                rows = [kb_row([(f"Stop: {short(r.title)}", f"{STOP} {r.id}")]) for r in mine]
+                rows.append(kb_row([("Stop all", STOP_ALL)]))
+                await self._tg(person.chat_id, "Which one should I stop?", rows)
+            return
         if not mine:
             await self._tg(person.chat_id, "Nothing open for you right now.")
             return
@@ -534,12 +588,13 @@ class ProxyManager:
     async def _answer(self, event: Event, text: str) -> None:
         try:
             await self.hass.services.async_call("telegram_bot", "answer_callback_query",
-                                                {"callback_query_id": event.data.get("id"), "message": text}, blocking=True)
+                                                {"callback_query_id": event.data.get("id"), "message": text, **self._bot()},
+                                                blocking=True)
             msg = event.data.get("message") or {}
             if msg.get("message_id"):
                 await self.hass.services.async_call("telegram_bot", "edit_replymarkup",
                                                     {"message_id": msg["message_id"], "chat_id": event.data.get("chat_id"),
-                                                     "inline_keyboard": []}, blocking=True)
+                                                     "inline_keyboard": [], **self._bot()}, blocking=True)
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("Telegram button answer failed: %s", err)
 
@@ -596,6 +651,8 @@ class ProxyManager:
         plus chats that messaged the bot since Home Assistant started."""
         out: dict[str, dict[str, str]] = {}
         for e in self.hass.config_entries.async_entries("telegram_bot"):
+            if self.bot_entry and e.entry_id != self.bot_entry:
+                continue
             for sub in (getattr(e, "subentries", None) or {}).values():
                 cid = (sub.data or {}).get("chat_id")
                 if cid is not None:
@@ -619,6 +676,7 @@ class ProxyManager:
 
     def view(self) -> dict[str, Any]:
         return {"enabled": self.enabled, "telegram_ready": self.telegram_ready(), "chats": self.chats(),
+                "bots": self.bots(), "bot_entry": self.bot_entry,
                 "people": [to_dict(p) for p in self.people],
                 "requests": [{**to_dict(r), "person": (self._person(r.person_id) or Person("?", "")).name}
                              for r in sorted(self.requests.values(), key=lambda r: -r.created)][:30]}
@@ -643,8 +701,10 @@ def ws_view(hass: HomeAssistant, connection: Any, msg: dict[str, Any]) -> None:
     vol.Required("type"): "auction_watcher/proxy/change",
     vol.Required("action"): vol.In(["set", "ask", "cancel"]),
     vol.Optional("enabled"): bool,
+    vol.Optional("bot_entry"): str,
     vol.Optional("add"): {vol.Required("name"): str, vol.Required("chat_id"): vol.Coerce(str)},
     vol.Optional("remove"): str,
+    vol.Optional("change"): {vol.Required("id"): str, vol.Optional("name"): str, vol.Optional("chat_id"): vol.Coerce(str)},
     vol.Optional("lot_id"): vol.Coerce(str),
     vol.Optional("person_id"): str,
     vol.Optional("hard_max"): vol.All(vol.Coerce(int), vol.Range(min=0, max=100000)),
@@ -660,7 +720,7 @@ async def ws_change(hass: HomeAssistant, connection: Any, msg: dict[str, Any]) -
         return
     try:
         if msg["action"] == "set":
-            await p.async_set(msg.get("enabled"), msg.get("add"), msg.get("remove"))
+            await p.async_set(msg.get("enabled"), msg.get("add"), msg.get("remove"), msg.get("bot_entry"), msg.get("change"))
         elif msg["action"] == "ask":
             await p.async_ask(msg["site"], msg.get("lot_id", ""), msg.get("person_id", ""), int(msg.get("hard_max") or 0), msg["mode"])
         else:

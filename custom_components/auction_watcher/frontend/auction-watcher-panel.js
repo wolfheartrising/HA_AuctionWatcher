@@ -10,7 +10,7 @@
  * until you save it, and the page re-draws from those drafts.
  */
 
-const PANEL_VERSION = "1.5.3";  // must match const.py VERSION (a test checks)
+const PANEL_VERSION = "1.5.7";  // must match const.py VERSION (a test checks)
 const SITE_NAMES = { govauctions: "GovAuctions", macbid: "Mac.bid", ebay: "eBay" };
 // What the per-auction spending cap is called on each site
 const LIMIT_LABEL = { govauctions: "Max bids", macbid: "Max bid ($)", ebay: "Max price ($)" };
@@ -476,12 +476,22 @@ class AuctionWatcherPanel extends HTMLElement {
       if (!el.checked) list.splice(list.indexOf(v), 1);
       const btn = slot.querySelector("[data-gact=save]"); if (btn) btn.disabled = false;
     }));
-    slot.querySelectorAll("[data-pact]").forEach((el) => el.addEventListener(el.type === "checkbox" ? "change" : "click", async () => {
+    slot.querySelectorAll("[data-pact]").forEach((el) => el.addEventListener(el.type === "checkbox" || el.tagName === "SELECT" ? "change" : "click", async () => {
       const act = el.dataset.pact, msg = { type: "auction_watcher/proxy/change", action: "set" };
       if (act === "enable") msg.enabled = el.checked;
+      if (act === "bot") msg.bot_entry = el.value;
+      if (act === "edit") {
+        const p = this._pv.people.find((x) => x.id === el.dataset.pid);
+        if (!p) return;
+        const name = prompt("Name:", p.name);
+        if (name === null) return;
+        const chat = prompt("Telegram chat id (the same number works with every bot):", p.chat_id);
+        if (chat === null) return;
+        msg.change = { id: p.id, name: name.trim(), chat_id: chat.trim() };
+      }
       if (act === "remove") {
         const p = this._pv.people.find((x) => x.id === el.dataset.pid);
-        if (!confirm(`Remove ${p?.name || "this person"}? Open requests for them stop.`)) return;
+        if (!confirm(`Remove ${p?.name || "this person"}? Open requests for them stop.\n\n(To switch bots or fix their chat id, use ✎ instead: their items stay.)`)) return;
         msg.remove = el.dataset.pid;
       }
       if (act === "add") {
@@ -533,7 +543,14 @@ class AuctionWatcherPanel extends HTMLElement {
       <label class="chk"><input type="checkbox" data-pact="enable" ${v.enabled ? "checked" : ""}> Let me bid for people on this list
         (Mac.bid and GovAuctions, from my account) or keep them posted on any item</label>
       ${v.enabled && !v.telegram_ready ? `<div class="warn">Needs Home Assistant's Telegram bot integration (telegram_bot) for the questions and "I agree" buttons.</div>` : ""}
+      ${v.enabled && (v.bots || []).length ? `<label class="chk">Telegram bot
+        <select data-pact="bot">
+          ${(v.bots.length > 1 || v.bot_entry) ? "" : `<option value="">${esc(v.bots[0].title)}</option>`}
+          ${v.bots.length > 1 || v.bot_entry ? `<option value="" ${v.bot_entry ? "" : "selected"}>choose…</option>` + v.bots.map((b) => `<option value="${esc(b.entry_id)}" ${b.entry_id === v.bot_entry ? "selected" : ""}>${esc(b.title)}</option>`).join("") : ""}
+        </select></label>
+        ${v.bots.length > 1 && !v.bot_entry ? `<div class="warn">You have ${v.bots.length} Telegram bots: pick the one these people talk to (it must use Polling or Webhooks so their replies reach Home Assistant).</div>` : ""}` : ""}
       ${v.enabled ? `<div class="gs-list">${v.people.map((p) => `<span class="chk gs-item">💬 ${esc(p.name)} <span class="muted">${esc(p.chat_id)}</span>
+          <button class="schip-t" data-pact="edit" data-pid="${esc(p.id)}" title="Rename ${esc(p.name)} or fix their chat id (their items stay)">✎</button>
           <button class="schip-x" data-pact="remove" data-pid="${esc(p.id)}" title="Remove ${esc(p.name)}">×</button></span>`).join("")
           || `<span class="muted">Nobody yet.</span>`}</div>
         <div class="sadd" style="border:0;padding:0">

@@ -124,6 +124,11 @@ people on your list are listened to. Bids are placed from **your** account (like
 - **Just keep them posted (any site):** they get a message now, when it's about to end, and when it ends. Nothing is bid.
   If they reply with an amount (`50`, or `40 $25` on GovAuctions), you get an alert and the card shows "🙋 wants you to bid";
   set your max and tap *Ask them to confirm*: they go straight to "I agree to pay" (eBay: you bid by hand).
+- **A dedicated bot** is a good idea: create one with @BotFather, add it in Home Assistant's Telegram bot integration
+  with **Polling** (Broadcast can't receive replies; Webhooks needs HA reachable from the internet), add each person's
+  chat as an allowed chat, then pick that bot under Settings → For others.
+- **Bot menu:** in @BotFather → your bot → Edit Commands, send:
+  `items - What's open for you` / `stop - Stop an item` / `help - How this works` (one per line).
 - **In Telegram, everything has buttons tied to its item:** amounts (Mac.bid's real steps up to your max, or bid counts
   on GovAuctions), *Other amount* (the next number they type goes to that item), *No thanks* / *Stop*; outbid messages
   offer raises; "just watching" messages offer *I'd like to bid* / *Stop updates*. A typed number or "stop" with several

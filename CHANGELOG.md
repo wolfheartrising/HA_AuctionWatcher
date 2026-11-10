@@ -6,6 +6,22 @@ The section for a version becomes its release notes, so HACS shows them under "U
 After updating: restart Home Assistant if Python changed, then reload the Auctions page (it offers a Reload button
 when it's older than the plugin).
 
+## 1.5.7
+- For others: ✎ next to each person to rename them or fix their chat id; their open items stay with them. (Switching
+  everyone to another bot is just the Telegram bot picker: chat ids are the same with every bot.)
+
+## 1.5.6
+- Pressing **Start** before being added gets a "you're not set up yet" reply, and that person now appears in the
+  Settings → For others dropdown ("messaged the bot").
+
+## 1.5.5
+- For others bot commands: **/items**, **/stop** (asks which if several), **/help**, and a short explanation when they
+  press **Start**. Suggested BotFather command list in the README.
+
+## 1.5.4
+- For others: choose which **Telegram bot** talks to people (Settings → For others), so a dedicated "auctions" bot can be
+  used alongside your main one. All messages and buttons go through it, and the chat list shows only its allowed chats.
+
 ## 1.5.3
 - Quick bids: **+1 bid** on GovAuctions cards (one bid, placed right away: stake a claim before the entry limit) and
   **Bid $X (next step)** on Mac.bid cards (the smallest bid Mac.bid accepts, read live when you tap). One confirmation;
