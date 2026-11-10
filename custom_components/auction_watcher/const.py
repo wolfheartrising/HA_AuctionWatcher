@@ -52,6 +52,7 @@ EVENT_OVER_MAX = f"{DOMAIN}_over_max"
 EVENT_PICKUP = f"{DOMAIN}_pickup_reminder"
 EVENT_PACK = f"{DOMAIN}_good_point_pack"
 EVENT_SEARCH = f"{DOMAIN}_search_matches"
+EVENT_SEARCHES_UPDATED = f"{DOMAIN}_searches_updated"  # tells the open Auctions page to fetch (no polling)
 EVENT_BUDGET = f"{DOMAIN}_budget_reached"
 CONF_PACKS_ENABLED = "scan_point_packs"
 CONF_WEEKLY_BUDGET = "weekly_budget_points"  # 0 = no budget

@@ -17,7 +17,7 @@ import voluptuous as vol
 from homeassistant.components import websocket_api
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.event import async_call_later, async_track_time_change
+from homeassistant.helpers.event import async_call_later, async_track_time_change, async_track_time_interval
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
@@ -30,12 +30,13 @@ from .const import (
     DEFAULT_ALERT_KINDS,
     DOMAIN,
     EVENT_SEARCH,
+    EVENT_SEARCHES_UPDATED,
     SITE_EBAY,
     SITE_GOVAUCTIONS,
     SITE_MACBID,
     STORAGE_VERSION,
 )
-from .searches import SITE_ORDER, Hit, SavedSearch, add_search, filter_hits, hit_dict, new_matches, to_dict
+from .searches import SITE_ORDER, Hit, SavedSearch, add_search, filter_hits, hit_dict, new_matches, title_matches, to_dict
 from .sites import macbid as mb
 from .sites.base import SiteError
 
@@ -44,6 +45,7 @@ _LOGGER = logging.getLogger(__name__)
 DATA_KEY = f"{DOMAIN}_searches"
 SITE_LABELS = {SITE_GOVAUCTIONS: "GovAuctions", SITE_MACBID: "Mac.bid", SITE_EBAY: "eBay"}
 DEFAULT_RUN_TIME = "08:00"
+REFRESH_CHOICES = (0, 1, 2, 3, 6, 12)  # extra runs every N hours (0 = only the daily run)
 IMPORT_EVERY = 3600          # re-read your Mac.bid keywords at most hourly when the page opens
 BUILDINGS_EVERY = 86400
 
@@ -67,6 +69,8 @@ class SearchManager:
         self.errors: dict[str, str] = {}
         self.last_run: float | None = None
         self.run_time = DEFAULT_RUN_TIME
+        self.refresh_hours = 0
+        self._unsub_interval = None
         self.mb_choice: dict[str, bool] | None = None   # building name -> on; None = use my Mac.bid account's list
         self.mb_all: list[dict[str, Any]] = []
         self.mb_account: list[str] = []
@@ -76,6 +80,7 @@ class SearchManager:
         self._rerun = None
         self._lock = asyncio.Lock()
         self.running = False
+        self.version = 1  # bumped on every change, so the page only downloads results when something changed
 
     # ---------------- storage / schedule
     async def async_load(self) -> None:
@@ -87,15 +92,24 @@ class SearchManager:
         self.errors = d.get("errors", {})
         self.last_run = d.get("last_run")
         self.run_time = d.get("run_time", DEFAULT_RUN_TIME)
+        self.refresh_hours = d.get("refresh_hours", 0) if d.get("refresh_hours", 0) in REFRESH_CHOICES else 0
         self.mb_choice = d.get("mb_choice")
         self._schedule()
 
     async def _save(self) -> None:
+        self.version += 1
         await self._store.async_save({
             "searches": [to_dict(s) for s in self.searches], "seen": self.seen, "results": self.results,
             "excluded": self.excluded, "errors": self.errors, "last_run": self.last_run,
-            "run_time": self.run_time, "mb_choice": self.mb_choice,
+            "run_time": self.run_time, "mb_choice": self.mb_choice, "refresh_hours": self.refresh_hours,
         })
+        self._changed(bump=False)
+
+    def _changed(self, bump: bool = True) -> None:
+        """Something the page shows changed: tell an open Auctions page to fetch it."""
+        if bump:
+            self.version += 1
+        self.hass.bus.async_fire(EVENT_SEARCHES_UPDATED, {"version": self.version})
 
     def _schedule(self) -> None:
         if self._unsub:
@@ -106,13 +120,21 @@ class SearchManager:
             await self.async_run()
 
         self._unsub = async_track_time_change(self.hass, _daily, hour=hour, minute=minute, second=0)
+        if self._unsub_interval:
+            self._unsub_interval()
+            self._unsub_interval = None
+        if self.refresh_hours:
+            async def _again(_now: datetime) -> None:
+                await self.async_run()
+
+            self._unsub_interval = async_track_time_interval(self.hass, _again, timedelta(hours=self.refresh_hours))
 
     @callback
     def stop(self) -> None:
-        for unsub in (self._unsub, self._rerun):
+        for unsub in (self._unsub, self._rerun, self._unsub_interval):
             if unsub:
                 unsub()
-        self._unsub = self._rerun = None
+        self._unsub = self._rerun = self._unsub_interval = None
 
     def next_run(self) -> str:
         hour, minute = _parse_time(self.run_time)
@@ -120,6 +142,9 @@ class SearchManager:
         nxt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if nxt <= now:
             nxt += timedelta(days=1)
+        if self.refresh_hours and self.last_run:
+            sooner = dt_util.as_local(dt_util.utc_from_timestamp(self.last_run)) + timedelta(hours=self.refresh_hours)
+            nxt = min(nxt, max(sooner, now))
         return nxt.isoformat()
 
     # ---------------- accounts
@@ -177,10 +202,12 @@ class SearchManager:
             return
         async with self._lock:
             self.running = True
+            self._changed()
             try:
                 await self._run(only)
             finally:
                 self.running = False
+                self._changed()
 
     async def _run(self, only: str | None) -> None:
         coords = self._coordinators()
@@ -202,7 +229,8 @@ class SearchManager:
                         found, self.excluded[s.id] = await coord.client.search(s.keyword, buildings or None)
                     else:
                         found = await coord.client.search(s.keyword)
-                    hits += filter_hits([Hit(site=site, **h) for h in found], s.max_price)
+                    hits += filter_hits([Hit(site=site, **h) for h in found], s.max_price,
+                                        s.keyword if s.title_only else None)
                 except SiteError as err:
                     errors[site] = str(err)
                     _LOGGER.warning("Saved search %r on %s failed: %s", s.keyword, site, err)
@@ -252,8 +280,9 @@ class SearchManager:
             _LOGGER.warning("Couldn't send saved-search alert to %s: %s", data.get("entity_id") or f"{domain}.{service}", err)
 
     # ---------------- changes from the page
-    async def async_add(self, keyword: str, sites: list[str] | None, max_price: float, save_to_macbid: bool) -> SavedSearch:
-        s = add_search(self.searches, keyword, sites=sites or None, max_price=max_price)
+    async def async_add(self, keyword: str, sites: list[str] | None, max_price: float, save_to_macbid: bool,
+                        title_only: bool = True) -> SavedSearch:
+        s = add_search(self.searches, keyword, sites=sites or None, max_price=max_price, title_only=title_only)
         if save_to_macbid:
             client = self._macbid()
             if client is None:
@@ -282,10 +311,13 @@ class SearchManager:
             d.pop(search_id, None)
         await self._save()
 
-    async def async_update(self, search_id: str, sites: list[str] | None, max_price: float | None) -> None:
+    async def async_update(self, search_id: str, sites: list[str] | None, max_price: float | None,
+                           title_only: bool | None = None) -> None:
         s = next((x for x in self.searches if x.id == search_id), None)
         if s is None:
             return
+        if title_only is not None:
+            s.title_only = title_only
         if sites is not None:
             s.sites = [x for x in SITE_ORDER if x in sites]
         if max_price is not None:
@@ -294,10 +326,15 @@ class SearchManager:
         self.hass.async_create_task(self.async_run(only=s.id))
 
     async def async_settings(self, run_time: str | None = None, building: str | None = None,
-                             on: bool | None = None, use_account: bool = False) -> None:
+                             on: bool | None = None, use_account: bool = False, refresh_hours: int | None = None) -> None:
         if run_time:
             _parse_time(run_time)
             self.run_time = run_time
+            self._schedule()
+        if refresh_hours is not None:
+            if refresh_hours not in REFRESH_CHOICES:
+                raise ValueError("Pick 0, 1, 2, 3, 6 or 12 hours")
+            self.refresh_hours = refresh_hours
             self._schedule()
         if use_account:
             self.mb_choice = None
@@ -327,8 +364,22 @@ class SearchManager:
         await self._import()
         coords = self._coordinators()
         merged: dict[str, dict[str, Any]] = {}
+        gone = dt_util.utcnow() - timedelta(minutes=5)
+
+        by_id = {s.id: s for s in self.searches}
+
+        def ended(h: dict[str, Any], sid: str) -> bool:
+            """Hidden: finished, or (title-only searches) the title doesn't have the words."""
+            s = by_id.get(sid)
+            if s and s.title_only and not title_matches(h.get("title") or "", s.keyword):
+                return True
+            when = dt_util.parse_datetime(h["ends_at"]) if h.get("ends_at") else None
+            return bool(when and when < gone)
+
         for s in self.searches:
             for h in self.results.get(s.id, []):
+                if ended(h, s.id):
+                    continue
                 cur = merged.get(h["key"])
                 if cur is None:
                     merged[h["key"]] = {**h, "searches": [s.id]}
@@ -342,14 +393,16 @@ class SearchManager:
              for b in self.mb_all),
             key=lambda b: (not b["account"], not b["on"], b["name"]))
         return {
-            "searches": [{**to_dict(s), "count": len(self.results.get(s.id, [])),
-                          "new": sum(1 for h in self.results.get(s.id, []) if h.get("new")),
+            "version": self.version,
+            "searches": [{**to_dict(s), "count": sum(1 for h in self.results.get(s.id, []) if not ended(h, s.id)),
+                          "new": sum(1 for h in self.results.get(s.id, []) if h.get("new") and not ended(h, s.id)),
                           "excluded": self.excluded.get(s.id, 0)} for s in self.searches],
             "results": sorted(merged.values(), key=lambda h: h.get("ends_at") or "9999"),
             "errors": self.errors,
             "last_run": self.last_run,
             "next_run": self.next_run(),
             "run_time": self.run_time,
+            "refresh_hours": self.refresh_hours,
             "running": self.running,
             "sites": [x for x in SITE_ORDER if x in coords],
             "macbid_buildings": buildings,
@@ -366,12 +419,16 @@ def _manager(hass: HomeAssistant, connection: Any, msg: dict[str, Any]) -> Searc
     return m
 
 
-@websocket_api.websocket_command({vol.Required("type"): "auction_watcher/searches"})
+@websocket_api.websocket_command({vol.Required("type"): "auction_watcher/searches", vol.Optional("version"): int})
 @websocket_api.require_admin
 @websocket_api.async_response
 async def ws_view(hass: HomeAssistant, connection: Any, msg: dict[str, Any]) -> None:
-    if (m := _manager(hass, connection, msg)) is not None:
-        connection.send_result(msg["id"], await m.async_view())
+    if (m := _manager(hass, connection, msg)) is None:
+        return
+    if msg.get("version") == m.version:  # the page already has this: don't resend hundreds of results
+        connection.send_result(msg["id"], {"version": m.version, "unchanged": True})
+        return
+    connection.send_result(msg["id"], await m.async_view())
 
 
 @websocket_api.websocket_command({
@@ -382,10 +439,12 @@ async def ws_view(hass: HomeAssistant, connection: Any, msg: dict[str, Any]) -> 
     vol.Optional("sites"): [vol.In(list(SITE_ORDER))],
     vol.Optional("max_price"): vol.All(vol.Coerce(float), vol.Range(min=0)),
     vol.Optional("save_to_macbid", default=False): bool,
+    vol.Optional("title_only"): bool,
     vol.Optional("run_time"): str,
     vol.Optional("building"): str,
     vol.Optional("on"): bool,
     vol.Optional("use_account", default=False): bool,
+    vol.Optional("refresh_hours"): vol.Coerce(int),
 })
 @websocket_api.require_admin
 @websocket_api.async_response
@@ -397,15 +456,17 @@ async def ws_change(hass: HomeAssistant, connection: Any, msg: dict[str, Any]) -
         if action == "add":
             if not (msg.get("keyword") or "").strip():
                 raise ValueError("Type a keyword")
-            await m.async_add(msg["keyword"], msg.get("sites"), msg.get("max_price") or 0.0, msg["save_to_macbid"])
+            await m.async_add(msg["keyword"], msg.get("sites"), msg.get("max_price") or 0.0, msg["save_to_macbid"],
+                              msg.get("title_only", True))
         elif action == "remove":
             await m.async_remove(msg.get("search_id", ""))
         elif action == "update":
-            await m.async_update(msg.get("search_id", ""), msg.get("sites"), msg.get("max_price"))
+            await m.async_update(msg.get("search_id", ""), msg.get("sites"), msg.get("max_price"), msg.get("title_only"))
         elif action == "run":
             await m.async_run(only=msg.get("search_id"))
         else:
-            await m.async_settings(msg.get("run_time"), msg.get("building"), msg.get("on"), msg["use_account"])
+            await m.async_settings(msg.get("run_time"), msg.get("building"), msg.get("on"), msg["use_account"],
+                                   msg.get("refresh_hours"))
     except (SiteError, ValueError) as err:
         connection.send_error(msg["id"], "failed", str(err) or "That time isn't valid (use HH:MM)")
         return

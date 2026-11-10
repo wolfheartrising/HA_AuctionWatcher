@@ -27,6 +27,7 @@ class SavedSearch:
     keyword: str
     sites: list[str] = field(default_factory=lambda: list(SITE_ORDER))
     max_price: float = 0.0                                  # 0 = any
+    title_only: bool = True                                 # every word must be in the item's title
     sources: dict[str, str] = field(default_factory=dict)   # site -> that site's id for this saved search
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:10])
     created: float = field(default_factory=time.time)
@@ -57,7 +58,8 @@ class Hit:
 
 
 def add_search(searches: list[SavedSearch], keyword: str, sites: list[str] | None = None,
-               max_price: float = 0.0, source_site: str | None = None, source_id: str | None = None) -> SavedSearch:
+               max_price: float = 0.0, source_site: str | None = None, source_id: str | None = None,
+               title_only: bool = True) -> SavedSearch:
     """Add a search, or merge into the existing one with the same keyword (case/spacing-insensitive)."""
     k = norm(keyword)
     if not k:
@@ -74,7 +76,7 @@ def add_search(searches: list[SavedSearch], keyword: str, sites: list[str] | Non
                 s.max_price = max_price
             return s
     new = SavedSearch(keyword=keyword.strip(), sites=sorted(set(sites or SITE_ORDER), key=_site_rank),
-                      max_price=float(max_price or 0))
+                      max_price=float(max_price or 0), title_only=title_only)
     if source_site:
         new.sources[source_site] = str(source_id or "")
     searches.append(new)
@@ -85,8 +87,15 @@ def _site_rank(site: str) -> int:
     return SITE_ORDER.index(site) if site in SITE_ORDER else 99
 
 
-def filter_hits(hits: list[Hit], max_price: float) -> list[Hit]:
-    out = [h for h in hits if not max_price or h.price is None or h.price <= max_price]
+def title_matches(title: str, keyword: str) -> bool:
+    """Every word of the keyword appears in the title (sites' own searches are fuzzy)."""
+    t = norm(title)
+    return all(w in t for w in norm(keyword).split())
+
+
+def filter_hits(hits: list[Hit], max_price: float, keyword: str | None = None) -> list[Hit]:
+    out = [h for h in hits if (not max_price or h.price is None or h.price <= max_price)
+           and (not keyword or title_matches(h.title, keyword))]
     out.sort(key=lambda h: h.ends_at or "9999")
     return out[:MAX_HITS_PER_SITE]
 

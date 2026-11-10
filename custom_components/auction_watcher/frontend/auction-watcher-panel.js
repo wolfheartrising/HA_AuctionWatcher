@@ -71,6 +71,7 @@ class AuctionWatcherPanel extends HTMLElement {
     this._sd = null;    // saved searches + results (fetched from Home Assistant when that tab is open)
     this._sform = { keyword: "", max_price: "", sites: null, save_to_macbid: false };
     this._sfilter = { search: null, site: null, newOnly: false };
+    this._sLimit = 60;  // result rows drawn; "Show more" adds 60
   }
 
   set hass(hass) {
@@ -92,7 +93,7 @@ class AuctionWatcherPanel extends HTMLElement {
     this._live = setInterval(() => this._liveRefresh(), 3000);
     this._maybeRender(true);
   }
-  disconnectedCallback() { clearInterval(this._timer); clearInterval(this._live); clearInterval(this._sTimer); this._sTimer = null; }
+  disconnectedCallback() { clearInterval(this._timer); clearInterval(this._live); this._stopSearchWatch(); }
 
   _liveRefresh() {
     if (!this._hass || document.visibilityState !== "visible") return;
@@ -221,7 +222,8 @@ class AuctionWatcherPanel extends HTMLElement {
     const signature = JSON.stringify([this._tab, this._subtab, this._sort, auctions.map((a) => [a.entity_id, a.price, a.updated, a.bid_limit,
       a.auto_cancel, a.auto_rebook, a.rebook_mode, a.rebook_amount, a.max_price, a.auto_status, a.your_booked_left,
       a.mb_mode, a.mb_placed, a.mb_status, a.winning, a.has_assurance, a.mb_assurance, (a.condition_notes || []).length]),
-      accounts, this._saved, this._subtab === "packs" ? [this._packs(), this._showLocked] : null, this._tab === "searches" ? [this._sd, this._sfilter, this._serr, this._sbusy] : null, this._autoSwitch()?.state, this._autoSwitch("macbid")?.state]);
+      accounts, this._saved, this._subtab === "packs" ? [this._packs(), this._showLocked] : null,
+      this._tab === "searches" ? [this._sd?.version, !!this._sd, this._sfilter, this._sLimit, this._serr, this._sbusy] : null, this._autoSwitch()?.state, this._autoSwitch("macbid")?.state]);
     if (!force && signature === this._signature) return;
     this._signature = signature;
     this._pending = false;
@@ -268,7 +270,7 @@ class AuctionWatcherPanel extends HTMLElement {
         <button class="subtab ${this._subtab === "packs" ? "on" : ""}" data-subtab="packs">Point packs
           <span class="count">${this._packGroups().filter((g) => g.auctions.some((p) => p.open || p.your_bids)).length}</span></button>
         <span class="muted">Point packs aren't auctions you're in: they're "if you're interested" picks.</span></div>` : ""}
-      ${tab.searches ? this._searchesView() : `<div class="grid">
+      ${tab.searches ? `<div class="sv-slot"></div>` : `<div class="grid">
         ${tab.id === "site-govauctions" && this._subtab === "packs" && this._packs() ? this._packsView() : shown.length ? shown.map((a) => this._safeCard(a)).join("") : `<div class="empty">Nothing here right now.</div>`}
       </div>`}`;
 
@@ -282,7 +284,7 @@ class AuctionWatcherPanel extends HTMLElement {
     root.querySelectorAll("[data-subtab]").forEach((b) =>
       b.addEventListener("click", () => { this._subtab = b.dataset.subtab; this._maybeRender(true); }));
     root.querySelectorAll("[data-tab]").forEach((b) =>
-      b.addEventListener("click", () => { this._tab = b.dataset.tab; this._maybeRender(true); }));
+      b.addEventListener("click", () => { this._tab = b.dataset.tab; if (this._tab !== "searches") this._stopSearchWatch(); this._maybeRender(true); }));
     root.querySelector("[data-action=refresh]").addEventListener("click", () =>
       this._hass.callService("auction_watcher", "refresh", {}));
     root.querySelector("[data-action=packs-locked]")?.addEventListener("click", () => {
@@ -314,20 +316,40 @@ class AuctionWatcherPanel extends HTMLElement {
       d.addEventListener("toggle", () => { this._open[d.dataset.id] = d.open; }));
     root.querySelectorAll("[data-act]").forEach((b) =>
       b.addEventListener("click", () => this._action(b.dataset.act, b.dataset.id)));
-    if (tab.searches) this._bindSearches(root);
+    if (tab.searches) {
+      const slot = root.querySelector(".sv-slot");
+      const sig = JSON.stringify([this._sd?.version, this._sd ? 1 : 0, this._sfilter, this._sLimit, this._serr, this._sbusy, this._locsOpen]);
+      if (this._svNode && this._svSig === sig) {
+        slot.replaceWith(this._svNode);   // same DOM, same pictures: nothing flickers
+      } else {
+        slot.innerHTML = this._searchesView();
+        this._svNode = slot;
+        this._svSig = sig;
+        this._bindSearches(slot);
+      }
+    }
     this._tick();
   }
 
   // ---------------------------------------------------------------- saved searches
 
   async _loadSearches() {
-    if (this._tab !== "searches") { clearInterval(this._sTimer); this._sTimer = null; return; }
+    if (this._tab !== "searches") { this._stopSearchWatch(); return; }
     if ((this._sd && document.visibilityState !== "visible") || this._sbusy) return;
     try {
-      this._sd = await this._hass.callWS({ type: "auction_watcher/searches" });
+      const msg = { type: "auction_watcher/searches" };
+      if (this._sd?.version) msg.version = this._sd.version;
+      const got = await this._hass.callWS(msg);
+      if (!got.unchanged) this._sd = got;
       this._serr = null;
     } catch (e) { this._serr = this._wsError(e); }
     this._maybeRender();
+  }
+
+  _stopSearchWatch() {
+    clearInterval(this._sTimer); this._sTimer = null;
+    const u = this._sUnsub; this._sUnsub = null;
+    if (u) Promise.resolve(u).then((fn) => typeof fn === "function" && fn()).catch(() => {});
   }
 
   async _searchChange(payload) {
@@ -348,8 +370,14 @@ class AuctionWatcherPanel extends HTMLElement {
 
   _searchesView() {
     if (!this._sTimer) {
-      this._sTimer = setInterval(() => this._loadSearches(), 5000);
+      // Home Assistant tells the page when saved searches change, so there's no polling.
+      // A slow check every 5 minutes is only a safety net (e.g. after the connection drops).
+      this._sTimer = setInterval(() => this._loadSearches(), 300000);
       setTimeout(() => this._loadSearches(), 0);
+      if (!this._sUnsub && this._hass?.connection) {
+        this._sUnsub = this._hass.connection.subscribeEvents(() => this._loadSearches(), "auction_watcher_searches_updated")
+          .catch(() => { this._sUnsub = null; });
+      }
     }
     const d = this._sd;
     if (!d) return `<div class="sv"><div class="empty">${this._serr ? `<span class="warn">${esc(this._serr)}</span>` : "Loading saved searches…"}</div></div>`;
@@ -361,6 +389,10 @@ class AuctionWatcherPanel extends HTMLElement {
     if (flt.search) results = results.filter((h) => h.searches.includes(flt.search));
     if (flt.site) results = results.filter((h) => h.site === flt.site);
     if (flt.newOnly) results = results.filter((h) => h.new);
+    const cutoff = Date.now() - 5 * 60000;
+    results = results.filter((h) => !h.ends_at || Date.parse(h.ends_at) > cutoff);
+    const total = results.length;
+    results = results.slice(0, this._sLimit);
     const resultSites = [...new Set(d.results.map((h) => h.site))];
     const onCount = d.macbid_buildings.filter((b) => b.on).length;
     const excl = flt.search ? (byId[flt.search]?.excluded || 0) : d.excluded_total;
@@ -368,6 +400,10 @@ class AuctionWatcherPanel extends HTMLElement {
     return `<div class="sv">
       <div class="sbar">
         <label>Search every day at <input type="time" data-sform="run_time" value="${esc(d.run_time)}"></label>
+        <label>and again <select data-sform="refresh_hours">
+          ${[[0, "no (once a day)"], [1, "every hour"], [2, "every 2 hours"], [3, "every 3 hours"], [6, "every 6 hours"], [12, "every 12 hours"]]
+            .map(([v, t]) => `<option value="${v}" ${Number(d.refresh_hours || 0) === v ? "selected" : ""}>${t}</option>`).join("")}
+        </select></label>
         <button data-sact="run" ${d.running || this._sbusy ? "disabled" : ""}>${d.running ? "Searching…" : "Search now"}</button>
         <span class="muted">Last run ${esc(when(d.last_run))} · next ${esc(new Date(d.next_run).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }))}</span>
       </div>
@@ -378,6 +414,7 @@ class AuctionWatcherPanel extends HTMLElement {
         <input type="text" placeholder="Keyword, e.g. greenhouse" data-sform="keyword" value="${esc(f.keyword)}">
         ${d.sites.map((site) => `<label class="chk">${siteDot(site)}<input type="checkbox" data-sform-site="${site}" ${formSites.includes(site) ? "checked" : ""}> ${esc(SITE_NAMES[site])}</label>`).join("")}
         <label class="chk">Max $ <input type="number" min="0" step="1" class="small" data-sform="max_price" value="${esc(f.max_price)}" placeholder="any"></label>
+        <label class="chk" title="The sites' own searches are loose (they match descriptions and similar words)"><input type="checkbox" data-sform="title_only" ${f.title_only !== false ? "checked" : ""}> Title must contain the words</label>
         ${d.sites.includes("macbid") ? `<label class="chk"><input type="checkbox" data-sform="save_to_macbid" ${f.save_to_macbid ? "checked" : ""}> Also save to my Mac.bid alerts</label>` : ""}
         <button data-sact="add" ${this._sbusy ? "disabled" : ""}>Add</button>
       </div>
@@ -389,6 +426,8 @@ class AuctionWatcherPanel extends HTMLElement {
             ${Object.keys(x.sources || {}).map((k) => siteDot(k, "Saved on " + (SITE_NAMES[k] || k))).join("")}
             ${esc(x.keyword)} <span class="count">${x.count}</span>${x.new ? `<span class="badge on">${x.new} new</span>` : ""}
           </button>
+          <button class="schip-t ${x.title_only !== false ? "on" : ""}" data-sact="title" data-sid="${esc(x.id)}"
+            title="${x.title_only !== false ? "Only items with these words in the title. Tap to also allow matches in descriptions." : "Includes the site's loose matches. Tap for title matches only."}">T</button>
           <button class="schip-x" data-sact="remove" data-sid="${esc(x.id)}" title="Delete this search${x.sources?.macbid ? " (also from your Mac.bid alerts)" : ""}">×</button>
         </span>`).join("")}
       </div>
@@ -408,12 +447,13 @@ class AuctionWatcherPanel extends HTMLElement {
         <button class="subtab ${!flt.site ? "on" : ""}" data-sfilter-site="">All sites</button>
         ${resultSites.map((site) => `<button class="subtab ${flt.site === site ? "on" : ""}" data-sfilter-site="${site}">${siteDot(site)} ${esc(SITE_NAMES[site] || site)}</button>`).join("")}
         <label class="chk"><input type="checkbox" data-sfilter-new ${flt.newOnly ? "checked" : ""}> New only</label>
-        <span class="muted">${results.length} shown</span>
+        <span class="muted">${total} result${total === 1 ? "" : "s"}</span>
         ${excl && (!flt.site || flt.site === "macbid") ? `<span class="muted">Excluded ${num(excl)} Mac.bid result${excl === 1 ? "" : "s"} by location filters</span>` : ""}
       </div>
 
       <div class="hits">
-        ${results.length ? results.map((h) => this._hitRow(h, byId)).join("") : `<div class="empty">${d.searches.length ? (d.last_run ? "No matches." : "Searches run at the time above, or tap Search now.") : "Add a keyword to start. Your Mac.bid keyword alerts are brought in automatically."}</div>`}
+        ${results.length ? results.map((h) => this._hitRow(h, byId)).join("") + (total > results.length
+          ? `<button class="secondary more" data-sact="more">Show ${Math.min(60, total - results.length)} more (${total - results.length} left)</button>` : "") : `<div class="empty">${d.searches.length ? (d.last_run ? "No matches." : "Searches run at the time above, or tap Search now.") : "Add a keyword to start. Your Mac.bid keyword alerts are brought in automatically."}</div>`}
       </div>
     </div>`;
   }
@@ -422,13 +462,13 @@ class AuctionWatcherPanel extends HTMLElement {
     const left = h.ends_at ? (Date.parse(h.ends_at) - Date.now()) / 1000 : null;
     const where = h.transfer ? `at ${h.transfer} · transfer needed` : h.location || "";
     return `<div class="hit">
-      ${safeUrl(h.image) ? `<img src="${safeUrl(h.image)}" alt="" loading="lazy">` : `<div class="noimg"></div>`}
+      ${safeUrl(h.image) ? `<img src="${safeUrl(h.image)}" alt="" width="64" height="64" loading="lazy" decoding="async">` : `<div class="noimg"></div>`}
       <div class="hbody">
         <div class="htitle">${siteDot(h.site)} ${h.new ? `<span class="badge on">NEW</span>` : ""}
           <a href="${safeUrl(h.url)}" target="_blank" rel="noreferrer">${esc(h.title)}</a></div>
         <div class="hmeta">
           <b>${money(h.price)}</b>
-          ${left !== null ? `<span>${left > 0 ? "ends in " + fmtDuration(left) : "ending"}</span>` : ""}
+          ${left !== null && left > 0 ? `<span>ends in ${fmtDuration(left)}</span>` : ""}
           ${h.bids !== null && h.bids !== undefined ? `<span>${num(h.bids)} bid${Number(h.bids) === 1 ? "" : "s"}</span>` : ""}
           ${where ? `<span>${esc(where)}</span>` : ""}
           ${h.condition ? `<span class="muted">${esc(h.condition)}</span>` : ""}
@@ -446,6 +486,10 @@ class AuctionWatcherPanel extends HTMLElement {
         el.addEventListener("change", () => this._searchChange({ action: "settings", run_time: el.value }));
         return;
       }
+      if (k === "refresh_hours") {
+        el.addEventListener("change", () => this._searchChange({ action: "settings", refresh_hours: Number(el.value) }));
+        return;
+      }
       el.addEventListener(el.type === "checkbox" ? "change" : "input", () => { f[k] = el.type === "checkbox" ? el.checked : el.value; });
       el.addEventListener("blur", () => { if (this._pending) setTimeout(() => this._maybeRender(), 0); });
       if (k === "keyword") el.addEventListener("keydown", (ev) => { if (ev.key === "Enter") root.querySelector("[data-sact=add]")?.click(); });
@@ -458,6 +502,11 @@ class AuctionWatcherPanel extends HTMLElement {
     root.querySelectorAll("[data-sact]").forEach((b) => b.addEventListener("click", async () => {
       const act = b.dataset.sact;
       if (act === "run") return this._searchChange({ action: "run" });
+      if (act === "more") { this._sLimit += 60; return this._maybeRender(true); }
+      if (act === "title") {
+        const x = this._sd.searches.find((y) => y.id === b.dataset.sid);
+        if (x) return this._searchChange({ action: "update", search_id: x.id, title_only: x.title_only === false });
+      }
       if (act === "use-account") return this._searchChange({ action: "settings", use_account: true });
       if (act === "remove") {
         const x = this._sd.searches.find((y) => y.id === b.dataset.sid);
@@ -468,9 +517,10 @@ class AuctionWatcherPanel extends HTMLElement {
       if (act === "add") {
         const keyword = (f.keyword || "").trim();
         if (!keyword) { this._serr = "Type a keyword first"; return this._maybeRender(true); }
-        const payload = { action: "add", keyword, sites: f.sites || this._sd.sites, save_to_macbid: !!f.save_to_macbid };
+        const payload = { action: "add", keyword, sites: f.sites || this._sd.sites, save_to_macbid: !!f.save_to_macbid,
+          title_only: f.title_only !== false };
         if (f.max_price !== "" && !isNaN(Number(f.max_price))) payload.max_price = Number(f.max_price);
-        this._sform = { keyword: "", max_price: "", sites: null, save_to_macbid: false };
+        this._sform = { keyword: "", max_price: "", sites: null, save_to_macbid: false, title_only: true };
         await this._searchChange(payload);
         setTimeout(() => this._loadSearches(), 4000);
       }
@@ -481,13 +531,13 @@ class AuctionWatcherPanel extends HTMLElement {
     }));
     root.querySelector("details.locs")?.addEventListener("toggle", (ev) => { this._locsOpen = ev.target.open; });
     root.querySelectorAll("[data-sfilter-search]").forEach((b) => b.addEventListener("click", () => {
-      this._sfilter.search = b.dataset.sfilterSearch || null; this._maybeRender(true);
+      this._sfilter.search = b.dataset.sfilterSearch || null; this._sLimit = 60; this._maybeRender(true);
     }));
     root.querySelectorAll("[data-sfilter-site]").forEach((b) => b.addEventListener("click", () => {
-      this._sfilter.site = b.dataset.sfilterSite || null; this._maybeRender(true);
+      this._sfilter.site = b.dataset.sfilterSite || null; this._sLimit = 60; this._maybeRender(true);
     }));
     root.querySelector("[data-sfilter-new]")?.addEventListener("change", (ev) => {
-      this._sfilter.newOnly = ev.target.checked; this._maybeRender(true);
+      this._sfilter.newOnly = ev.target.checked; this._sLimit = 60; this._maybeRender(true);
     });
   }
 
@@ -1040,6 +1090,8 @@ const STYLE = `
   .sv input[type=text], .sv input[type=number], .sv input[type=time] { padding: 6px 8px; border-radius: 6px; border: 1px solid var(--divider-color);
      background: var(--card-background-color); color: var(--primary-text-color); }
   .sv input[type=text] { flex: 1 1 200px; min-width: 0; }
+  .sv select { padding: 5px 8px; border-radius: 6px; border: 1px solid var(--divider-color); background: var(--card-background-color);
+               color: var(--primary-text-color); }
   .sv input.small { width: 70px; }
   .chk { display: inline-flex; align-items: center; gap: 4px; font-size: 14px; }
   .schips { display: flex; flex-wrap: wrap; gap: 8px; }
@@ -1048,6 +1100,10 @@ const STYLE = `
   button.schip { padding: 5px 12px; }
   .schip.on { border-color: var(--primary-color); box-shadow: 0 0 0 1px var(--primary-color); }
   .schip-main, .schip-x { background: none; color: inherit; border-radius: 0; padding: 5px 8px 5px 12px; display: inline-flex; align-items: center; gap: 4px; }
+  .schip-t { background: none; color: var(--secondary-text-color); border-radius: 0; padding: 5px 8px; border-left: 1px solid var(--divider-color);
+             font-size: 12px; font-weight: 700; }
+  .schip-t.on { color: var(--primary-color); }
+  .hits .more { align-self: center; }
   .schip-x { padding: 5px 10px; border-left: 1px solid var(--divider-color); font-size: 16px; line-height: 1; }
   .schip-x:hover { background: var(--error-color, #db4437); color: #fff; }
   details.locs { background: var(--card-background-color); border: 1px solid var(--divider-color); border-radius: 12px; padding: 10px 12px; }

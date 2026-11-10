@@ -364,15 +364,15 @@ class GovAuctionsClient:
         for aid in ids:
             s, l = static.get(aid) or {}, live.get(aid) or {}
             starts = s.get("starts_at")
-            if l.get("live") and l.get("clock_seconds") is not None:
-                ends = datetime.fromtimestamp(t + l["clock_seconds"], timezone.utc)
+            if l.get("live"):
+                ends = None  # penny clock: resets with every bid, no real end time
             else:
                 ends = starts
                 if not starts or starts.timestamp() < t - 60:
                     continue  # finished (search also returns past auctions)
-            notes = list(s.get("labels", []))
+            notes = (["Live now"] if l.get("live") else []) + list(s.get("labels", []))
             if l.get("closed_to_new"):
-                notes.insert(0, "Closed to new bidders")
+                notes.insert(1, "Closed to new bidders")
             out.append({
                 "item_id": aid, "title": s.get("title") or f"GovAuctions {aid}", "url": f"{BASE_URL}/auction/{aid}",
                 "price": l.get("price"), "ends_at": ends.isoformat() if ends else None,

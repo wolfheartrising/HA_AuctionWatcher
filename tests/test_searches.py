@@ -58,3 +58,14 @@ def test_search_alert_wording():
     title, msg, spoken = format_alert("search", {"count": 3, "lines": ["bluey: 2 Mac.bid", "drone: 1 GovAuctions"]})
     assert title == "3 new matches for your saved searches"
     assert msg == "bluey: 2 Mac.bid; drone: 1 GovAuctions" and "3 new auction matches" in spoken
+
+
+def test_title_only_drops_the_sites_loose_matches():
+    from aw.searches import title_matches
+    assert title_matches("Jackery Solar Generator 1500", "generator")
+    assert title_matches("Rubbermaid Storage SHED, 7x7", "storage shed")
+    assert not title_matches("DJI Air 3S Drone Fly More Combo", "generator")
+    assert not title_matches("Honses XD-3420 DC Motor 12V", "generator")
+    hits = [Hit("govauctions", "1", "DJI Air 3S Drone", "u"), Hit("macbid", "2", "Champion Generator 3500W", "u")]
+    assert [h.item_id for h in filter_hits(hits, 0, "generator")] == ["2"]
+    assert len(filter_hits(hits, 0, None)) == 2

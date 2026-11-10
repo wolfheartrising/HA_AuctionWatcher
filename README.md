@@ -1,5 +1,8 @@
 # Auction Watcher for Home Assistant
 
+> **Unofficial hobby project.** Not affiliated with, endorsed by, or supported by Home Assistant,
+> GovAuctions, Mac.bid, eBay or any other auction site. Built for my own personal use. See the [Disclaimer](#disclaimer).
+
 Follow the online auctions you're bidding on or watching, with a dashboard,
 phone alerts and spending limits. **Supports GovAuctions, Mac.bid and eBay**; more sites
 (GovDeals, ...) are planned, one handler per site.
@@ -74,7 +77,8 @@ Uses eBay's **official APIs** only (no page scraping, which eBay blocks and its 
 ## Saved searches
 
 The **Saved searches** tab looks for keywords on every site you've set up, once a day
-(8:00 AM by default; change the time on the tab) or when you tap **Search now**. It uses each
+(8:00 AM by default; change the time on the tab), optionally again every 1–12 hours for fresher prices and
+quicker alerts, or when you tap **Search now**. The open page is told when results change (no constant polling). It uses each
 site's own search: what typing in its search box does.
 
 - **Add** a keyword, pick the sites, optionally a max price. Tick *Also save to my Mac.bid alerts* to add it there too.
@@ -195,3 +199,16 @@ python tools/live_check.py path/to/cookies.txt      # read-only check of your re
 ```
 
 The Home Assistant parts (`coordinator.py`, `config_flow.py`, ...) can't be imported without Home Assistant, so the pyflakes test is what catches a missing import before it reaches a real install.
+
+## Disclaimer
+
+Auction Watcher is an unofficial hobby project I built for my own personal use and share as-is.
+It is **not affiliated with, endorsed by, sponsored by or supported by** Home Assistant / the Open Home
+Foundation, GovAuctions, Mac.bid, eBay, GovDeals, Capital City Online Auctions, OLA or any other auction
+site. Those names and logos are trademarks of their respective owners and appear only to show which sites
+the plugin works with.
+
+The sites can change how they work at any time, which may break features without notice. You're responsible
+for how you use it: follow each site's terms, and check your limits and settings before turning on anything
+that books or places bids. There's no warranty, and I'm not responsible for missed auctions, unwanted bids,
+spending, or account issues.
