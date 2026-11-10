@@ -7,9 +7,9 @@ from aw.sites.base import AuthError
 
 
 def test_parse_tokens_variants():
-    t = ola.parse_tokens({"accessToken": "a", "refreshToken": "r", "expiresIn": 1800, "userId": 7})
+    t = ola.parse_tokens({"data": {"accessToken": "a", "refreshToken": "r", "accessTokenExpiresIn": 1800, "refreshTokenExpiresIn": 999999, "userId": 7}})
     assert t["access_token"] == "a" and t["refresh_token"] == "r" and t["user_id"] == "7"
-    assert t["expires"] > time.time() + 1000
+    assert t["expires"] > time.time() + 1000 and t["refresh_expires"] > time.time() + 900000
     t2 = ola.parse_tokens({"data": {"access_token": "x", "refresh_token": "y"}})
     assert t2["access_token"] == "x"
     try:

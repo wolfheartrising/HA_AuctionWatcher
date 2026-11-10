@@ -24,7 +24,7 @@ from .base import AuctionState, AuthError, SiteError, CATEGORY_BIDDING, CATEGORY
 _LOGGER = logging.getLogger(__name__)
 
 SITE = "ola"
-API = "https://auction-api.olabid.com"
+API = "https://auction-api.olabid.com/api/v2"
 ITEM_URL = "https://link.olabid.com/item-details?id={id}"
 RENEW_EARLY_SECONDS = 60
 
@@ -106,11 +106,18 @@ def parse_tokens(data: Any) -> dict[str, Any]:
     expires_at = _dt(_first(d, "accessTokenExpires", "expiresAt", "accessTokenExpiresAt"))
     expires = expires_at.timestamp() if expires_at else time.time() + (expires_in or 1500)
     refresh_exp = _dt(_first(d, "refreshTokenExpires", "refreshTokenExpiresAt"))
+    refresh_in = _num(_first(d, "refreshTokenExpiresIn", "refresh_expires_in"))
+    if refresh_exp is not None:
+        refresh_expires = refresh_exp.timestamp()
+    elif refresh_in:
+        refresh_expires = time.time() + refresh_in
+    else:
+        refresh_expires = time.time() + 60 * 86400
     return {
         "access_token": str(access),
         "refresh_token": str(refresh) if refresh else "",
         "expires": expires,
-        "refresh_expires": refresh_exp.timestamp() if refresh_exp else time.time() + 60 * 86400,
+        "refresh_expires": refresh_expires,
         "user_id": str(_first(d, "userId", "id", "customerId") or ""),
     }
 

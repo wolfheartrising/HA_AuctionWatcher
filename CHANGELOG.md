@@ -6,6 +6,10 @@ The section for a version becomes its release notes, so HACS shows them under "U
 After updating: restart Home Assistant if Python changed, then reload the Auctions page (it offers a Reload button
 when it's older than the plugin).
 
+## 1.7.1
+- OLA: fixed sign-in — the API base needed the `/api/v2` prefix (was 404 on sign-in), and token expiry fields
+  (`accessTokenExpiresIn` / `refreshTokenExpiresIn`) are read correctly.
+
 ## 1.7.0
 - **New site: OLA (olabid.com), read-only.** Sign in with your OLA email and password to see your watchlist, winning
   items and bid history on the Auctions page, with ending-soon / outbid / won alerts. Uses OLA's own app API with
