@@ -37,16 +37,43 @@
           "saved_login": "…or the browser's mac_auths value",
           "device_id": "…and its device_id value"
         }
+      },
+      "macbid_code": {
+        "title": "Mac.bid verification code",
+        "description": "Mac.bid doesn't know Home Assistant yet, so it sent a code to {where}. Type it here. After this, Home Assistant stays logged in on its own.",
+        "data": {
+          "code": "Code"
+        }
+      },
+      "ebay": {
+        "title": "eBay developer keys",
+        "description": "From developer.ebay.com, your Production keyset. App ID and Cert ID let Home Assistant look up items. Add your RuName (User Tokens, \"Get a Token from eBay via Your Application\") to also sign in, so your watchlist and bids are followed automatically.",
+        "data": {
+          "app_id": "App ID (Client ID)",
+          "cert_id": "Cert ID (Client Secret)",
+          "runame": "RuName (optional: needed to sign in)",
+          "extra_auction_ids": "Items to follow (item numbers or ebay.com/itm links, optional)"
+        }
+      },
+      "ebay_signin": {
+        "title": "Sign in to eBay",
+        "description": "1. Open this link and sign in to eBay: {link}\n2. Agree to give Auction Watcher access.\n3. You land on an eBay page saying you're signed in (or \"authorization successful\"). Copy the whole address from the browser's address bar and paste it below.",
+        "data": {
+          "signed_in_address": "Address of the page you landed on"
+        }
       }
     },
     "error": {
       "no_cookies": "No cookies for this site were found in the file or text you gave.",
-      "invalid_auth": "The site says these cookies aren't logged in. Log in again in your browser and export fresh cookies.",
+      "invalid_auth": "The site didn't accept that login. Check your email and password (or log in again in your browser and copy fresh values).",
       "cannot_connect": "Couldn't reach the site. Try again in a minute.",
       "no_input": "Upload a cookies.txt file or paste your cookies.",
       "macbid_no_input": "Enter your email and password, or paste the browser's saved login.",
       "macbid_need_device": "With a pasted saved login, also paste its device_id.",
-      "macbid_bad_saved_login": "That doesn't look like Mac.bid's mac_auths value. Copy the whole value (it starts with {)."
+      "macbid_bad_saved_login": "That doesn't look like Mac.bid's mac_auths value. Copy the whole value (it starts with {).",
+      "macbid_bad_code": "Mac.bid didn't accept that code. Check it, or start over to get a new one.",
+      "ebay_bad_keys": "eBay didn't accept those keys. Check they're from the Production keyset (not Sandbox).",
+      "ebay_bad_signin": "That sign-in didn't work. Paste the full address of the page eBay showed after signing in, within a few minutes."
     },
     "abort": {
       "already_configured": "This site is already set up.",
@@ -56,14 +83,14 @@
   "options": {
     "step": {
       "init": {
-        "title": "Auction Watcher settings",
+        "title": "GovAuctions settings",
         "description": "When to alert, where alerts go, and how often to check.",
         "data": {
           "alert_max_bidders": "Alert when OTHER active bidders are at most (you aren't counted)",
           "active_window_minutes": "Count anyone who bid within the last N minutes",
           "stable_seconds": "…and only after it stays that low for N seconds (0 = right away)",
           "alert_max_price": "Only alert below this price (0 = any price)",
-          "default_bid_limit": "Default max bids per auction (GovAuctions) / max bid $ (Mac.bid); 0 = none",
+          "default_bid_limit": "Default max bids per auction (0 = none)",
           "notify_services": "Send alerts to (phone push, Telegram, Alexa Media Player, ...)",
           "notify_entities": "Also send to notify entities (Telegram chats, Alexa Devices Announce/Speak, ...)",
           "alert_kinds": "Which alerts to send",
@@ -71,15 +98,58 @@
           "fast_interval_seconds": "Check every N seconds while something you follow is live",
           "idle_interval_minutes": "Check every N minutes when nothing is live",
           "extra_auction_ids": "Extra auction IDs to follow (comma separated)",
-          "ending_soon_minutes": "Mac.bid: alert this many minutes before an auction ends (0 = off)",
-          "pickup_reminder_hours": "Mac.bid: pickup reminder this many hours before the deadline",
-          "keep_ended_days": "Keep ended auctions on the Auctions page for this many days"
+          "keep_ended_days": "Keep ended auctions on the Auctions page for this many days",
+          "scan_point_packs": "Check the site's point packs every hour and score them",
+          "weekly_budget_points": "Weekly budget in points, Monday to Sunday (0 = none)"
         },
         "data_description": {
           "active_window_minutes": "The site only shows the last 9 bids. Counting a few minutes back catches people who pause and jump back in.",
           "stable_seconds": "With 2 bidders an auction can end in seconds, so 0 alerts as soon as it qualifies.",
           "notify_entities": "Alexa gets a short spoken version; text targets like Telegram get the auction link.",
           "alert_max_bidders": "1 = you against one other person. Also what auto-cancel/rebook call crowded: more than this is crowded.",
+          "keep_ended_days": "Then they're removed, including their sensors. Auctions you stop following are kept too, marked 'no longer followed'.",
+          "scan_point_packs": "Uses the site's own Packs filter. Shows them on the Point packs tab and can alert when a good one is open to join.",
+          "weekly_budget_points": "Counts every bid you place, by hand or booked. When it's used up, auto-booking stops and the Book button refuses until Monday. Cancelling still works."
+        }
+      },
+      "macbid_options": {
+        "title": "Mac.bid settings",
+        "description": "When to alert, where alerts go, and how often to check.",
+        "data": {
+          "ending_soon_minutes": "Alert this many minutes before an auction ends (0 = off)",
+          "pickup_reminder_hours": "Pickup reminder this many hours before the deadline",
+          "default_bid_limit": "Default max bid per item, in dollars (0 = none)",
+          "notify_services": "Send alerts to (phone push, Telegram, Alexa Media Player, ...)",
+          "notify_entities": "Also send to notify entities (Telegram chats, Alexa Devices Announce/Speak, ...)",
+          "alert_kinds": "Which alerts to send",
+          "fast_interval_seconds": "Check every N seconds in an item's last 15 minutes",
+          "idle_interval_minutes": "Check every N minutes when nothing is ending soon (max 15)",
+          "keep_ended_days": "Keep ended auctions on the Auctions page for this many days",
+          "extra_auction_ids": "Extra Mac.bid lot IDs to follow (comma separated)"
+        },
+        "data_description": {
+          "default_bid_limit": "You get an alert when the price passes it. You can set it per item on the Auctions page.",
+          "notify_entities": "Alexa gets a short spoken version; text targets like Telegram get the auction link.",
+          "keep_ended_days": "Then they're removed, including their sensors. Auctions you stop following are kept too, marked 'no longer followed'."
+        }
+      },
+      "ebay_options": {
+        "title": "eBay settings",
+        "description": "When to alert, where alerts go, and how often to check.",
+        "data": {
+          "ending_soon_minutes": "Alert this many minutes before an auction ends (0 = off)",
+          "default_bid_limit": "Default max price per item, in dollars (0 = none)",
+          "notify_services": "Send alerts to (phone push, Telegram, Alexa Media Player, ...)",
+          "notify_entities": "Also send to notify entities (Telegram chats, Alexa Devices Announce/Speak, ...)",
+          "alert_kinds": "Which alerts to send",
+          "fast_interval_seconds": "Check every N seconds in an item's last 15 minutes",
+          "idle_interval_minutes": "Check every N minutes when nothing is ending soon (max 15)",
+          "keep_ended_days": "Keep ended auctions on the Auctions page for this many days",
+          "extra_auction_ids": "Extra eBay items to follow (item numbers or links)"
+        },
+        "data_description": {
+          "default_bid_limit": "You get an alert when the price passes it. You can set it per item on the Auctions page.",
+          "notify_entities": "Alexa gets a short spoken version; text targets like Telegram get the auction link.",
           "keep_ended_days": "Then they're removed, including their sensors. Auctions you stop following are kept too, marked 'no longer followed'."
         }
       }

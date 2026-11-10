@@ -14,7 +14,7 @@ from __future__ import annotations
 from typing import Any
 
 KINDS = ("opportunity", "bid_limit", "ended", "won", "booked", "cancelled", "booking_failed",
-         "outbid", "ending_soon", "over_max", "pickup")
+         "outbid", "ending_soon", "over_max", "pickup", "pack", "budget")
 SPOKEN_HINTS = ("announce", "speak", "alexa", "echo")
 
 
@@ -107,6 +107,21 @@ def format_alert(kind: str, d: dict[str, Any]) -> tuple[str, str, str]:
         title = f"Pick up by {when}: {name}"
         msg = f"Won for {_money(d.get('price'))}. Pickup deadline {when}."
         spoken = f"Reminder: pick up {name} by {when}."
+    elif kind == "budget":
+        title = "Weekly auction budget used up"
+        msg = (f"You've spent {d.get('spent')} of your {d.get('budget')} points this week. "
+               "Auto-booking is stopped until Monday (or raise the budget in the settings).")
+        spoken = "Your weekly auction budget is used up. Auto booking is stopped."
+    elif kind == "pack":
+        title = f"Good point pack: {name}"
+        msg = (f"Worth {_money(d.get('value'))} ({d.get('points')} points). Past winners usually needed "
+               f"~{d.get('expected_bids')} bids ({d.get('past_wins')} wins).")
+        if d.get("suggested_max"):
+            msg += (f" Suggested max {d['suggested_max']} bids ({round((d.get('cover') or 0) * 100)}% of past winners"
+                    f" needed no more).")
+        if d.get("bids_to_lock") is not None:
+            msg += f" Open to new bidders for about {d['bids_to_lock']} more bids."
+        spoken = f"A good point pack is open: {name}."
     elif kind == "booked":
         title = f"Booked {d.get('count')} bids: {name}"
         msg = f"{d.get('reason') or ''}. Price {_money(d.get('price'))}, {d.get('active_bidders')} bidders."

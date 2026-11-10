@@ -118,3 +118,39 @@ def test_lot_refresh_schedule():
     assert mb.lot_refresh_seconds(90 * 60) == 120     # last 2 hours: every 2 minutes
     assert mb.lot_refresh_seconds(20 * 3600) == 900   # otherwise every 15 minutes
     assert mb.lot_refresh_seconds(None) == 900
+
+
+def _client_with(answers):
+    import asyncio
+    c = mb.MacBidClient(None, None, "dev-1", email="me@example.com", password="pw")
+    calls = []
+    async def fake_call(method, path, body=None, auth=True, any_status=False):
+        calls.append((method, path, body))
+        return answers.pop(0)
+    c._call = fake_call
+    return c, calls, asyncio.run
+
+
+def test_login_direct():
+    c, calls, run = _client_with([{"access_token": "a", "refresh_token": "r", "expires": 1, "expiration_refresh": 2, "user_id": 7}])
+    run(c.login())
+    assert calls[0][:2] == ("POST", "/auth/auth-validation")
+    assert calls[0][2]["device_id"] == "dev-1" and calls[0][2]["remember_me"] is True
+    assert c.auth["refresh_token"] == "r" and c.user_id == "7"
+
+
+def test_login_needs_code_then_code_finishes_it():
+    c, calls, run = _client_with([{"is_expired": False, "type": "phone", "last4": "1234", "_status": 200},
+                                  {"access_token": "a", "refresh_token": "r", "expires": 1, "expiration_refresh": 2, "user_id": 7}])
+    with pytest.raises(mb.CodeRequired) as need:
+        run(c.login())
+    assert "phone ending 1234" in str(need.value)
+    run(c.submit_code("12 34 56"))
+    assert calls[1][:2] == ("PUT", "/auth/validate-access-code") and calls[1][2]["code"] == "123456"
+    assert c.auth["access_token"] == "a"
+
+
+def test_login_wrong_password():
+    c, _, run = _client_with([{"error": "Invalid credentials.", "_status": 401}])
+    with pytest.raises(AuthError):
+        run(c.login())

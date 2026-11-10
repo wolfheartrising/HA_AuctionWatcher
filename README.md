@@ -1,8 +1,8 @@
 # Auction Watcher for Home Assistant
 
 Follow the online auctions you're bidding on or watching, with a dashboard,
-phone alerts and spending limits. **Supports GovAuctions and Mac.bid**; more sites
-(eBay, GovDeals, ...) are planned, one handler per site.
+phone alerts and spending limits. **Supports GovAuctions, Mac.bid and eBay**; more sites
+(GovDeals, ...) are planned, one handler per site.
 
 Auction Watcher reads your auctions. It only **books or cancels bids** when you
 press a button, call a service, or turn on auto-booking for a specific auction,
@@ -28,16 +28,40 @@ and never past the bid limit you set for that auction.
 - **Events** too (`auction_watcher_opportunity`, `…_bid_limit_reached`, `…_auction_ended`, `…_auction_won`), so you can build your own automations, like flashing a light. The old blueprint in `blueprints/` still works but isn't needed.
 - **Bid limits**: a default limit per auction in the options, and `auction_watcher.set_bid_limit` for a single auction. At the limit you get one alert and no more "few bidders left" alerts for that auction.
 
+## Point packs (GovAuctions)
+
+A **Point packs** tab, from the site's own Packs filter (`/api/v1/browse?cat=7`), checked **hourly** (live price and entry state every 10 minutes). About 45 light requests per hour; turn it off in the GovAuctions settings.
+
+For each pack (1¢ auctions: break-even = the pack size in bids):
+- **Grade** from that pack's own past winners, by time of day. Cautious: it uses the worse of the window the auction starts in and the next one, since late-night fights cost much more. Fewer than 15 past wins: no grade.
+- **Stars**: ★★★ winners usually needed ≤35% of the pack, ★★ ≤45%, ★ ≤60%, *skip* above that.
+- **Suggested max**: covers most past wins (~60%) but never more than half the pack, so a win at the max always pays. Shows its cost, what a win nets, and how many past winners fit under it.
+- **Affordable?** Packs whose suggested max is more than your point balance are flagged and listed last.
+- **Entry**: still open to new bidders, and roughly how many bids until it locks.
+- When you join a pack, its **Max bids** is set to the suggested max automatically, unless you set one.
+- **Alert** (*Good point pack open to join*): once per ★★★ pack you can afford that's still open.
+
 ## Mac.bid
 
 Timed liquidation auctions: you pay what you bid, plus fees, and pick up in person.
 
-- **Login**: your Mac.bid email and password (recommended), or your browser's saved login (`mac_auths` + `device_id` from the browser's Local Storage). Mac.bid's login lasts 30 minutes and is renewed automatically; the renewal chain lasts 60 days and extends itself, and with email + password it can always log in fresh. Mac.bid hands out a new renewal token every time, so a pasted browser login is taken over by Home Assistant: log in again in your browser afterwards.
+- **Login**: your Mac.bid email and password (recommended; the first time, Mac.bid texts or emails a verification code, which the setup asks for), or your browser's saved login (`mac_auths` + `device_id` from the browser's Local Storage). Mac.bid's login lasts 30 minutes and is renewed automatically; the renewal chain lasts 60 days and extends itself, and with email + password it can always log in fresh. Mac.bid hands out a new renewal token every time, so a pasted browser login is taken over by Home Assistant: log in again in your browser afterwards.
 - **Follows** your watchlist and the lots in your recent bid history (plus any extra lot IDs you add). Each lot is checked only as often as it needs: every check in its last 15 minutes, every 2 minutes in its last 2 hours, every 15 minutes otherwise. If Mac.bid says "too many requests", the last known data is kept and it backs off.
 - **Cards** show a real countdown to the end (with an *extended* badge when late bids push it back), **you're winning / outbid**, other bidders, watchers, retail and Buy Now prices, and **what winning costs**: the bid plus Mac.bid's 15% buyer's premium and $3 lot fee (before tax).
 - **Max bid ($)** per lot, with what winning at it would cost. Auction Watcher doesn't place Mac.bid bids.
 - **Awaiting pickup** tab: won items with a countdown to the pickup deadline, checked every 6 hours.
 - **Alerts**: outbid, ending soon (default 10 minutes before), price passed your max, won / ended, and a pickup reminder (default 24 hours before the deadline).
+
+## eBay
+
+Uses eBay's **official APIs** only (no page scraping, which eBay blocks and its user agreement forbids).
+
+- **Keys**: create a free account at developer.ebay.com and a **Production keyset** (App ID + Cert ID). eBay also asks every app to handle "account deletion" notices or apply for an exemption; this integration stores no other users' data, so apply for the exemption.
+- **Level A, keys only**: follows the eBay items you add (item numbers or ebay.com/itm links): price, bids, minimum next bid, shipping, end time.
+- **Level B, sign in**: add your **RuName** (developer portal, User Tokens) and the setup shows a sign-in link. Sign in on eBay, then paste back the address of the page eBay shows afterwards. Your **watchlist and everything you've bid on** are then followed automatically, with **winning / outbid** and your max bid. The sign-in lasts about 18 months and renews itself until then.
+- **Alerts**: outbid, ending soon, price passed your max, won, ended. Checks every 10 s in an item's last 15 minutes, every 2 minutes in its last 2 hours, otherwise every 15 minutes.
+- **No bidding**: eBay only lets approved apps bid through its API. Use eBay's own max bid.
+- *Status*: built from eBay's documented formats and tested on sample data; not yet run against live eBay.
 
 ## Booking and auto-booking (GovAuctions)
 

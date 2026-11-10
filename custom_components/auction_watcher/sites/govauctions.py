@@ -35,6 +35,7 @@ from .base import (
 )
 
 SITE = "govauctions"
+PACKS_CATEGORY = 7  # the site's "Packs" category filter
 BASE_URL = "https://www.govauctions.com"
 COOKIE_DOMAIN = "govauctions.com"
 ACTIVE_WINDOW_SECONDS = 60
@@ -184,6 +185,12 @@ def parse_history(data: dict[str, Any], auction_id: str) -> PriceHistory | None:
     )
 
 
+def bundle_points(title: str) -> int | None:
+    """'DJI Drone ... + 2300 Points' -> 2300 (bonus points that come with an item)."""
+    m = re.search(r"\+\s*([\d,]+)\s*(?:points|pts)\b", title or "", re.I)
+    return int(m.group(1).replace(",", "")) if m else None
+
+
 def win_terms(labels: list[str], price: float | None, your_bids: int, point_cost: float) -> tuple[float | None, float | None]:
     """(price you'd pay if you won now, that plus what your bids cost).
 
@@ -228,6 +235,7 @@ def build_state(
     bidding = your_bids > 0 or live.get("your_booked_left", 0) > 0
     labels = static.get("labels", [])
     pay_if_won, cost_if_won_now = win_terms(labels, live.get("price"), your_bids, point_cost)
+    bonus = bundle_points(static.get("title") or "")
     return AuctionState(
         site=SITE,
         auction_id=auction_id,
@@ -257,6 +265,11 @@ def build_state(
         extra={
             "no_jumper_limit": static.get("no_jumper_limit"),
             "label_notes": static.get("label_notes", {}),
+            # Item + points bundles: the points' value comes off what winning costs you
+            "bundle_points": bonus,
+            "bundle_value": round(bonus * point_cost, 2) if bonus else None,
+            "net_cost_if_won_now": (round(cost_if_won_now - bonus * point_cost, 2)
+                                    if bonus and cost_if_won_now is not None else None),
             "product_id": static.get("product_id"),
             "category_name": static.get("category_name"),
         },
@@ -335,6 +348,17 @@ class GovAuctionsClient:
     async def history(self, auction_id: str) -> PriceHistory | None:
         data = await self._get("/api/v2/auction/extraStaticData", params={"auctionId": auction_id})
         return parse_history(data, auction_id)
+
+    # ---- point-pack scanner (read-only)
+
+    async def browse_category(self, category_id: int) -> list[str]:
+        """Same list as the site's category filter (Packs = 7): live and upcoming auction ids."""
+        data = await self._get("/api/v1/browse", params={"cat": str(category_id)})
+        return [str(i) for i in data] if isinstance(data, list) else []
+
+    async def previous_winners(self, auction_id: str) -> list[dict[str, Any]]:
+        data = await self._get("/api/v2/auction/extraStaticData", params={"auctionId": auction_id})
+        return (data.get(str(auction_id)) or {}).get("previous_winners") or []
 
     async def me(self) -> dict[str, str]:
         """Your username and id, so you can be left out of bidder counts.

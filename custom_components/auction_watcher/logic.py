@@ -219,8 +219,16 @@ def decide_auto(
     rules: Rules,
     points: int | None,
     now: float,
+    budget_left: int | None = None,
+    paused: bool = False,
 ) -> tuple[str, int, str]:
-    """Return (action, count, reason). action is "", "cancel" or "book"."""
+    """Return (action, count, reason). action is "", "cancel" or "book".
+
+    points      = what's free to spend right now (site balance minus what other
+                  auctions already took this round)
+    budget_left = what's left of the weekly budget (None = no budget)
+    paused      = the auto-booking switch is off: cancelling still works, booking doesn't
+    """
     if not settings.any_auto:
         return "", 0, ""
     limit = rules.bid_limit(s.auction_id)
@@ -243,13 +251,18 @@ def decide_auto(
         return "", 0, f"crowded ({s.active_bidders} bidders), holding off"
 
     if settings.auto_rebook and s.your_booked_left == 0 and s.active_bidders >= 1:
+        if paused:
+            return "", 0, "auto-booking is switched off"
+        if budget_left is not None and budget_left <= 0:
+            return "", 0, "weekly budget used up"
         if s.closed_to_new and s.your_bids == 0:
             return "", 0, "closed to new bidders and you haven't bid yet"
         want = mem.cancelled_with if settings.rebook_mode == REBOOK_REMAINING and mem.cancelled_with else settings.rebook_amount
         room = limit - s.your_bids
         if room <= 0:
             return "", 0, "bid limit reached"
-        count = min(want, room, points if points is not None else want)
+        count = min(want, room, points if points is not None else want,
+                    budget_left if budget_left is not None else want)
         if count < 1:
             return "", 0, "no points left to book"
         return "book", count, f"down to {s.active_bidders} bidder{'' if s.active_bidders == 1 else 's'}"
@@ -369,3 +382,53 @@ def keep_ended(
         out[aid].extra = {**out[aid].extra, "ended_at": t, "remove_after": t + keep_days * 86400}
     new_last = {aid: s for aid, s in states.items() if s.status in KEEP_STATUSES}
     return out, new_last, ended, expired
+
+
+# ---------------------------------------------------------------- spending and points at risk
+
+def week_start(local_now: "datetime") -> float:
+    """Monday 00:00 of the current week (local time), as a timestamp."""
+    from datetime import timedelta
+    monday = (local_now - timedelta(days=local_now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    return monday.timestamp()
+
+
+def record_spending(ledger: list[list[float]], last_bids: dict[str, int], states: dict[str, AuctionState],
+                    now: float) -> bool:
+    """Add newly placed bids (your_bids going up) to the ledger as [time, bids, auction]. Returns True if changed."""
+    changed = False
+    for aid, s in states.items():
+        if s.status == "awaiting_pickup":
+            continue
+        prev = last_bids.get(aid)
+        if prev is not None and s.your_bids > prev:
+            ledger.append([now, s.your_bids - prev, aid])
+            changed = True
+        last_bids[aid] = s.your_bids
+    cutoff = now - 35 * 86400
+    if ledger and ledger[0][0] < cutoff:
+        ledger[:] = [row for row in ledger if row[0] >= cutoff]
+        changed = True
+    return changed
+
+
+def spent_since(ledger: list[list[float]], since: float) -> int:
+    return int(sum(row[1] for row in ledger if row[0] >= since))
+
+
+def points_at_risk(states: dict[str, AuctionState], auto: dict[str, "AutoSettings"], rules: Rules) -> dict[str, Any]:
+    """booked = held by the site in your booked bids (already out of your balance);
+    earmarked = what auto-rebook could still book under each auction's max bids."""
+    booked = earmarked = 0
+    per: dict[str, int] = {}
+    for aid, s in states.items():
+        if s.status != STATUS_LIVE and s.status != STATUS_UPCOMING:
+            continue
+        booked += s.your_booked_left
+        settings = auto.get(aid)
+        limit = rules.bid_limit(aid)
+        if settings and settings.auto_rebook and limit:
+            room = max(0, limit - s.your_bids - s.your_booked_left)
+            earmarked += room
+            per[aid] = room
+    return {"booked": booked, "earmarked": earmarked, "earmarked_by_auction": per}

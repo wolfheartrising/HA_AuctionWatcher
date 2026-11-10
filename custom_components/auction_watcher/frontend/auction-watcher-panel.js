@@ -10,9 +10,9 @@
  * until you save it, and the page re-draws from those drafts.
  */
 
-const SITE_NAMES = { govauctions: "GovAuctions", macbid: "Mac.bid" };
+const SITE_NAMES = { govauctions: "GovAuctions", macbid: "Mac.bid", ebay: "eBay" };
 // What the per-auction spending cap is called on each site
-const LIMIT_LABEL = { govauctions: "Max bids", macbid: "Max bid ($)" };
+const LIMIT_LABEL = { govauctions: "Max bids", macbid: "Max bid ($)", ebay: "Max price ($)" };
 const SHORT_CLOCK = 15; // seconds; same as FINAL_PHASE_MAX_CLOCK in logic.py
 
 const SORTS = {
@@ -111,6 +111,43 @@ class AuctionWatcherPanel extends HTMLElement {
     });
   }
 
+  _autoSwitch() {
+    return Object.values(this._hass?.states || {}).find((x) => x.attributes?.auction_watcher_autoswitch);
+  }
+
+  // Balance per the site, what's tied up, what could still be spent, and the weekly budget
+  _tally(accounts) {
+    const acc = accounts.find((a) => a.spending);
+    if (!acc) return "";
+    const m = acc.spending;
+    const sw = this._autoSwitch();
+    const on = sw ? sw.state === "on" : !m.auto_paused;
+    const budget = m.weekly_budget
+      ? `<div><div class="k">This week</div><div class="v">${num(m.spent_week)} / ${num(m.weekly_budget)}</div>
+           <div class="k">${m.budget_left !== null && m.budget_left !== undefined ? `${num(Math.max(0, m.budget_left))} left` : ""}</div></div>`
+      : `<div><div class="k">This week</div><div class="v">${num(m.spent_week)}</div><div class="k">${money(m.spent_week_dollars)} · no budget set</div></div>`;
+    return `<div class="tally">
+      <div class="tally-grid">
+        <div><div class="k">Balance (site)</div><div class="v">${num(m.balance)}</div><div class="k">free to spend</div></div>
+        <div><div class="k">Booked</div><div class="v">${num(m.booked)}</div><div class="k">held in booked bids</div></div>
+        <div><div class="k">Earmarked</div><div class="v">${num(m.earmarked)}</div><div class="k">auto-rebook could still book</div></div>
+        <div><div class="k">At risk</div><div class="v">${num(m.at_risk)}</div><div class="k">${money(m.at_risk_dollars)}</div></div>
+        ${budget}
+        <div><div class="k">Today</div><div class="v">${num(m.spent_today)}</div><div class="k">bids placed</div></div>
+      </div>
+      <div class="tally-row">
+        <span class="badge ${on ? "on" : "cap"}">${on ? "Auto-booking on" : "Auto-booking paused"}</span>
+        ${sw ? `<button type="button" class="${on ? "secondary" : ""}" data-action="toggle-auto">${on ? "Pause all auto-booking" : "Resume auto-booking"}</button>` : ""}
+        ${m.at_risk > (m.balance || 0) + m.booked ? `<span class="warn">Your max bids add up to more than you have: auctions will compete for the same points.</span>` : ""}
+      </div>
+    </div>`;
+  }
+
+  _packs() {
+    const s = Object.values(this._hass?.states || {}).find((x) => x.attributes?.auction_watcher_packs);
+    return s ? { list: s.attributes.packs || [], scanned: s.attributes.scanned_at } : null;
+  }
+
   _accounts() {
     return Object.values(this._hass?.states || {})
       .filter((s) => s.attributes?.auction_watcher_account)
@@ -124,6 +161,7 @@ class AuctionWatcherPanel extends HTMLElement {
       { id: "watching", label: "Watching", filter: (a) => a.category === "watching" && a.status !== "ended" },
       { id: "ended", label: "Ended", filter: (a) => a.status === "ended" },
       { id: "pickup", label: "Awaiting pickup", filter: (a) => a.status === "awaiting_pickup" },
+      ...(this._packs() ? [{ id: "packs", label: "Point packs", filter: () => false, packs: true }] : []),
       ...sites.map((site) => ({ id: "site-" + site, label: SITE_NAMES[site] || site, filter: (a) => a.site === site })),
     ];
   }
@@ -148,7 +186,7 @@ class AuctionWatcherPanel extends HTMLElement {
     const accounts = this._accounts();
     const signature = JSON.stringify([this._tab, this._sort, auctions.map((a) => [a.entity_id, a.price, a.updated, a.bid_limit,
       a.auto_cancel, a.auto_rebook, a.rebook_mode, a.rebook_amount, a.max_price, a.auto_status, a.your_booked_left]),
-      accounts, this._saved]);
+      accounts, this._saved, this._tab === "packs" ? this._packs() : null, this._autoSwitch()?.state]);
     if (!force && signature === this._signature) return;
     this._signature = signature;
     this._pending = false;
@@ -183,12 +221,13 @@ class AuctionWatcherPanel extends HTMLElement {
       </div>
       <div class="tabs" role="tablist">
         ${tabs.map((t) => {
-          const n = auctions.filter(t.filter).length;
+          const n = t.packs ? (this._packs()?.list || []).filter((p) => p.grade === "green" && p.open).length : auctions.filter(t.filter).length;
           return `<button role="tab" class="tab ${t.id === this._tab ? "on" : ""}" data-tab="${esc(t.id)}">${esc(t.label)} <span class="count">${n}</span></button>`;
         }).join("")}
       </div>
+      ${tab.id === "active" ? this._tally(accounts) : ""}
       <div class="grid">
-        ${shown.length ? shown.map((a) => this._safeCard(a)).join("") : `<div class="empty">Nothing here right now.</div>`}
+        ${tab.packs ? this._packsView() : shown.length ? shown.map((a) => this._safeCard(a)).join("") : `<div class="empty">Nothing here right now.</div>`}
       </div>`;
 
     const slot = this.shadowRoot.querySelector(".menu");
@@ -202,6 +241,10 @@ class AuctionWatcherPanel extends HTMLElement {
       b.addEventListener("click", () => { this._tab = b.dataset.tab; this._maybeRender(true); }));
     root.querySelector("[data-action=refresh]").addEventListener("click", () =>
       this._hass.callService("auction_watcher", "refresh", {}));
+    root.querySelector("[data-action=toggle-auto]")?.addEventListener("click", () => {
+      const sw = this._autoSwitch();
+      if (sw) this._hass.callService("switch", sw.state === "on" ? "turn_off" : "turn_on", { entity_id: sw.entity_id });
+    });
     root.querySelector("[data-action=sort]").addEventListener("change", (ev) => {
       this._sort = ev.target.value; store("auction_watcher_sort", this._sort); this._maybeRender(true);
     });
@@ -251,7 +294,7 @@ class AuctionWatcherPanel extends HTMLElement {
   }
 
   _card(a) {
-    if (a.site === "macbid") return this._macbidCard(a);
+    if (a.site === "macbid" || a.site === "ebay") return this._macbidCard(a);
     const id = esc(a.auction_id);
     const c = this._clock(a);
     const img = safeUrl(a.image);
@@ -292,7 +335,8 @@ class AuctionWatcherPanel extends HTMLElement {
         <div class="rows">
           <div><span class="k">Your bids</span> ${num(a.your_bids)}${a.bid_limit ? ` / ${num(a.bid_limit)}` : ""} <span class="muted">(${money(a.your_points_cost)})</span></div>
           <div><span class="k">Booked left</span> ${num(a.your_booked_left)}</div>
-          <div><span class="k">If you won now</span> ${money(a.cost_if_won_now)} <span class="muted">(pay ${money(a.pay_if_won)})</span></div>
+          <div><span class="k">If you won now</span> ${money(a.cost_if_won_now)} <span class="muted">(pay ${money(a.pay_if_won)})</span>
+            ${a.bundle_points ? `<br><span class="muted">minus ${num(a.bundle_points)} bonus pts (${money(a.bundle_value)}) = <b>${money(a.net_cost_if_won_now)}</b></span>` : ""}</div>
           <div><span class="k">Buy It Now</span> ${money(a.buy_it_now)}</div>
           ${a.no_jumper_limit ? `<div><span class="k">Entry limit</span> ${money(a.no_jumper_limit)}</div>` : ""}
           <div><span class="k">Leader</span> ${esc(a.leader || "–")}</div>
@@ -323,6 +367,55 @@ class AuctionWatcherPanel extends HTMLElement {
       </div>`;
   }
 
+  // ---------------------------------------------------------------- point packs
+
+  _packsView() {
+    const data = this._packs();
+    if (!data) return `<div class="empty">Turn on the point-pack check in the GovAuctions settings.</div>`;
+    const blockLabel = { night: "midnight–6 AM", morning: "6 AM–noon", afternoon: "noon–6 PM", evening: "6 PM–midnight" };
+    const gradeText = { green: "🟢 Good", yellow: "🟡 Fair", red: "🔴 Poor", unknown: "⚪ No history" };
+    const scanned = data.scanned ? new Date(data.scanned).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "not yet";
+    const intro = `<div class="packs-intro note">The site's Packs list, checked hourly (last ${esc(scanned)}).
+      Break-even = the pack size in bids (1¢ auctions). <b>Good</b> means past winners of that pack usually needed
+      ≤35% of its size around this time of day; <b>Poor</b>, more than 60%.
+      <b>Suggested max</b> covers most past wins but never more than half the pack, so a win at it always pays.
+      <b>Stars</b> = how cheaply it usually goes around this time of day (★★★ winners needed ≤35% of the pack, ★★ ≤45%, ★ ≤60%).
+      Packs you can't fund up to the suggested max are flagged and listed after the ones you can.
+      Past results are an upper bound on your chances: you still have to outlast the others. When you join a pack, its Max bids is set to the suggestion unless you set one.</div>`;
+    if (!data.list.length) return intro + `<div class="empty">No point packs listed right now.</div>`;
+    return intro + data.list.map((p) => {
+      const start = p.starts_at ? Date.parse(p.starts_at) : null;
+      const when = p.live && start && start < Date.now()
+        ? `live${p.clock !== null && p.clock !== undefined ? `, clock ${p.clock}s` : ""}`
+        : start ? `starts in <span class="timer" data-deadline="${start}">–</span>` : "";
+      const blocks = Object.entries(p.blocks || {}).map(([k, v]) => `${esc(blockLabel[k] || k)}: ~${num(v.median)} bids (${v.wins})`).join(" · ");
+      return `<div class="card pack ${esc(p.grade)} ${p.open ? "" : "capped"}">
+        <div class="pack-head">
+          <a class="name" href="${safeUrl(p.url)}" target="_blank" rel="noopener">${esc(p.title)}</a>
+          <span class="badge grade-${esc(p.grade)}">${gradeText[p.grade] || p.grade}</span>
+          ${p.stars !== null && p.stars !== undefined ? `<span class="stars" title="How realistic a win is at the suggested max">${p.stars ? "★".repeat(p.stars) + "☆".repeat(3 - p.stars) : "skip"}</span>` : ""}
+        </div>
+        <div class="big">
+          <div><div class="k">Worth</div><div class="v">${money(p.value)}</div><div class="k">${num(p.points)} pts</div></div>
+          <div><div class="k">Winners usually used</div><div class="v">${p.expected_bids ? "~" + num(p.expected_bids) : "–"}</div>
+            <div class="k">${p.ratio !== null && p.ratio !== undefined ? Math.round(p.ratio * 100) + "% of break-even" : ""}</div></div>
+          <div><div class="k">Entry</div><div class="v small">${p.open ? (p.bids_to_lock !== null && p.bids_to_lock !== undefined ? `open, ~${num(p.bids_to_lock)} bids left` : "open") : "closed"}</div>
+            <div class="k">locks at ${money(p.entry_limit)}</div></div>
+        </div>
+        <div class="line"><span class="k">Now:</span> ${p.price !== null && p.price !== undefined ? money(p.price) : "–"} · ${when}
+          ${p.bidders !== null && p.bidders !== undefined ? ` · ${num(p.bidders)} bidding` : ""}${p.your_bids ? ` · you: ${num(p.your_bids)} bids` : ""}</div>
+        ${p.suggested_max ? `<div class="suggest"><b>Suggested max: ${num(p.suggested_max)} bids (${money(p.max_cost)})</b>
+          <span class="muted">· ${Math.round((p.cover || 0) * 100)}% of past winners needed no more ·
+          a win at the max nets +${num(p.net_win)} points${p.bid_limit ? ` · your max: ${num(p.bid_limit)}` : ""}</span>
+          ${p.suggested_max && !p.affordable && p.balance !== null && p.balance !== undefined ? `<br><b class="warn">Needs ${num(p.suggested_max)} bids, you have ${num(p.balance)}: you'd likely run out before winning.</b>` : ""}
+          ${p.stars === 0 ? `<br><span class="muted">At this time of day winners of this pack usually need more than 60% of it. Skip it.</span>` : ""}</div>` : ""}
+        ${p.past_wins ? `<div class="hist"><span class="k">Past ${num(p.past_wins)} wins:</span> median ~${num(p.median_bids)} bids,
+          ${Math.round((p.lost_money || 0) * 100)}% of winners still lost points.
+          Cheapest: ${esc(blockLabel[p.cheapest_block] || "–")}.<br><span class="muted">${blocks}</span></div>` : ""}
+      </div>`;
+    }).join("");
+  }
+
   // ---------------------------------------------------------------- Mac.bid cards
 
   _macbidCard(a) {
@@ -345,7 +438,7 @@ class AuctionWatcherPanel extends HTMLElement {
           ${img ? `<img src="${img}" alt="" loading="lazy">` : `<div class="noimg">🛒</div>`}
           <div class="head">
             <a class="name" href="${url}" target="_blank" rel="noopener">${esc(a.title)}</a>
-            <div class="sub">Mac.bid · <span class="status ${esc(a.status)}">${esc(status)}</span> ${badge}</div>
+            <div class="sub">${esc(SITE_NAMES[a.site] || a.site)} · <span class="status ${esc(a.status)}">${esc(status)}</span> ${badge}</div>
             ${(a.labels || []).length ? `<div class="labels">${a.labels.map((l) => `<span class="tag">${esc(l)}</span>`).join(" ")}</div>` : ""}
           </div>
         </div>`;
@@ -371,21 +464,24 @@ class AuctionWatcherPanel extends HTMLElement {
         </div>
         ${this._overtimeLine(a)}
         <div class="rows">
-          <div><span class="k">If you win now</span> ${money(a.cost_if_won_now)} <span class="muted">(+15% + $3, before tax)</span></div>
-          <div><span class="k">Retail</span> ${money(a.retail_price)}</div>
+          ${a.site === "ebay"
+            ? `<div><span class="k">Your max bid</span> ${a.your_max_bid ? money(a.your_max_bid) : "–"}</div>
+               <div><span class="k">Shipping</span> ${a.shipping === 0 ? "free" : money(a.shipping)}</div>`
+            : `<div><span class="k">If you win now</span> ${money(a.cost_if_won_now)} <span class="muted">(+15% + $3, before tax)</span></div>
+               <div><span class="k">Retail</span> ${money(a.retail_price)}</div>`}
           <div><span class="k">Buy now</span> ${money(a.buy_it_now)}</div>
           <div><span class="k">Bids · watchers</span> ${num(a.total_bids)} · ${num(a.watchers)}</div>
         </div>
         <div class="limits">
           <div class="lim-row">
-            <label>Max bid ($)
+            <label>${esc(LIMIT_LABEL[a.site] || "Max bid ($)")}
               <input data-id="${id}" data-field="limit" type="number" min="0" step="1" inputmode="numeric"
                 value="${esc(limit)}" placeholder="none"></label>
             <button type="button" data-act="limit" data-id="${id}">Save</button>
             <span class="saved">${esc(this._saved["limit:" + a.auction_id] || "")}</span>
           </div>
           <div class="total" data-total="${id}">${this._totalText(a)}</div>
-          <div class="note">You get an alert when the price passes this. Bid on Mac.bid itself; this doesn't place bids.</div>
+          <div class="note">You get an alert when the price passes this. Bid on ${esc(SITE_NAMES[a.site] || a.site)} itself; this doesn't place bids.</div>
         </div>
       </div>`;
   }
@@ -410,6 +506,12 @@ class AuctionWatcherPanel extends HTMLElement {
   // Total max cost = max bids × point cost + what you'd pay if you won at your max price
   _totalText(a) {
     const aid = a.auction_id;
+    if (a.site === "ebay") {
+      const max = parseFloat(this._val(aid, "limit", a.bid_limit || 0)) || 0;
+      if (!max) return `<span class="muted">Set a max price to get an alert when it's passed.</span>`;
+      const ship = Number(a.shipping || 0);
+      return `<b>At your max: ${money(max + ship)}</b> <span class="muted">= ${money(max)}${ship ? ` + ${money(ship)} shipping` : ""}, before tax.</span>`;
+    }
     if (a.site === "macbid") {
       const max = parseFloat(this._val(aid, "limit", a.bid_limit || 0)) || 0;
       if (!max) return `<span class="muted">Set a max bid to see what winning at it would cost.</span>`;
@@ -638,6 +740,19 @@ const STYLE = `
   .bk-row, .bk-line { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
   .bk-check { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
   .note { color: var(--secondary-text-color); font-size: 12px; }
+  .packs-intro { grid-column: 1 / -1; font-size: 13px; }
+  .stars { color: var(--warning-color, #ff9800); font-size: 15px; letter-spacing: 1px; white-space: nowrap; }
+  .warn { color: var(--error-color, #db4437); }
+  .tally { margin: 12px 16px 0; padding: 12px; border-radius: 12px; background: var(--card-background-color); border: 1px solid var(--divider-color); }
+  .tally-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; text-align: center; }
+  .tally-grid .v { font-size: 20px; font-weight: 500; font-variant-numeric: tabular-nums; }
+  .tally-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 10px; font-size: 13px; }
+  .suggest { font-size: 13px; padding: 8px; border-radius: 8px; background: var(--secondary-background-color); }
+  .pack-head { display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; }
+  .card.pack.green { border: 2px solid var(--success-color, #43a047); }
+  .badge.grade-green { background: var(--success-color, #43a047); color: #fff; }
+  .badge.grade-yellow { background: var(--warning-color, #ff9800); color: #000; }
+  .badge.grade-red { background: var(--error-color, #db4437); color: #fff; }
   details .note { margin-top: 8px; }
   @media (max-width: 420px) { .grid { grid-template-columns: 1fr; padding: 12px; } .rows { grid-template-columns: 1fr; } .sort { margin-left: 0; } }
 `;

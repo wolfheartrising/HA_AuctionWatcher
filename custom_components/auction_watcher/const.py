@@ -1,13 +1,13 @@
 """Constants for Auction Watcher."""
 
 DOMAIN = "auction_watcher"
-VERSION = "0.6.0"  # keep in sync with manifest.json (a test checks this)
+VERSION = "0.8.0"  # keep in sync with manifest.json (a test checks this)
 
 CONF_SITE = "site"
 CONF_COOKIE = "cookie"
 
 SITE_GOVAUCTIONS = "govauctions"
-SITES = {SITE_GOVAUCTIONS: "GovAuctions", "macbid": "Mac.bid"}
+SITES = {SITE_GOVAUCTIONS: "GovAuctions", "macbid": "Mac.bid", "ebay": "eBay"}
 
 # Options
 CONF_FAST_INTERVAL = "fast_interval_seconds"
@@ -25,7 +25,7 @@ CONF_STABLE_SECONDS = "stable_seconds"        # must stay at <= N bidders this l
 DEFAULT_ACTIVE_WINDOW = 3
 DEFAULT_STABLE_SECONDS = 0
 DEFAULT_ALERT_KINDS = ["opportunity", "bid_limit", "ended", "won", "booking",
-                       "outbid", "ending_soon", "over_max", "pickup"]
+                       "outbid", "ending_soon", "over_max", "pickup", "pack", "budget"]
 
 DEFAULT_FAST_INTERVAL = 10       # seconds, while something you follow is live
 DEFAULT_IDLE_INTERVAL = 45       # minutes, when nothing is live (keeps the login fresh)
@@ -50,8 +50,20 @@ EVENT_OUTBID = f"{DOMAIN}_outbid"
 EVENT_ENDING_SOON = f"{DOMAIN}_ending_soon"
 EVENT_OVER_MAX = f"{DOMAIN}_over_max"
 EVENT_PICKUP = f"{DOMAIN}_pickup_reminder"
+EVENT_PACK = f"{DOMAIN}_good_point_pack"
+EVENT_BUDGET = f"{DOMAIN}_budget_reached"
+CONF_PACKS_ENABLED = "scan_point_packs"
+CONF_WEEKLY_BUDGET = "weekly_budget_points"  # 0 = no budget
+PACKS_SCAN_SECONDS = 3600   # full Packs list + history, hourly
+PACKS_LIVE_SECONDS = 600    # live price / entry state of known packs
 
 SITE_MACBID = "macbid"
+SITE_EBAY = "ebay"
+CONF_APP_ID = "app_id"
+CONF_CERT_ID = "cert_id"
+CONF_RUNAME = "runame"
+CONF_EBAY_TOKENS = "ebay_tokens"
+CONF_EBAY_USER = "ebay_user_id"
 CONF_EMAIL = "email"
 CONF_PASSWORD = "password"
 CONF_AUTH = "auth"            # Mac.bid tokens (renewed automatically)

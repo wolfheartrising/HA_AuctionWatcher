@@ -44,6 +44,17 @@ class RateLimited(SiteError):
     """Mac.bid answered 429: slow down."""
 
 
+class CodeRequired(AuthError):
+    """Mac.bid sent a verification code (new device) that has to be typed in."""
+
+    def __init__(self, where: str, last4: str = "", new_password: bool = False) -> None:
+        self.where = where
+        self.last4 = last4
+        self.new_password = new_password
+        to = f"your {where}" + (f" ending {last4}" if last4 else "")
+        super().__init__(f"Mac.bid sent a verification code to {to}")
+
+
 def lot_refresh_seconds(seconds_left: float | None) -> int:
     """How often one lot needs checking: often only near its end."""
     if seconds_left is None:
@@ -250,10 +261,19 @@ class MacBidClient:
             h["Authorization"] = self.auth["access_token"]
         return h
 
-    async def _call(self, method: str, path: str, body: Any = None, auth: bool = True) -> Any:
+    async def _call(self, method: str, path: str, body: Any = None, auth: bool = True, any_status: bool = False) -> Any:
         try:
             async with self._session.request(method, API + path, json=body, headers=self._headers(auth),
                                              timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if any_status and resp.status != 429:
+                    # Sign-in answers 4xx with a useful JSON body (wrong password, code needed, ...)
+                    try:
+                        data = await resp.json(content_type=None)
+                    except ValueError:
+                        data = None
+                    if isinstance(data, dict):
+                        return {**data, "_status": resp.status}
+                    raise SiteError(f"Mac.bid answered {resp.status} for {path}")
                 if resp.status in (401, 403):
                     raise AuthError(f"Mac.bid refused the login ({resp.status})")
                 if resp.status == 429:
@@ -274,9 +294,37 @@ class MacBidClient:
         self.auth_changed = True
 
     async def login(self) -> None:
+        """Sign in like the site does. On a device Mac.bid doesn't know yet it texts or
+        emails a code first: then CodeRequired is raised and submit_code() finishes."""
         if not (self._email and self._password):
             raise AuthError("Mac.bid needs logging in again")
-        self._store(await self._call("POST", "/token", {"email": self._email, "password": self._password}, auth=False))
+        data = await self._call("POST", "/auth/auth-validation", {
+            "email": self._email, "password": self._password,
+            "device_id": self.device_id, "remember_me": True,
+        }, auth=False, any_status=True)
+        if data.get("access_token"):
+            self._store(data)
+            return
+        if "is_expired" in data or data.get("type") in ("phone", "email"):
+            raise CodeRequired(
+                where=data.get("type") or "phone or email",
+                last4=str(data.get("last4") or ""),
+                new_password=bool(data.get("is_expired")),
+            )
+        if data.get("email_verified") is False:
+            raise AuthError("Mac.bid says this email isn't verified yet; finish that on mac.bid first")
+        raise AuthError(str(data.get("error") or data.get("message") or "Mac.bid didn't accept that email and password"))
+
+    async def submit_code(self, code: str) -> None:
+        """Finish signing in with the code Mac.bid sent (same call as the site's code form)."""
+        data = await self._call("PUT", "/auth/validate-access-code", {
+            "code": str(code).strip().replace(" ", "").replace("·", ""),
+            "new_password": self._password,
+            "device_id": self.device_id, "remember_me": True,
+        }, auth=False, any_status=True)
+        if not data.get("access_token"):
+            raise AuthError(str(data.get("error") or data.get("message") or "Mac.bid didn't accept that code"))
+        self._store(data)
 
     async def renew(self) -> None:
         now = time.time()

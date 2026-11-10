@@ -23,6 +23,11 @@ from .const import (
     SERVICE_SET_BID_LIMIT,
 )
 from .const import (
+    CONF_APP_ID,
+    CONF_CERT_ID,
+    CONF_EBAY_TOKENS,
+    CONF_RUNAME,
+    SITE_EBAY,
     CONF_AUTH,
     CONF_DEVICE_ID,
     CONF_EMAIL,
@@ -30,15 +35,16 @@ from .const import (
     CONF_SITE,
     SITE_MACBID,
 )
-from .coordinator import AuctionWatcherCoordinator, MacBidCoordinator
+from .coordinator import AuctionWatcherCoordinator, EbayCoordinator, MacBidCoordinator
 from .cookies import parse_cookie_input
+from .sites import ebay as eb
 from .sites import macbid as mb
 from .logic import AutoSettings
 from .sites.base import SiteError
 from .panel import async_register_panel, async_remove_panel
 from .sites import govauctions as ga
 
-PLATFORMS = [Platform.SENSOR]
+PLATFORMS = [Platform.SENSOR, Platform.SWITCH]
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 type AuctionWatcherConfigEntry = ConfigEntry[AuctionWatcherCoordinator]
@@ -151,12 +157,18 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: AuctionWatcherConfigEntry) -> bool:
     session = async_create_clientsession(hass, cookie_jar=aiohttp.DummyCookieJar())
-    if entry.data.get(CONF_SITE) == SITE_MACBID:
+    if entry.data.get(CONF_SITE) == SITE_EBAY:
+        client_e = eb.EbayClient(
+            session, entry.data[CONF_APP_ID], entry.data[CONF_CERT_ID],
+            runame=entry.data.get(CONF_RUNAME), user_auth=entry.data.get(CONF_EBAY_TOKENS),
+        )
+        coordinator: AuctionWatcherCoordinator = EbayCoordinator(hass, entry, client_e)
+    elif entry.data.get(CONF_SITE) == SITE_MACBID:
         client = mb.MacBidClient(
             session, entry.data.get(CONF_AUTH), entry.data[CONF_DEVICE_ID],
             email=entry.data.get(CONF_EMAIL), password=entry.data.get(CONF_PASSWORD),
         )
-        coordinator: AuctionWatcherCoordinator = MacBidCoordinator(hass, entry, client)
+        coordinator = MacBidCoordinator(hass, entry, client)
     else:
         cookies = parse_cookie_input(entry.data[CONF_COOKIE], domain=ga.COOKIE_DOMAIN)
         coordinator = AuctionWatcherCoordinator(hass, entry, ga.GovAuctionsClient(session, cookies))

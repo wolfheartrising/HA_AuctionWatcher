@@ -18,6 +18,12 @@ from homeassistant.util import dt as dt_util
 
 from .alerts import build_calls, human_time
 from .const import (
+    CONF_WEEKLY_BUDGET,
+    CONF_PACKS_ENABLED,
+    PACKS_LIVE_SECONDS,
+    PACKS_SCAN_SECONDS,
+    CONF_EBAY_TOKENS,
+    CONF_EBAY_USER,
     CONF_KEEP_ENDED_DAYS,
     DEFAULT_KEEP_ENDED_DAYS,
     CONF_AUTH,
@@ -57,6 +63,8 @@ from .const import (
     EVENT_OUTBID,
     EVENT_OVER_MAX,
     EVENT_PICKUP,
+    EVENT_PACK,
+    EVENT_BUDGET,
     EVENT_OPPORTUNITY,
     EVENT_WON,
     HISTORY_FETCHES_PER_UPDATE,
@@ -80,6 +88,10 @@ from .logic import (
     evaluate,
     evaluate_timed,
     keep_ended,
+    points_at_risk,
+    record_spending,
+    spent_since,
+    week_start,
 )
 from .sites.base import (
     STATUS_ENDED,
@@ -92,7 +104,9 @@ from .sites.base import (
     state_from_dict,
     state_to_dict,
 )
+from . import packs as packs_mod
 from .sites import govauctions as ga
+from .sites import ebay as eb
 from .sites import macbid as mb
 
 _LOGGER = logging.getLogger(__name__)
@@ -109,6 +123,8 @@ EVENT_NAMES = {
     "ending_soon": EVENT_ENDING_SOON,
     "over_max": EVENT_OVER_MAX,
     "pickup": EVENT_PICKUP,
+    "pack": EVENT_PACK,
+    "budget": EVENT_BUDGET,
 }
 # Which "Which alerts to send" choice covers each event
 ALERT_KIND_OF = {"booked": "booking", "cancelled": "booking", "booking_failed": "booking"}
@@ -149,6 +165,19 @@ class AuctionWatcherCoordinator(DataUpdateCoordinator[dict[str, AuctionState]]):
         self.expired_ids: list[str] = []  # ended long enough ago that their sensors can go
         self._original_end: dict[str, float] = {}  # Mac.bid lot -> first end time seen (saved)
         self._needs_save = False
+        # Point-pack scanner (GovAuctions)
+        self.packs: list[dict[str, Any]] = []
+        self.packs_scanned_at: float | None = None
+        self._packs_live_at = 0.0
+        self._pack_static: dict[str, dict[str, Any]] = {}
+        self._pack_hist: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+        self._pack_alerted: set[str] = set()
+        # Spending and the auto-booking switch (GovAuctions)
+        self._ledger: list[list[float]] = []   # [time, bids placed, auction]
+        self._last_bids: dict[str, int] = {}
+        self.auto_paused = False
+        self._budget_alerted_week: float | None = None
+        self.spending: dict[str, Any] = {}
 
     @staticmethod
     def _opt(entry: ConfigEntry, key: str, default: Any) -> Any:
@@ -182,6 +211,9 @@ class AuctionWatcherCoordinator(DataUpdateCoordinator[dict[str, AuctionState]]):
                 continue
         self._last_seen = {k: st for k, (_, st) in self._ended.items()}
         self._original_end = {str(k): float(v) for k, v in (stored.get("original_end") or {}).items()}
+        self._ledger = [list(r) for r in (stored.get("ledger") or [])]
+        self._last_bids = {str(k): int(v) for k, v in (stored.get("last_bids") or {}).items()}
+        self.auto_paused = bool(stored.get("auto_paused", False))
 
     async def _save(self) -> None:
         await self._store.async_save({
@@ -190,6 +222,9 @@ class AuctionWatcherCoordinator(DataUpdateCoordinator[dict[str, AuctionState]]):
             "cancelled_with": {k: m.cancelled_with for k, m in self._mem.items() if m.cancelled_with},
             "ended": {k: [t, state_to_dict(st)] for k, (t, st) in self._ended.items()},
             "original_end": self._original_end,
+            "ledger": self._ledger,
+            "last_bids": self._last_bids,
+            "auto_paused": self.auto_paused,
         })
 
     async def async_set_bid_limit(self, auction_id: str, limit: int) -> None:
@@ -202,6 +237,140 @@ class AuctionWatcherCoordinator(DataUpdateCoordinator[dict[str, AuctionState]]):
 
     def bid_limit(self, auction_id: str) -> int:
         return self.rules.bid_limit(auction_id)
+
+    def _budget(self) -> int:
+        return int(self._opt(self.config_entry, CONF_WEEKLY_BUDGET, 0) or 0)
+
+    def _budget_left(self, now: float, states: dict[str, AuctionState] | None = None) -> int | None:
+        """Weekly budget minus bids placed this week minus bids already booked (they'll be spent too)."""
+        budget = self._budget()
+        if not budget:
+            return None
+        spent = spent_since(self._ledger, week_start(dt_util.as_local(dt_util.utc_from_timestamp(now))))
+        booked = sum(s.your_booked_left for s in (states if states is not None else (self.data or {})).values()
+                     if s.status in (STATUS_LIVE, STATUS_UPCOMING))
+        return budget - spent - booked
+
+    async def async_set_auto_paused(self, paused: bool) -> None:
+        self.auto_paused = paused
+        await self._save()
+        self.async_update_listeners()
+
+    async def _track_spending(self, states: dict[str, AuctionState], now: float) -> None:
+        """Ledger of bids placed (your_bids going up), weekly budget alert, and the at-risk tally."""
+        if record_spending(self._ledger, self._last_bids, states, now):
+            await self._save()
+        local = dt_util.as_local(dt_util.utc_from_timestamp(now))
+        week = week_start(local)
+        today = local.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        budget = self._budget()
+        spent_week = spent_since(self._ledger, week)
+        risk = points_at_risk(states, self._auto, self.rules)
+        cost = float(self._opt(self.config_entry, CONF_POINT_COST, DEFAULT_POINT_COST))
+        self.spending = {
+            "balance": self.points,
+            "booked": risk["booked"],
+            "earmarked": risk["earmarked"],
+            "at_risk": risk["booked"] + risk["earmarked"],
+            "at_risk_dollars": round((risk["booked"] + risk["earmarked"]) * cost, 2),
+            "spent_today": spent_since(self._ledger, today),
+            "spent_week": spent_week,
+            "spent_week_dollars": round(spent_week * cost, 2),
+            "weekly_budget": budget or None,
+            "budget_left": (budget - spent_week - risk["booked"]) if budget else None,
+            "auto_paused": self.auto_paused,
+        }
+        if budget and spent_week >= budget and self._budget_alerted_week != week:
+            self._budget_alerted_week = week
+            self._emit("budget", {"site": "govauctions", "auction_id": "budget", "title": "Weekly budget",
+                                  "url": ga.BASE_URL, "spent": spent_week, "budget": budget, "bid_limit": 0})
+
+    async def _scan_packs(self, now: float) -> None:
+        """Every hour: the site's Packs list, scored from each pack's past winners.
+        Live price/entry state is refreshed every 10 minutes in between. Never breaks updates."""
+        if not self._opt(self.config_entry, CONF_PACKS_ENABLED, True):
+            self.packs = []
+            return
+        full = self.packs_scanned_at is None or now - self.packs_scanned_at >= PACKS_SCAN_SECONDS
+        if not full and now - self._packs_live_at < PACKS_LIVE_SECONDS:
+            return
+        try:
+            client: ga.GovAuctionsClient = self.client
+            if full:
+                ids = await client.browse_category(ga.PACKS_CATEGORY)
+                missing = [i for i in ids if i not in self._pack_static]
+                for i in range(0, len(missing), 50):
+                    self._pack_static.update(await client.static(missing[i:i + 50]))
+                self._pack_ids = [i for i in ids if packs_mod.parse_points((self._pack_static.get(i) or {}).get("title", ""))]
+                fetched = 0
+                for aid in self._pack_ids:
+                    pid = self._pack_static[aid].get("product_id") or aid
+                    cached = self._pack_hist.get(pid)
+                    if (cached is None or now - cached[0] > 86400) and fetched < 8:
+                        self._pack_hist[pid] = (now, await client.previous_winners(aid))
+                        fetched += 1
+                self.packs_scanned_at = now
+            ids = getattr(self, "_pack_ids", [])
+            live, _ = await client.live(ids, now) if ids else ({}, None)
+            self._packs_live_at = now
+        except (SiteError, AuthError) as err:
+            _LOGGER.warning("Point-pack scan skipped: %s", err)
+            return
+
+        tz = dt_util.get_default_time_zone()
+        cost = float(self._opt(self.config_entry, CONF_POINT_COST, DEFAULT_POINT_COST))
+        rows = []
+        for aid in ids:
+            s = self._pack_static.get(aid) or {}
+            points = packs_mod.parse_points(s.get("title", ""))
+            l = live.get(aid) or {}
+            start = s.get("starts_at").timestamp() if s.get("starts_at") else None
+            if l and not l.get("live") and start and start < now:
+                continue  # ended
+            winners = (self._pack_hist.get(s.get("product_id") or aid) or (0, []))[1]
+            stats = packs_mod.pack_stats(winners, points, tz)
+            score = packs_mod.score_pack(points, stats, start, tz)
+            suggestion = packs_mod.suggest_max(points, winners) or {}
+            open_, to_lock = packs_mod.entry_open(l.get("price"), s.get("no_jumper_limit"), l.get("closed_to_new"))
+            rows.append({
+                "id": aid, "title": s.get("title"), "points": points, "value": round(points * cost, 2),
+                "url": f"{ga.BASE_URL}/auction/{aid}", "image": s.get("image"),
+                "starts_at": s["starts_at"].isoformat() if s.get("starts_at") else None,
+                "price": l.get("price"), "clock": l.get("clock_seconds"), "live": bool(l.get("live")),
+                "bidders": l.get("active_bidders"), "your_bids": l.get("your_bids", 0),
+                "open": open_, "bids_to_lock": to_lock, "entry_limit": s.get("no_jumper_limit"),
+                "labels": s.get("labels", []), "grade": score["grade"], "ratio": score["ratio"],
+                "expected_bids": score["expected_bids"], "block": score["block"], "cheapest_block": score.get("cheapest_block"),
+                "past_wins": stats["wins"] if stats else 0, "median_bids": stats["median"] if stats else None,
+                "lost_money": stats["lost_money"] if stats else None,
+                "blocks": stats["blocks"] if stats else {},
+                "suggested_max": suggestion.get("max"), "cover": suggestion.get("cover"),
+                "net_win": suggestion.get("net_win"),
+                "stars": packs_mod.stars_for(score["ratio"]) if score["grade"] != "unknown" else None,
+                "affordable": bool(suggestion) and self.points is not None and suggestion["max"] <= self.points,
+                "balance": self.points,
+                "max_cost": round(suggestion["max"] * cost, 2) if suggestion else None,
+                "bid_limit": self.bid_limit(aid) or None,
+            })
+        order = {"green": 0, "yellow": 1, "unknown": 2, "red": 3}
+        rows.sort(key=lambda r: (not r["open"], not r["affordable"], -(r["stars"] or 0), order[r["grade"]], r["starts_at"] or ""))
+        self.packs = rows
+        # One alert per good pack that's still open to new bidders
+        for r in rows:
+            if (r["stars"] or 0) >= 3 and r["affordable"] and r["open"] and r["id"] not in self._pack_alerted:
+                self._pack_alerted.add(r["id"])
+                self._emit("pack", {"site": "govauctions", "auction_id": r["id"], "title": r["title"], "url": r["url"],
+                                    "price": r["price"], "points": r["points"], "value": r["value"],
+                                    "expected_bids": r["expected_bids"], "bids_to_lock": r["bids_to_lock"],
+                                    "past_wins": r["past_wins"], "bid_limit": 0,
+                                    "suggested_max": r["suggested_max"], "cover": r["cover"]})
+        self._pack_alerted &= {r["id"] for r in rows}
+        joined = [r for r in rows if r["your_bids"] and r["suggested_max"] and str(r["id"]) not in self._limits]
+        for r in joined:
+            self._limits[str(r["id"])] = int(r["suggested_max"])
+            r["bid_limit"] = int(r["suggested_max"])
+        if joined:
+            await self._save()
 
     async def _apply_keep_ended(self, states: dict[str, AuctionState], now: float) -> dict[str, AuctionState]:
         """Keep ended (or dropped) auctions on the page for the configured number of days."""
@@ -257,6 +426,11 @@ class AuctionWatcherCoordinator(DataUpdateCoordinator[dict[str, AuctionState]]):
     async def async_book(self, auction_id: str, count: int, max_price: float | None = None) -> int:
         aid = str(auction_id)
         count = self._booking_guard(aid, int(count))
+        left = self._budget_left(time.time())
+        if left is not None:
+            if left <= 0:
+                raise SiteError("This week's budget is used up (raise it in the GovAuctions settings)")
+            count = min(count, left)
         if max_price is None:
             max_price = self.auto_settings(aid).max_price or None
         await self.client.book(aid, count, max_price)
@@ -303,12 +477,19 @@ class AuctionWatcherCoordinator(DataUpdateCoordinator[dict[str, AuctionState]]):
     async def _run_auto(self, states: dict[str, AuctionState], now: float) -> None:
         """Opt-in auto-cancel / auto-rebook, one decision per auction per check."""
         rules = self.rules
-        for aid, settings in list(self._auto.items()):
+        # One shared balance: auctions booking in the same check draw from it in turn,
+        # best opportunity (fewest other bidders) first, so they can't spend the same points twice.
+        available = self.points
+        budget_left = self._budget_left(now, states)
+        order = sorted(self._auto.items(), key=lambda kv: (states[kv[0]].active_bidders if kv[0] in states
+                                                            and states[kv[0]].active_bidders is not None else 99))
+        for aid, settings in order:
             s = states.get(aid)
             if s is None:
                 continue
             mem = self._mem.setdefault(aid, AutoMemory())
-            action, count, reason = decide_auto(s, settings, mem, rules, self.points, now)
+            action, count, reason = decide_auto(s, settings, mem, rules, available, now,
+                                                budget_left=budget_left, paused=self.auto_paused)
             mem.status = reason
             if not action:
                 continue
@@ -322,6 +503,10 @@ class AuctionWatcherCoordinator(DataUpdateCoordinator[dict[str, AuctionState]]):
                     self._emit("cancelled", self._booking_data(aid, count, f"auto: {reason}", s))
                 else:
                     await self.client.book(aid, count, settings.max_price or None)
+                    if available is not None:
+                        available -= count
+                    if budget_left is not None:
+                        budget_left -= count
                     mem.cancelled_with = 0
                     mem.status = f"booked {count} bids ({reason})"
                     s.your_booked_left = count
@@ -405,6 +590,8 @@ class AuctionWatcherCoordinator(DataUpdateCoordinator[dict[str, AuctionState]]):
             states[aid] = st
         self._bidders.forget_except(set(tracked))
         states = await self._apply_keep_ended(states, now)
+        await self._scan_packs(now)
+        await self._track_spending(states, now)
 
         events, self._snapshot = evaluate(states, self.rules, self._snapshot, self._lists["won"], now)
         for kind, data in events:
@@ -533,6 +720,96 @@ class MacBidCoordinator(AuctionWatcherCoordinator):
             states, self.rules, self._timed, now,
             ending_minutes=int(self._opt(e, CONF_ENDING_MINUTES, DEFAULT_ENDING_MINUTES)),
             pickup_hours=int(self._opt(e, CONF_PICKUP_HOURS, DEFAULT_PICKUP_HOURS)),
+        )
+        for kind, data in events:
+            if data.get("ends_at"):
+                data["ends_local"] = human_time(dt_util.as_local(dt_util.parse_datetime(data["ends_at"])))
+            self._emit(kind, data)
+
+        seconds = choose_timed_interval(
+            states, now,
+            fast=int(self._opt(e, CONF_FAST_INTERVAL, DEFAULT_FAST_INTERVAL)),
+            idle_minutes=int(self._opt(e, CONF_IDLE_INTERVAL, DEFAULT_IDLE_INTERVAL)),
+        )
+        self.mode = "fast" if seconds <= 60 else ("watching" if seconds <= 15 * 60 else "idle")
+        self.update_interval = timedelta(seconds=seconds)
+        return states
+
+
+class EbayCoordinator(AuctionWatcherCoordinator):
+    """eBay via the official APIs: your watchlist + bids (if signed in) and any item numbers you add."""
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, client: eb.EbayClient) -> None:
+        super().__init__(hass, entry, client)  # type: ignore[arg-type]
+        self._mine: dict[str, AuctionState] = {}
+        self._mine_at = 0.0
+        self._items: dict[str, tuple[float, AuctionState]] = {}
+        self._timed = TimedSnapshot()
+        self._backoff_until = 0.0
+        self._ebay_user = entry.data.get(CONF_EBAY_USER) or ""
+
+    @property
+    def opportunities(self) -> list[str]:
+        return []
+
+    async def async_book(self, auction_id: str, count: int, max_price: float | None = None) -> int:
+        raise SiteError("Bidding isn't available for eBay (use eBay's own max bid)")
+
+    async def async_cancel(self, auction_id: str) -> None:
+        raise SiteError("Bidding isn't available for eBay")
+
+    def _mine_due(self, now: float) -> bool:
+        lefts = [s.ends_at.timestamp() - now for s in self._mine.values() if s.status == STATUS_LIVE and s.ends_at]
+        return not self._mine_at or now - self._mine_at >= mb.lot_refresh_seconds(min(lefts) if lefts else None)
+
+    async def _async_update_data(self) -> dict[str, AuctionState]:
+        e = self.config_entry
+        now = time.time()
+        client: eb.EbayClient = self.client  # type: ignore[assignment]
+        extra = [i for i in (eb.parse_item_id(x) for x in str(self._opt(e, CONF_EXTRA_IDS, "")).replace(",", " ").split()) if i]
+        try:
+            if client.signed_in and now >= self._backoff_until and self._mine_due(now):
+                if not self._ebay_user:
+                    self._ebay_user = await client.my_user_id()
+                self._mine = await client.my_ebay(self._ebay_user, now)
+                self._mine_at = now
+            for item_id in extra:
+                if item_id in self._mine or now < self._backoff_until:
+                    continue
+                cached = self._items.get(item_id)
+                left = cached[1].ends_at.timestamp() - now if cached and cached[1].ends_at else None
+                if cached and now - cached[0] < mb.lot_refresh_seconds(left):
+                    continue
+                try:
+                    self._items[item_id] = (now, eb.state_from_browse(await client.item(item_id), False, now))
+                except eb.RateLimited:
+                    raise
+                except SiteError as err:
+                    _LOGGER.warning("eBay item %s: %s", item_id, err)
+        except eb.RateLimited:
+            self._backoff_until = now + 120
+            _LOGGER.info("eBay asked to slow down; using last known data for 2 minutes")
+        except AuthError as err:
+            raise ConfigEntryAuthFailed(str(err)) from err
+        except SiteError as err:
+            raise UpdateFailed(str(err)) from err
+        finally:
+            if client.user_auth_changed:
+                client.user_auth_changed = False
+                self.hass.config_entries.async_update_entry(
+                    e, data={**e.data, CONF_EBAY_TOKENS: client.user_auth, CONF_EBAY_USER: self._ebay_user})
+
+        states: dict[str, AuctionState] = dict(self._mine)
+        for item_id, (_, st) in self._items.items():
+            if item_id not in states and item_id in extra:
+                if st.ends_at:
+                    st.status = STATUS_LIVE if st.ends_at.timestamp() > now else STATUS_ENDED
+                states[item_id] = st
+        states = await self._apply_keep_ended(states, now)
+
+        events, self._timed = evaluate_timed(
+            states, self.rules, self._timed, now,
+            ending_minutes=int(self._opt(e, CONF_ENDING_MINUTES, DEFAULT_ENDING_MINUTES)),
         )
         for kind, data in events:
             if data.get("ends_at"):

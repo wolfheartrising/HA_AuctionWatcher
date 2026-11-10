@@ -7,6 +7,7 @@ from typing import Any
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
+from homeassistant.util import dt as dt_util
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -33,8 +34,10 @@ async def async_setup_entry(
     coord = entry.runtime_data
     if entry.data.get("site") == "macbid":
         async_add_entities([PickupsSensor(coord), FollowingSensor(coord)])
+    elif entry.data.get("site") == "ebay":
+        async_add_entities([WinningSensor(coord), FollowingSensor(coord)])
     else:
-        async_add_entities([PointsSensor(coord), OpportunitiesSensor(coord), FollowingSensor(coord)])
+        async_add_entities([PointsSensor(coord), OpportunitiesSensor(coord), FollowingSensor(coord), PacksSensor(coord)])
 
     known: set[str] = set()
 
@@ -89,6 +92,7 @@ class PointsSensor(_Base):
             # Lets the Auctions page find each site's account sensor
             "auction_watcher_account": self.coordinator.config_entry.title,
             "site": self.coordinator.config_entry.data.get("site"),
+            **({"spending": self.coordinator.spending} if self.coordinator.spending else {}),
         }
 
 
@@ -105,6 +109,46 @@ class PickupsSensor(PointsSensor):
     @property
     def native_value(self) -> int:
         return sum(1 for s in (self.coordinator.data or {}).values() if s.status == "awaiting_pickup")
+
+
+class WinningSensor(PointsSensor):
+    """eBay has no points; its account sensor counts live items where you're the high bidder."""
+
+    _attr_name = "Winning now"
+    _attr_icon = "mdi:trophy-outline"
+    _attr_native_unit_of_measurement = "items"
+
+    def __init__(self, coord: AuctionWatcherCoordinator) -> None:
+        _Base.__init__(self, coord, "winning")
+
+    @property
+    def native_value(self) -> int:
+        return sum(1 for s in (self.coordinator.data or {}).values()
+                   if s.status == "live" and s.extra.get("winning"))
+
+
+class PacksSensor(_Base):
+    """Good point packs still open to join. The full scored list is an attribute (for the Auctions page)."""
+
+    _attr_name = "Good point packs"
+    _attr_icon = "mdi:package-variant"
+    _unrecorded_attributes = frozenset({"packs"})  # big and changing: keep it out of history
+
+    def __init__(self, coord: AuctionWatcherCoordinator) -> None:
+        super().__init__(coord, "packs")
+
+    @property
+    def native_value(self) -> int:
+        return sum(1 for p in self.coordinator.packs if p["grade"] == "green" and p["open"])
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        scanned = self.coordinator.packs_scanned_at
+        return {
+            "auction_watcher_packs": True,
+            "scanned_at": dt_util.utc_from_timestamp(scanned).isoformat() if scanned else None,
+            "packs": self.coordinator.packs,
+        }
 
 
 class OpportunitiesSensor(_Base):
