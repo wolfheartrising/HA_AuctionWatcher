@@ -221,7 +221,7 @@ class AuctionWatcherPanel extends HTMLElement {
     const signature = JSON.stringify([this._tab, this._subtab, this._sort, auctions.map((a) => [a.entity_id, a.price, a.updated, a.bid_limit,
       a.auto_cancel, a.auto_rebook, a.rebook_mode, a.rebook_amount, a.max_price, a.auto_status, a.your_booked_left,
       a.mb_mode, a.mb_placed, a.mb_status, a.winning, a.has_assurance, a.mb_assurance, (a.condition_notes || []).length]),
-      accounts, this._saved, this._subtab === "packs" ? this._packs() : null, this._tab === "searches" ? [this._sd, this._sfilter, this._serr, this._sbusy] : null, this._autoSwitch()?.state, this._autoSwitch("macbid")?.state]);
+      accounts, this._saved, this._subtab === "packs" ? [this._packs(), this._showLocked] : null, this._tab === "searches" ? [this._sd, this._sfilter, this._serr, this._sbusy] : null, this._autoSwitch()?.state, this._autoSwitch("macbid")?.state]);
     if (!force && signature === this._signature) return;
     this._signature = signature;
     this._pending = false;
@@ -254,17 +254,19 @@ class AuctionWatcherPanel extends HTMLElement {
           </select>
         </label>
       </div>
-      <div class="tabs" role="tablist">
-        ${tabs.map((t) => {
+      ${[tabs.filter((t) => !t.id.startsWith("site-")), tabs.filter((t) => t.id.startsWith("site-"))].filter((row) => row.length).map((row, i) => `
+      <div class="tabs ${i ? "site-tabs" : ""}" role="tablist">
+        ${i ? `<span class="tabs-label">Sites</span>` : ""}
+        ${row.map((t) => {
           const n = t.searches ? (this._sd ? this._sd.results.filter((h) => h.new).length || this._sd.results.length : "…") : auctions.filter(t.filter).length;
-          return `<button role="tab" class="tab ${t.id === this._tab ? "on" : ""}" data-tab="${esc(t.id)}">${esc(t.label)} <span class="count">${n}</span></button>`;
+          return `<button role="tab" class="tab ${t.id === this._tab ? "on" : ""}" data-tab="${esc(t.id)}">${t.id.startsWith("site-") ? siteDot(t.id.slice(5)) : ""}${esc(t.label)} <span class="count">${n}</span></button>`;
         }).join("")}
-      </div>
+      </div>`).join("")}
       ${tab.id === "active" ? this._tally(accounts) : ""}
       ${tab.id === "site-govauctions" && this._packs() ? `<div class="subtabs">
         <button class="subtab ${this._subtab !== "packs" ? "on" : ""}" data-subtab="following">Following <span class="count">${shown.length}</span></button>
         <button class="subtab ${this._subtab === "packs" ? "on" : ""}" data-subtab="packs">Point packs
-          <span class="count">${(this._packs()?.list || []).filter((p) => p.stars >= 3 && p.open && p.affordable).length}</span></button>
+          <span class="count">${this._packGroups().filter((g) => g.auctions.some((p) => p.open || p.your_bids)).length}</span></button>
         <span class="muted">Point packs aren't auctions you're in: they're "if you're interested" picks.</span></div>` : ""}
       ${tab.searches ? this._searchesView() : `<div class="grid">
         ${tab.id === "site-govauctions" && this._subtab === "packs" && this._packs() ? this._packsView() : shown.length ? shown.map((a) => this._safeCard(a)).join("") : `<div class="empty">Nothing here right now.</div>`}
@@ -283,6 +285,9 @@ class AuctionWatcherPanel extends HTMLElement {
       b.addEventListener("click", () => { this._tab = b.dataset.tab; this._maybeRender(true); }));
     root.querySelector("[data-action=refresh]").addEventListener("click", () =>
       this._hass.callService("auction_watcher", "refresh", {}));
+    root.querySelector("[data-action=packs-locked]")?.addEventListener("click", () => {
+      this._showLocked = !this._showLocked; this._maybeRender(true);
+    });
     root.querySelectorAll("[data-action=toggle-auto]").forEach((b) => b.addEventListener("click", () => {
       const sw = this._autoSwitch(b.dataset.site);
       if (sw) this._hass.callService("switch", sw.state === "on" ? "turn_off" : "turn_on", { entity_id: sw.entity_id });
@@ -321,7 +326,7 @@ class AuctionWatcherPanel extends HTMLElement {
     try {
       this._sd = await this._hass.callWS({ type: "auction_watcher/searches" });
       this._serr = null;
-    } catch (e) { this._serr = e?.message || String(e); }
+    } catch (e) { this._serr = this._wsError(e); }
     this._maybeRender();
   }
 
@@ -330,8 +335,15 @@ class AuctionWatcherPanel extends HTMLElement {
     try {
       this._sd = await this._hass.callWS({ type: "auction_watcher/searches/change", ...payload });
       this._serr = null;
-    } catch (e) { this._serr = e?.message || String(e); }
+    } catch (e) { this._serr = this._wsError(e); }
     this._sbusy = false; this._maybeRender(true);
+  }
+
+  _wsError(e) {
+    const msg = e?.message || String(e);
+    return /unknown command/i.test(msg) || e?.code === "unknown_command"
+      ? "Home Assistant is still running the previous version of Auction Watcher. Restart Home Assistant to finish the update."
+      : msg;
   }
 
   _searchesView() {
@@ -578,49 +590,71 @@ class AuctionWatcherPanel extends HTMLElement {
 
   // ---------------------------------------------------------------- point packs
 
+  _packGroups() {
+    const data = this._packs();
+    if (!data) return [];
+    // One card per pack size (product); its live/upcoming auctions listed inside.
+    // Rows arrive best-first, so a group's first row is its best auction.
+    const groups = new Map();
+    for (const p of data.list) {
+      const k = String(p.product_id || p.title);
+      if (!groups.has(k)) groups.set(k, { head: p, auctions: [] });
+      groups.get(k).auctions.push(p);
+    }
+    return [...groups.values()];
+  }
+
   _packsView() {
     const data = this._packs();
     if (!data) return `<div class="empty">Turn on the point-pack check in the GovAuctions settings.</div>`;
     const blockLabel = { night: "midnight–6 AM", morning: "6 AM–noon", afternoon: "noon–6 PM", evening: "6 PM–midnight" };
-    const gradeText = { green: "🟢 Good", yellow: "🟡 Fair", red: "🔴 Poor", unknown: "⚪ No history" };
+    const gradeText = { green: "🟢 Good", yellow: "🟡 Fair", red: "🔴 Poor", unknown: "⚪ Not enough history" };
     const scanned = data.scanned ? new Date(data.scanned).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "not yet";
-    const intro = `<div class="packs-intro note">The site's Packs list, checked hourly (last ${esc(scanned)}).
+    const intro = `<details class="packs-intro note"><summary>The site's Packs list, one card per pack size, checked hourly (last ${esc(scanned)}). How to read this</summary>
       Break-even = the pack size in bids (1¢ auctions). <b>Good</b> means past winners of that pack usually needed
       ≤35% of its size around this time of day; <b>Poor</b>, more than 60%.
       <b>Suggested max</b> covers most past wins but never more than half the pack, so a win at it always pays.
-      <b>Stars</b> = how cheaply it usually goes around this time of day (★★★ winners needed ≤35% of the pack, ★★ ≤45%, ★ ≤60%).
-      Packs you can't fund up to the suggested max are flagged and listed after the ones you can.
-      Past results are an upper bound on your chances: you still have to outlast the others. When you join a pack, its Max bids is set to the suggestion unless you set one.</div>`;
+      <b>Stars</b> = how cheaply it usually goes at that auction's time of day (★★★ winners needed ≤35% of the pack, ★★ ≤45%, ★ ≤60%).
+      <b>Entry</b>: past the entry limit only people already bidding can continue, so those auctions are hidden unless you're in them.
+      Past results are an upper bound on your chances: you still have to outlast the others. When you join a pack, its Max bids is set to the suggestion unless you set one.</details>`;
     if (!data.list.length) return intro + `<div class="empty">No point packs listed right now.</div>`;
-    return intro + data.list.map((p) => {
-      const start = p.starts_at ? Date.parse(p.starts_at) : null;
-      const when = p.live && start && start < Date.now()
-        ? `live${p.clock !== null && p.clock !== undefined ? `, clock ${p.clock}s` : ""}`
-        : start ? `starts in <span class="timer" data-deadline="${start}">–</span>` : "";
+    const visible = this._packGroups()
+      .map((g) => ({ ...g, auctions: g.auctions.filter((p) => this._showLocked || p.open || p.your_bids) }))
+      .filter((g) => g.auctions.length);
+    const lockedN = data.list.filter((p) => !p.open && !p.your_bids).length;
+    const toggle = lockedN ? `<div class="packs-more"><button class="secondary" data-action="packs-locked">${this._showLocked ? "Hide" : "Show"} ${lockedN} auction${lockedN === 1 ? "" : "s"} you can't join anymore</button></div>` : "";
+    return intro + toggle + (visible.length ? "" : `<div class="empty">No packs open to new bidders right now.</div>`) + visible.map(({ head: p, auctions }) => {
       const blocks = Object.entries(p.blocks || {}).map(([k, v]) => `${esc(blockLabel[k] || k)}: ~${num(v.median)} bids (${v.wins})`).join(" · ");
-      return `<div class="card pack ${esc(p.grade)} ${p.open ? "" : "capped"}">
+      const rows = auctions.map((a) => {
+        const start = a.starts_at ? Date.parse(a.starts_at) : null;
+        const when = a.live && start && start < Date.now()
+          ? `<b>live</b>${a.clock !== null && a.clock !== undefined ? ` · clock ${a.clock}s` : ""}${a.bidders !== null && a.bidders !== undefined ? ` · ${num(a.bidders)} bidding` : ""}`
+          : start ? `starts in <span class="timer" data-deadline="${start}">–</span>` : "";
+        const entry = a.open ? (a.bids_to_lock !== null && a.bids_to_lock !== undefined ? `entry open ~${num(a.bids_to_lock)} more bids` : "entry open") : `<span class="warn">entry closed</span>`;
+        const stars = a.stars !== null && a.stars !== undefined ? `<span class="stars" title="How cheaply it usually goes at this auction's time of day">${a.stars ? "★".repeat(a.stars) + "☆".repeat(3 - a.stars) : "skip"}</span>` : "";
+        return `<div class="pack-auction"><a href="${safeUrl(a.url)}" target="_blank" rel="noopener">${a.price !== null && a.price !== undefined ? money(a.price) : "–"}</a>
+          <span>${when}</span><span class="muted">${entry}</span>${a.your_bids ? `<span class="badge on">you: ${num(a.your_bids)} bids</span>` : ""}${stars}</div>`;
+      }).join("");
+      return `<div class="card pack ${esc(p.grade)}">
         <div class="pack-head">
           <a class="name" href="${safeUrl(p.url)}" target="_blank" rel="noopener">${esc(p.title)}</a>
           <span class="badge grade-${esc(p.grade)}">${gradeText[p.grade] || p.grade}</span>
-          ${p.stars !== null && p.stars !== undefined ? `<span class="stars" title="How realistic a win is at the suggested max">${p.stars ? "★".repeat(p.stars) + "☆".repeat(3 - p.stars) : "skip"}</span>` : ""}
         </div>
         <div class="big">
           <div><div class="k">Worth</div><div class="v">${money(p.value)}</div><div class="k">${num(p.points)} pts</div></div>
-          <div><div class="k">Winners usually used</div><div class="v">${p.expected_bids ? "~" + num(p.expected_bids) : "–"}</div>
-            <div class="k">${p.ratio !== null && p.ratio !== undefined ? Math.round(p.ratio * 100) + "% of break-even" : ""}</div></div>
-          <div><div class="k">Entry</div><div class="v small">${p.open ? (p.bids_to_lock !== null && p.bids_to_lock !== undefined ? `open, ~${num(p.bids_to_lock)} bids left` : "open") : "closed"}</div>
-            <div class="k">locks at ${money(p.entry_limit)}</div></div>
+          <div><div class="k">Winners usually used</div><div class="v">${p.expected_bids && p.grade !== "unknown" ? "~" + num(p.expected_bids) : "–"}</div>
+            <div class="k">${p.grade !== "unknown" && p.ratio !== null && p.ratio !== undefined ? Math.round(p.ratio * 100) + "% of break-even" : p.past_wins ? `only ${num(p.past_wins)} past wins` : "no past wins on record"}</div></div>
+          <div><div class="k">Entry limit</div><div class="v small">${money(p.entry_limit)}</div><div class="k">${auctions.length} auction${auctions.length === 1 ? "" : "s"}</div></div>
         </div>
-        <div class="line"><span class="k">Now:</span> ${p.price !== null && p.price !== undefined ? money(p.price) : "–"} · ${when}
-          ${p.bidders !== null && p.bidders !== undefined ? ` · ${num(p.bidders)} bidding` : ""}${p.your_bids ? ` · you: ${num(p.your_bids)} bids` : ""}</div>
+        <div class="pack-auctions">${rows}</div>
         ${p.suggested_max ? `<div class="suggest"><b>Suggested max: ${num(p.suggested_max)} bids (${money(p.max_cost)})</b>
           <span class="muted">· ${Math.round((p.cover || 0) * 100)}% of past winners needed no more ·
           a win at the max nets +${num(p.net_win)} points${p.bid_limit ? ` · your max: ${num(p.bid_limit)}` : ""}</span>
-          ${p.suggested_max && !p.affordable && p.balance !== null && p.balance !== undefined ? `<br><b class="warn">Needs ${num(p.suggested_max)} bids, you have ${num(p.balance)}: you'd likely run out before winning.</b>` : ""}
+          ${!p.affordable && p.balance !== null && p.balance !== undefined ? `<br><b class="warn">Needs ${num(p.suggested_max)} bids, you have ${num(p.balance)}: you'd likely run out before winning.</b>` : ""}
           ${p.stars === 0 ? `<br><span class="muted">At this time of day winners of this pack usually need more than 60% of it. Skip it.</span>` : ""}</div>` : ""}
-        ${p.past_wins ? `<div class="hist"><span class="k">Past ${num(p.past_wins)} wins:</span> median ~${num(p.median_bids)} bids,
-          ${Math.round((p.lost_money || 0) * 100)}% of winners still lost points.
-          Cheapest: ${esc(blockLabel[p.cheapest_block] || "–")}.<br><span class="muted">${blocks}</span></div>` : ""}
+        ${p.past_wins ? `<details class="hist"><summary><span class="k">Past ${num(p.past_wins)} wins:</span> median ~${num(p.median_bids)} bids,
+          ${Math.round((p.lost_money || 0) * 100)}% of winners still lost points. Cheapest: ${esc(blockLabel[p.cheapest_block] || "–")}.</summary>
+          <span class="muted">${blocks}</span></details>` : ""}
       </div>`;
     }).join("");
   }
@@ -988,6 +1022,17 @@ const STYLE = `
                  color: var(--primary-text-color); }
   .tabs { display: flex; gap: 4px; padding: 12px 16px 0; overflow-x: auto; scrollbar-width: none; border-bottom: 1px solid var(--divider-color); }
   .tabs::-webkit-scrollbar { display: none; }
+  .tabs.site-tabs { padding-top: 4px; align-items: center; }
+  .tabs.site-tabs .tab { font-size: 14px; padding: 8px 12px; }
+  .tabs-label { font-size: 12px; color: var(--secondary-text-color); text-transform: uppercase; letter-spacing: .05em; padding-right: 4px; }
+  .pack-auctions { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+  .pack-auction { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; padding: 4px 8px; border-radius: 6px;
+                  background: var(--secondary-background-color); }
+  .pack-auction a { font-weight: 600; color: var(--primary-color); text-decoration: none; min-width: 52px; }
+  .pack-auction .stars { margin-left: auto; }
+  details.packs-intro, .packs-more { grid-column: 1 / -1; }
+  details.packs-intro summary, details.hist summary { cursor: pointer; }
+  .packs-more { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
   .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 3px; vertical-align: middle; }
   .sv { padding: 16px; display: flex; flex-direction: column; gap: 12px; max-width: 1100px; }
   .sbar, .sadd, .sfilters { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; }

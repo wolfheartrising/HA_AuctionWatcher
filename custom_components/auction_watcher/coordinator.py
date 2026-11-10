@@ -315,9 +315,11 @@ class AuctionWatcherCoordinator(DataUpdateCoordinator[dict[str, AuctionState]]):
                 for aid in self._pack_ids:
                     pid = self._pack_static[aid].get("product_id") or aid
                     cached = self._pack_hist.get(pid)
-                    if (cached is None or now - cached[0] > 86400) and fetched < 8:
+                    # Past winners per pack size, refreshed daily (~36 sizes, about 15 s in all)
+                    if (cached is None or now - cached[0] > 86400) and fetched < 60:
                         self._pack_hist[pid] = (now, await client.previous_winners(aid))
                         fetched += 1
+                        await asyncio.sleep(0.3)
                 self.packs_scanned_at = now
             ids = getattr(self, "_pack_ids", [])
             live, _ = await client.live(ids, now) if ids else ({}, None)
@@ -342,7 +344,7 @@ class AuctionWatcherCoordinator(DataUpdateCoordinator[dict[str, AuctionState]]):
             suggestion = packs_mod.suggest_max(points, winners) or {}
             open_, to_lock = packs_mod.entry_open(l.get("price"), s.get("no_jumper_limit"), l.get("closed_to_new"))
             rows.append({
-                "id": aid, "title": s.get("title"), "points": points, "value": round(points * cost, 2),
+                "id": aid, "product_id": str(s.get("product_id") or aid), "title": s.get("title"), "points": points, "value": round(points * cost, 2),
                 "url": f"{ga.BASE_URL}/auction/{aid}", "image": s.get("image"),
                 "starts_at": s["starts_at"].isoformat() if s.get("starts_at") else None,
                 "price": l.get("price"), "clock": l.get("clock_seconds"), "live": bool(l.get("live")),
