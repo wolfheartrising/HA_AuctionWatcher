@@ -10,7 +10,7 @@
  * until you save it, and the page re-draws from those drafts.
  */
 
-const PANEL_VERSION = "1.3.3";  // must match const.py VERSION (a test checks)
+const PANEL_VERSION = "1.3.6";  // must match const.py VERSION (a test checks)
 const SITE_NAMES = { govauctions: "GovAuctions", macbid: "Mac.bid", ebay: "eBay" };
 // What the per-auction spending cap is called on each site
 const LIMIT_LABEL = { govauctions: "Max bids", macbid: "Max bid ($)", ebay: "Max price ($)" };
@@ -1118,7 +1118,7 @@ class AuctionWatcherPanel extends HTMLElement {
               : `<button type="button" data-act="limit" data-id="${id}">Save</button>`}
             <span class="saved">${esc(this._saved["limit:" + a.auction_id] || this._saved["mb:" + a.auction_id] || "")}</span>
           </div>
-          ${a.site === "macbid" && a.status === "live" ? `<div class="note">Minimum next bid: <b>${money(a.min_next_bid)}</b>.
+          ${a.site === "macbid" && a.status === "live" ? `<div class="note">Minimum next bid: <b>${money(a.min_next_bid)}</b>${a.min_next_known ? "" : " or more (Mac.bid's steps grow with the price, e.g. $5 above $100; it's checked live when you bid)"}.
             Your max is the most you'll pay; Mac.bid raises your bid for you up to it.
             ${a.assurance_cost ? (a.has_assurance ? ` · ✅ Buyer's Assurance added` : ` · Buyer's Assurance ${money(a.assurance_cost)}: you'll be asked when you bid.`) : ""}</div>` : ""}
           <div class="total" data-total="${id}">${this._totalText(a)}</div>
@@ -1182,7 +1182,8 @@ class AuctionWatcherPanel extends HTMLElement {
     const canBid = a.site === "macbid" || a.site === "govauctions";
     const gov = a.site === "govauctions";
     const amt = (n) => (gov ? `${num(n)} bids` : `$${num(n)}`);
-    const mode = this._val(aid, "proxy_mode", p?.mode || (canBid ? "bid" : "watch"));
+    const wish = p && p.mode === "watch" && p.wants ? p.wants : 0;
+    const mode = this._val(aid, "proxy_mode", wish && canBid ? "bid" : p?.mode || (canBid ? "bid" : "watch"));
     const stateText = {
       watching: "gets updates on this item (nothing is bid)",
       asked: "asked; waiting for their max",
@@ -1192,9 +1193,12 @@ class AuctionWatcherPanel extends HTMLElement {
       cancelled: "cancelled",
     };
     const open = p && !p.stopped && ["asked", "confirming", "confirmed", "watching"].includes(p.state);
+    const wishLine = wish ? `<div class="line warn">🙋 ${esc(p.person)} wants you to bid up to ${amt(wish)}${p.wants_price ? `, max price ${money(p.wants_price)}` : ""}.
+      ${canBid ? "Set your max below and tap \"Ask them\": they'll go straight to \"I agree to pay\"." : "eBay can't be bid automatically: place it on eBay yourself."}</div>` : "";
     const head = p ? `<span class="badge ${p.state === "confirmed" || p.state === "watching" ? "on" : open ? "hot" : ""}">${p.mode === "watch" ? "👀 " : "for "}${esc(p.person)}${p.bid ? ` · ${amt(p.bid)} max` : ""}</span>` : "";
-    return `<details class="booking proxy" ${open || this._open["proxy:" + aid] ? "open" : ""} data-id="proxy:${id}">
+    return `<details class="booking proxy" ${open || wish || this._open["proxy:" + aid] ? "open" : ""} data-id="proxy:${id}">
       <summary>${canBid ? "Bid for someone" : "Keep someone posted"} ${head}</summary>
+      ${wishLine}
       ${p ? `<div class="line"><b>${esc(p.person)}</b>: ${esc(p.stopped ? "stopped; the max bid already placed stays (Mac.bid bids can't be withdrawn)" : stateText[p.state] || p.state)}</div>
         ${p.mode === "watch" ? "" : `<div class="line"><span class="k">Your max</span> ${amt(p.hard_max)}
           ${p.their_max ? ` · <span class="k">they offered</span> ${amt(p.their_max)}` : ""}
@@ -1210,9 +1214,9 @@ class AuctionWatcherPanel extends HTMLElement {
           <option value="watch" ${mode === "watch" ? "selected" : ""}>Just keep them posted</option></select>` : ""}
         <select data-id="${id}" data-field="proxy_person">${people.map((x) => `<option value="${esc(x.id)}" ${this._val(aid, "proxy_person", p?.person_id || people[0]?.id) === x.id ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select>
         ${mode === "bid" ? `<label>${gov ? "my max bids" : "my max $"}<input data-id="${id}" data-field="proxy_max" type="number" min="1" step="1" class="small"
-          value="${esc(this._val(aid, "proxy_max", p?.hard_max || ""))}"></label>` : ""}
+          value="${esc(this._val(aid, "proxy_max", p?.hard_max || wish || ""))}"></label>` : ""}
         <button type="button" data-act="proxy_ask" data-id="${id}" data-site="${esc(a.site)}" ${people.length ? "" : "disabled"}>${
-          mode === "watch" ? (p && p.mode === "watch" && open ? "Watching" : "Keep them posted") : p && open && p.mode === "bid" ? "Update" : "Ask them"}</button>
+          mode === "watch" ? (p && p.mode === "watch" && open ? "Watching" : "Keep them posted") : p && open && p.mode === "bid" ? "Update" : wish ? "Ask them to confirm" : "Ask them"}</button>
         ${open ? `<button type="button" class="secondary" data-act="proxy_cancel" data-id="${id}" data-site="${esc(a.site)}">${p.mode === "watch" ? "Stop updates" : "Cancel request"}</button>` : ""}
       </div>` : ""}
       <div class="note">${!people.length ? "Add people on the ⚙ Settings tab (Bid for others) first."

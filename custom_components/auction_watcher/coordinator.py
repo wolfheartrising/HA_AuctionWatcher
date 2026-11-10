@@ -758,14 +758,39 @@ class MacBidCoordinator(AuctionWatcherCoordinator):
         s = (self.data or {}).get(aid)
         if s is None or s.status != STATUS_LIVE:
             raise SiteError("That item isn't live")
+        now = await self.async_lot_now(aid)  # the price may have moved since the last check
+        if amount < now["min_next"]:
+            raise SiteError(f"The current bid is ${now['price']:.0f}; Mac.bid's minimum next bid is ${now['min_next']}"
+                            + ("" if now["min_next_known"] else " or more (its raise steps grow with the price)"))
         left = self._macbid_budget_left(self.data or {}, exclude=aid)
         if left is not None and amount > left:
             raise SiteError(f"A ${amount} max would go past your budget (${max(left, 0)} left: Mac.bid budget or the spending cap)")
-        if s.price is not None and amount <= s.price:
-            raise SiteError(f"Your max must be above the current bid (${s.price:.0f}); the minimum is ${int(s.price) + 1}")
         await self._place(s, int(amount), "placed by you", assurance)
         await self.async_request_refresh()
         return int(amount)
+
+    def _in_play(self, states: dict[str, AuctionState] | None = None) -> set[str]:
+        """Items you're bidding on (or for someone), so they're checked often: you have a bid in,
+        you're winning, a bid is being confirmed, a late bid is scheduled, or someone's request is open."""
+        states = (self.data or {}) if states is None else states
+        ids = {k for k, s in states.items() if s.extra.get("you_are_bidding") or s.extra.get("winning")}
+        ids |= {k for k, m in self._mbmem.items() if m.placed or m.pending}
+        ids |= {k for k, v in self._mb.items() if v.mode != MB_MODE_OFF}
+        if (p := proxy_manager.get(self.hass)) is not None and p.enabled:
+            ids |= {r.lot_id for r in p.requests.values() if r.site == SITE_MACBID and r.state in ("asked", "confirming", "confirmed", "watching")}
+        return ids
+
+    async def async_lot_now(self, lot_id: str) -> dict[str, Any]:
+        """Read one item from Mac.bid right now (and keep it for the next update)."""
+        client: mb.MacBidClient = self.client  # type: ignore[assignment]
+        lot = await client.lot(lot_id)
+        lot = lot if isinstance(lot, dict) else {}
+        self._lots[lot_id] = (time.time(), lot)
+        if not getattr(self, "_logged_lot_fields", False):
+            self._logged_lot_fields = True
+            _LOGGER.info("Mac.bid lot fields (for the minimum-bid check): %s",
+                         {k: v for k, v in lot.items() if not isinstance(v, (dict, list))})
+        return mb.lot_now(lot, client.user_id)
 
     async def _place(self, s: AuctionState, amount: int, reason: str, assurance: bool = False) -> None:
         client: mb.MacBidClient = self.client  # type: ignore[assignment]
@@ -797,12 +822,20 @@ class MacBidCoordinator(AuctionWatcherCoordinator):
             s = states.get(aid)
             reason = getattr(self, "_pending_reason", {}).get(aid, "")
             if s is not None and (s.extra.get("you_are_bidding") or s.extra.get("winning")):
-                mem.placed, mem.pending = mem.pending, 0
+                sent = mem.pending
+                lot = (self._lots.get(aid) or (0, {}))[1] or {}
+                recorded = mb.lot_now(lot, self.client.user_id).get("your_max")
+                mem.placed, mem.pending = int(recorded) if recorded else sent, 0
+                raised = bool(recorded and recorded > sent)
                 mem.status = (f"max bid ${mem.placed} confirmed: "
                               + ("you're winning" if s.extra.get("winning") else "someone's max is higher")
                               + "; Mac.bid raises for you up to your max")
+                if raised:
+                    mem.status = (f"Mac.bid recorded a ${int(recorded)} max, not the ${sent} sent "
+                                  "(it rounded up to its minimum bid)")
                 await self._save()
-                self._emit("bid_placed", {**self._booking_data(aid, mem.placed, reason or "confirmed", s), "amount": mem.placed})
+                self._emit("bid_placed", {**self._booking_data(aid, mem.placed, reason or "confirmed", s),
+                                          "amount": mem.placed, "sent": sent, "raised": raised})
             elif now - mem.pending_since > 45:
                 amount, mem.pending = mem.pending, 0
                 mem.status = (f"Mac.bid accepted the request for a ${amount} max but no bid shows up. "
@@ -890,9 +923,10 @@ class MacBidCoordinator(AuctionWatcherCoordinator):
             # Each lot is checked only as often as it needs (often near its end), spaced out,
             # and a "too many requests" answer just keeps the last known data.
             first = True
+            playing = self._in_play()
             for lot_id in tracked:
                 cached = self._lots.get(lot_id)
-                if cached and now - cached[0] < mb.lot_refresh_seconds(self._seconds_left(cached[1], now)):
+                if cached and now - cached[0] < mb.lot_refresh_seconds(self._seconds_left(cached[1], now), lot_id in playing):
                     continue
                 if now < self._backoff_until:
                     break
@@ -985,12 +1019,16 @@ class MacBidCoordinator(AuctionWatcherCoordinator):
         except AuthError as err:
             raise ConfigEntryAuthFailed(str(err)) from err
 
+        playing = self._in_play(states)
         seconds = choose_timed_interval(
             states, now,
             fast=int(self._opt(e, CONF_FAST_INTERVAL, DEFAULT_FAST_INTERVAL)),
             idle_minutes=int(self._opt(e, CONF_IDLE_INTERVAL, DEFAULT_IDLE_INTERVAL)),
+            in_play=playing,
         )
-        self.mode = "fast" if seconds <= 60 else ("watching" if seconds <= 15 * 60 else "idle")
+        fast_now = seconds <= int(self._opt(e, CONF_FAST_INTERVAL, DEFAULT_FAST_INTERVAL))
+        self.mode = "fast" if fast_now else ("bidding" if playing and seconds <= 120 else
+                                             "watching" if seconds <= 15 * 60 else "idle")
         self.update_interval = timedelta(seconds=seconds)
         return states
 

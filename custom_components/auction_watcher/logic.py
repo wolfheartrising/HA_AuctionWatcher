@@ -335,14 +335,20 @@ def evaluate_timed(
     return events, snap
 
 
-def choose_timed_interval(states: dict[str, AuctionState], now: float, fast: int, idle_minutes: int) -> int:
-    """Poll fast only near an end time; Mac.bid auctions run for days."""
+def choose_timed_interval(states: dict[str, AuctionState], now: float, fast: int, idle_minutes: int,
+                          in_play: set[str] | None = None) -> int:
+    """Poll fast near an end time; Mac.bid auctions run for days. Items you're bidding on
+    (in_play) keep it at every 2 minutes, every minute in their last 2 hours."""
     lefts = [s.ends_at.timestamp() - now for s in states.values() if s.status == STATUS_LIVE and s.ends_at]
     soonest = min(lefts) if lefts else None
+    playing = [s.ends_at.timestamp() - now for k, s in states.items()
+               if in_play and k in in_play and s.status == STATUS_LIVE and s.ends_at]
+    if soonest is not None and soonest <= 15 * 60:
+        return fast
+    if playing:
+        return 60 if min(playing) <= 2 * 3600 else 120
     if soonest is None:
         return idle_minutes * 60
-    if soonest <= 15 * 60:
-        return fast
     if soonest <= 2 * 3600:
         return 120
     return min(idle_minutes * 60, 15 * 60)

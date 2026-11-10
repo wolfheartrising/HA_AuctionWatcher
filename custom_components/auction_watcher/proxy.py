@@ -31,7 +31,12 @@ class Person:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "Person":
-        return cls(name=str(d.get("name") or "").strip(), chat_id=str(d.get("chat_id") or "").strip(), id=str(d.get("id") or uuid.uuid4().hex[:8]))
+        return cls(name=clean_name(d.get("name")), chat_id=str(d.get("chat_id") or "").strip(), id=str(d.get("id") or uuid.uuid4().hex[:8]))
+
+
+def clean_name(name: Any) -> str:
+    """'Schrodinger (609098350)' -> 'Schrodinger' (Telegram chat titles often include the id)."""
+    return re.sub(r"\s*\(-?\d{5,}\)\s*$", "", str(name or "")).strip()
 
 
 @dataclass
@@ -47,6 +52,8 @@ class ProxyRequest:
     agreed_price: float = 0.0
     start_bids: int = 0                # your bids on the auction when they agreed (theirs are the ones after)
     stopped: bool = False              # cancelled after a Mac.bid bid was placed: no raises, still told how it ends
+    wants: int = 0                     # while just watching, they asked you to bid: dollars (Mac.bid/eBay) or bids (GovAuctions)
+    wants_price: float = 0.0           # GovAuctions: the max price they mentioned with it
     title: str = ""
     url: str = ""
     state: str = ASKED
@@ -135,9 +142,11 @@ def gov_used(req: ProxyRequest, your_bids_now: int) -> int:
     return min(used, req.agreed_max) if req.agreed_max else used
 
 
-def on_amount(req: ProxyRequest, amount: int, current_price: float | None, now: float | None = None) -> tuple[bool, str]:
-    """They replied with a max. Returns (accepted, what to tell them). Accepted -> CONFIRMING."""
-    floor = int(current_price or 0) + 1
+def on_amount(req: ProxyRequest, amount: int, current_price: float | None, now: float | None = None,
+              min_next: int | None = None) -> tuple[bool, str]:
+    """They replied with a max. Returns (accepted, what to tell them). Accepted -> CONFIRMING.
+    min_next = Mac.bid's smallest acceptable bid right now (its steps grow with the price)."""
+    floor = int(min_next or int(current_price or 0) + 1)
     if req.stopped:
         return False, "That request was cancelled, so I can't raise it."
     if req.state not in (ASKED, CONFIRMING, CONFIRMED):
@@ -191,9 +200,25 @@ def ask_text(name: str, title: str, url: str, price: float | None, hard_max: int
             "Reply \"stop\" any time to cancel.")
 
 
-def watch_text(name: str, title: str, url: str, price: float | None) -> str:
+def watch_text(name: str, title: str, url: str, price: float | None, site: str = "macbid") -> str:
+    how = ('reply with how many bids you\'d pay for (e.g. "40", or "40 $25" with a max price)' if site == "govauctions"
+           else 'reply with the most you\'d pay (e.g. "40")')
     return (f"Hi {name}! I'm keeping an eye on this for you:\n\n{title}\nCurrent price: ${price or 0:.2f}\n{url}\n\n"
-            "I'll message you when it's about to end and how it ends. Nothing will be bid. Reply \"stop\" to stop updates.")
+            "I'll message you when it's about to end and how it ends. Nothing will be bid. "
+            f"Want me to bid? {how}. Reply \"stop\" to stop updates.")
+
+
+def on_wish(req: ProxyRequest, amount: int, price: float | None = None, now: float | None = None) -> str:
+    """While just watching, they asked for a bid. Returns what to tell them (you decide on the page)."""
+    req.wants = amount
+    req.wants_price = float(price or 0)
+    unit = f"{amount} bids" if req.site == "govauctions" else f"${amount}"
+    req.note(f"asked you to bid for them: up to {unit}" + (f", max price ${price:.2f}" if price else ""), now)
+    if req.site == "ebay":
+        return (f"Got it: up to {unit} on {req.title}. I can't bid on eBay automatically, so I've passed it on "
+                "to place by hand.")
+    return (f"Got it: up to {unit} on {req.title}. I've asked for it to be set up; you'll get a message to confirm "
+            "before anything is bid.")
 
 
 def gov_ask_text(name: str, title: str, url: str, price: float | None, hard_max: int, point_cost: float) -> str:
@@ -242,6 +267,10 @@ def result_text(kind: str, title: str, d: dict[str, Any], req: ProxyRequest) -> 
             return f"{title} has ended" + (f" at ${price:.2f}." if isinstance(price, (int, float)) else ".")
         return None
     if kind == "bid_placed":
+        if d.get("raised"):
+            return (f"Heads up on {title}: Mac.bid only takes bids in steps, so it recorded your max as ${d.get('amount')}, "
+                    f"not the ${d.get('sent')} you agreed to. If it's won at more than ${req.bid_amount}, we'll sort out "
+                    "the difference; reply \"stop\" if you don't want any more raises.")
         return f"Your max bid of ${req.bid_amount} is in on {title}. Mac.bid raises the bid for you up to that."
     if kind == "bid_failed":
         return f"Your bid on {title} didn't go through: {d.get('reason') or 'Mac.bid refused it'}. I'll take a look."

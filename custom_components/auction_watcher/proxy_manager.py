@@ -21,7 +21,7 @@ from . import global_settings
 from .const import CONF_SITE, DOMAIN, SITE_GOVAUCTIONS, SITE_MACBID, STORAGE_VERSION
 from .proxy import (ASKED, CANCELLED, CONFIRMED, CONFIRMING, HEADER, OPEN, WATCHING, Person, ProxyRequest, ask_text,
                     confirm_text, gov_ask_text, gov_confirm_text, gov_used, on_agree, on_amount, on_bids, on_decline,
-                    parse_amount, parse_gov_reply, result_text, to_dict, wants_stop, watch_text)
+                    clean_name, on_wish, parse_amount, parse_gov_reply, result_text, to_dict, wants_stop, watch_text)
 from .sites import macbid as mb
 from .sites.base import AuthError, SiteError
 
@@ -137,7 +137,7 @@ class ProxyManager:
             req.note(f"{person.name} is watching it with you")
             self.requests[key] = req
             await self._save()
-            await self._tg(person.chat_id, watch_text(person.name, st.title, st.url, st.price), photo=st.image)
+            await self._tg(person.chat_id, watch_text(person.name, st.title, st.url, st.price, site), photo=st.image)
             return
         if site not in (SITE_MACBID, SITE_GOVAUCTIONS):
             raise SiteError("Bidding for someone isn't possible on this site; use \"Just keep them posted\"")
@@ -146,6 +146,10 @@ class ProxyManager:
             return
         if st.status != "live":
             raise SiteError("That Mac.bid item isn't live")
+        mine = self.requests.get(key)
+        if (st.extra.get("you_are_bidding") or st.extra.get("winning")) and not (mine and mine.mode == "bid" and mine.state in OPEN):
+            raise SiteError("You're already bidding on this item yourself. Your account has one max per item on Mac.bid, "
+                            "so I can't keep theirs separate from yours")
         if hard_max <= int(st.price or 0):
             raise SiteError(f"Your max must be above the current bid (${int(st.price or 0)})")
         old = self.requests.get(key)
@@ -158,10 +162,18 @@ class ProxyManager:
             await self._tg(person.chat_id, f"Good news: I can now go up to ${hard_max} for you on {st.title}. "
                                            "Reply with a higher max if you want to raise yours.")
             return
+        wish = old.wants if old and old.mode == "watch" and old.state in OPEN else 0
         req = ProxyRequest(lot_id=lot_id, person_id=person_id, hard_max=int(hard_max), site=site,
                            title=st.title, url=st.url)
         req.note(f"asked {person.name} (your max ${hard_max})")
         self.requests[key] = req
+        if wish and wish <= int(hard_max):
+            ok, _ = on_amount(req, wish, st.price)
+            if ok:
+                await self._save()
+                await self._tg(person.chat_id, confirm_text(req.title, wish, self._estimate(req, wish)),
+                               [f"I agree to pay:{AGREE} {req.id}", f"No thanks:{DECLINE} {req.id}"], photo=st.image)
+                return
         await self._save()
         await self._tg(person.chat_id, ask_text(person.name, st.title, st.url, st.price, int(hard_max), None), photo=st.image)
 
@@ -181,10 +193,18 @@ class ProxyManager:
             await self._tg(person.chat_id, f"I can now spend up to {hard_max} bids for you on {st.title}. "
                                            "Reply with a higher total if you want more.")
             return
+        wish = (old.wants, old.wants_price) if old and old.mode == "watch" and old.state in OPEN else (0, 0.0)
         req = ProxyRequest(lot_id=st.auction_id, person_id=person.id, hard_max=hard_max, site=SITE_GOVAUCTIONS,
                            point_cost=cost, title=st.title, url=st.url)
         req.note(f"asked {person.name} (your max {hard_max} bids)")
         self.requests[key] = req
+        if wish[0] and wish[0] <= hard_max:
+            ok, _ = on_bids(req, wish[0], wish[1] or None, st.price)
+            if ok:
+                await self._save()
+                await self._tg(person.chat_id, gov_confirm_text(req.title, wish[0], cost, req.their_price),
+                               [f"I agree to pay:{AGREE} {req.id}", f"No thanks:{DECLINE} {req.id}"], photo=st.image)
+                return
         await self._save()
         await self._tg(person.chat_id, gov_ask_text(person.name, st.title, st.url, st.price, hard_max, cost), photo=st.image)
 
@@ -265,13 +285,28 @@ class ProxyManager:
         text = str(event.data.get("text") or "")
         mine = sorted((r for r in self.requests.values()
                        if r.person_id == person.id and r.state in OPEN and not r.stopped
-                       and (r.mode == "bid" or wants_stop(text))),
+                       and (r.mode == "bid" or wants_stop(text) or parse_amount(text) is not None)),
                       key=lambda r: (r.state == CONFIRMED, -r.created))
         if not mine:
             return
         req = mine[0]
         if wants_stop(text):
             await self._stop(req, by_them=True)
+            return
+        if req.mode == "watch":
+            if req.site == SITE_GOVAUCTIONS:
+                amount, price = parse_gov_reply(text)
+            else:
+                amount, price = parse_amount(text), None
+            if not amount:
+                return
+            reply = on_wish(req, amount, price)
+            await self._save()
+            await self._tg(person.chat_id, reply)
+            unit = f"{amount} bids" if req.site == SITE_GOVAUCTIONS else f"${amount}"
+            self._tell_owner(person, req, f"wants you to bid up to {unit}" + (f" (max price ${price:.2f})" if price else "")
+                             + (": place it on eBay by hand." if req.site == "ebay"
+                                else ". Open the item's card, set your max and tap \"Ask them\"."))
             return
         if req.site == SITE_GOVAUCTIONS:
             await self._on_gov_text(person, req, text)
@@ -284,7 +319,8 @@ class ProxyManager:
         if st is None or st.status != "live":
             await self._tg(person.chat_id, f"{req.title} isn't live anymore.")
             return
-        ok, why = on_amount(req, amount, st.price)
+        live = await self._live(req)
+        ok, why = on_amount(req, amount, live["price"] if live else st.price, min_next=live["min_next"] if live else None)
         await self._save()
         if not ok:
             await self._tg(person.chat_id, why)
@@ -348,6 +384,17 @@ class ProxyManager:
             self._tell_owner(person, req, f"bids NOT booked: {err}")
         await self._save()
 
+    async def _live(self, req: ProxyRequest) -> dict[str, Any] | None:
+        """Mac.bid's item as it is right now (price, minimum next bid); None if it can't be read."""
+        coord = self._coords().get(req.site)
+        if coord is None or not hasattr(coord, "async_lot_now"):
+            return None
+        try:
+            return await coord.async_lot_now(req.lot_id)
+        except (SiteError, AuthError) as err:
+            _LOGGER.debug("Couldn't read Mac.bid lot %s live: %s", req.lot_id, err)
+            return None
+
     async def _on_callback(self, event: Event) -> None:
         if not self.enabled:
             return
@@ -372,6 +419,12 @@ class ProxyManager:
             return
         if req.site == SITE_GOVAUCTIONS:
             await self._agree_gov(person, req, st)
+            return
+        live = await self._live(req)
+        if live and req.their_max < live["min_next"]:
+            await self._tg(person.chat_id, f"The bidding on {req.title} moved: the minimum bid is now ${live['min_next']}, "
+                                           f"above your ${req.their_max}. Reply with a higher max (up to ${req.hard_max}) "
+                                           "if you still want it.")
             return
         amount = on_agree(req, self._estimate(req, req.their_max))
         await self._save()
@@ -431,6 +484,9 @@ class ProxyManager:
             if req.mode == "watch":
                 req.state = CANCELLED  # done: no more updates
             self.hass.async_create_task(self._save())
+        if kind == "bid_placed" and d.get("raised"):
+            self._tell_owner(person, req, f"Mac.bid recorded ${d.get('amount')} instead of the ${d.get('sent')} they agreed to "
+                                          "(its minimum bid). They've been told.")
         if text:
             st = self._state(req.site, req.lot_id)
             self.hass.async_create_task(self._tg(person.chat_id, text, photo=st.image if st is not None and kind in ("won", "ended") else None))
@@ -443,7 +499,7 @@ class ProxyManager:
             for sub in (getattr(e, "subentries", None) or {}).values():
                 cid = (sub.data or {}).get("chat_id")
                 if cid is not None:
-                    out[str(cid)] = {"chat_id": str(cid), "name": sub.title or str(cid), "source": "allowed chat"}
+                    out[str(cid)] = {"chat_id": str(cid), "name": clean_name(sub.title) or str(cid), "source": "allowed chat"}
         for cid, name in self._seen.items():
             out.setdefault(cid, {"chat_id": cid, "name": name, "source": "messaged the bot"})
         taken = {p.chat_id for p in self.people}
@@ -455,6 +511,7 @@ class ProxyManager:
             return None
         person = self._person(req.person_id)
         return {"id": req.id, "mode": req.mode, "site": req.site, "point_cost": req.point_cost, "stopped": req.stopped,
+                "wants": req.wants, "wants_price": req.wants_price,
                 "agreed_price": req.agreed_price, "start_bids": req.start_bids,
                 "person": person.name if person else "?", "person_id": req.person_id, "state": req.state,
                 "hard_max": req.hard_max, "their_max": req.their_max, "agreed_max": req.agreed_max,

@@ -94,3 +94,32 @@ def test_stop_words_and_stopped_requests():
     assert "won" in result_text("won", "Bluey ship", {"price": 38.0}, r)   # but still hears how it ends
     g = ProxyRequest(lot_id="5", person_id="p", hard_max=50, site="govauctions", start_bids=10, agreed_max=20)
     assert gov_used(g, 14) == 4 and gov_used(g, 99) == 20 and gov_used(g, 3) == 0
+
+
+def test_watching_they_can_ask_for_a_bid():
+    from aw.proxy import on_wish
+    w = ProxyRequest(lot_id="1", person_id="p", hard_max=0, mode="watch", state="watching", title="Lamp")
+    assert "Want me to bid?" in watch_text("Sam", "Lamp", "u", 5.0)
+    assert "confirm before anything is bid" in on_wish(w, 50)
+    assert w.wants == 50 and w.state == "watching" and w.bid_amount == 0      # a wish never bids by itself
+    e = ProxyRequest(lot_id="2", person_id="p", hard_max=0, site="ebay", mode="watch", state="watching", title="Cam")
+    assert "by hand" in on_wish(e, 80)
+    g = ProxyRequest(lot_id="3", person_id="p", hard_max=0, site="govauctions", mode="watch", state="watching", title="TV")
+    on_wish(g, 40, 25.0)
+    assert g.wants == 40 and g.wants_price == 25.0 and "40 bids" in g.log[-1][1]
+
+
+def test_live_minimum_names_and_rounding_notice():
+    from aw.proxy import clean_name
+    from aw.sites import macbid as mb
+    assert clean_name("Schrodinger (609098350)") == "Schrodinger" and clean_name("Sam") == "Sam"
+    r = req(); r.hard_max = 200
+    ok, why = on_amount(r, 111, 110, min_next=115)
+    assert not ok and "at least $115" in why                       # the oboe: Mac.bid's minimum was $115
+    assert on_amount(r, 115, 110, min_next=115)[0]
+    on_agree(r, None)
+    assert "recorded your max as $120" in result_text("bid_placed", "Oboe", {"raised": True, "amount": 120, "sent": 115}, r)
+    now = mb.lot_now({"current_bid": 115, "winning_bidder_id": 7, "max_bid": 120}, "7")
+    assert now["price"] == 115 and now["winning"] and now["your_max"] == 120 and now["min_next"] == 116 and not now["min_next_known"]
+    assert mb.lot_now({"current_bid": 115, "bid_increment": 5}, "7")["min_next"] == 120
+    assert mb.lot_now({"current_bid": 115, "next_bid": 120}, "7")["min_next_known"]

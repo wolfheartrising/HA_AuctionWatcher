@@ -118,6 +118,8 @@ people on your list are listened to. Bids are placed from **your** account (like
   how many of their bids were used (what they owe). Mac.bid after agreeing: the max bid can't be withdrawn there, so it
   stays, with no more raises, and they still hear how it ends. Removing a person stops all their requests the same way.
 - **Just keep them posted (any site):** they get a message now, when it's about to end, and when it ends. Nothing is bid.
+  If they reply with an amount (`50`, or `40 $25` on GovAuctions), you get an alert and the card shows "🙋 wants you to bid";
+  set your max and tap *Ask them to confirm*: they go straight to "I agree to pay" (eBay: you bid by hand).
 - **For others tab:** everything you're doing for someone, with a sub-tab per person.
 - eBay only lets approved partners bid through its API, so eBay is "keep them posted" only.
 
@@ -216,7 +218,7 @@ Settings live on the **Auctions page**:
 | Pickup reminder | 24 h before the deadline |
 | Default max bid ($, 0 = none) | 0 |
 | Most dollars tied up in max bids (0 = no limit) | 0 |
-| Check every N s in an item's last 15 min / idle | 10 s / 45 min (max 15) |
+| Check every N s in an item's last 15 min / idle | 10 s / 45 min (max 15); items you're bidding on: every 2 min (1 min in their last 2 h) |
 | Keep ended auctions | 3 days |
 
 | eBay | Default |

@@ -64,12 +64,18 @@ class CodeRequired(AuthError):
         super().__init__(f"Mac.bid sent a verification code to {to}")
 
 
-def lot_refresh_seconds(seconds_left: float | None) -> int:
-    """How often one lot needs checking: often only near its end."""
+IN_PLAY_SECONDS = 120         # items you're bidding on: every 2 minutes (outbid alerts arrive quickly)
+IN_PLAY_LATE_SECONDS = 60     # ...and every minute in their last 2 hours
+
+
+def lot_refresh_seconds(seconds_left: float | None, in_play: bool = False) -> int:
+    """How often one lot needs checking: items you're bidding on often; watched items often only near their end."""
+    if seconds_left is not None and seconds_left <= 15 * 60:
+        return 0          # every check
+    if in_play:
+        return IN_PLAY_LATE_SECONDS if seconds_left is not None and seconds_left <= 2 * 3600 else IN_PLAY_SECONDS
     if seconds_left is None:
         return 900
-    if seconds_left <= 15 * 60:
-        return 0          # every check
     if seconds_left <= 2 * 3600:
         return 120
     return 900
@@ -287,6 +293,29 @@ def parse_details(d: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+NEXT_BID_KEYS = ("next_bid", "next_min_bid", "minimum_next_bid", "min_next_bid", "min_bid", "minimum_bid", "next_bid_amount")
+INCREMENT_KEYS = ("bid_increment", "increment", "next_increment", "bid_delta")
+
+
+def lot_now(lot: dict[str, Any], my_id: str) -> dict[str, Any]:
+    """Mac.bid's live item, read right before a bid: current price, the smallest bid it will accept
+    (Mac.bid's raise steps grow with the price, e.g. $5 above $100; if its data gives the next minimum
+    or the step, that's used, else current + $1), whether you're winning, and your max as it has it."""
+    price = _num(lot.get("current_bid")) or 0.0
+    nxt = next((_num(lot.get(k)) for k in NEXT_BID_KEYS if _num(lot.get(k))), None)
+    if nxt is None:
+        step = next((_num(lot.get(k)) for k in INCREMENT_KEYS if _num(lot.get(k))), None)
+        nxt = price + step if step else None
+    known = nxt is not None
+    return {
+        "price": price,
+        "min_next": int(round(nxt)) if known else int(price) + 1,
+        "min_next_known": known,
+        "winning": bool(my_id) and str(lot.get("winning_bidder_id") or "") == str(my_id),
+        "your_max": _num(lot.get("max_bid")) or _num(lot.get("user_max_bid")),
+    }
+
+
 def search_hits(data: dict[str, Any], buildings: list[str] | None = None) -> list[dict[str, Any]]:
     """Search-server results -> plain dicts (turned into Hit objects by the search manager).
     With your buildings given, items sitting elsewhere but transferable to you say where from."""
@@ -418,7 +447,8 @@ def build_state(lot_id: str, lot: dict[str, Any] | None, static: dict[str, Any] 
             else _num(static.get("buyers_assurance_cost")),
             "condition_explained": condition_explained(static.get("condition")),
             "has_assurance": bool(lot.get("has_buyer_assurance")),
-            "min_next_bid": int(_num(lot.get("current_bid")) or 0) + 1,
+            "min_next_bid": lot_now(lot, my_id)["min_next"],
+            "min_next_known": lot_now(lot, my_id)["min_next_known"],
         },
     )
 
