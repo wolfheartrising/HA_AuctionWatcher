@@ -38,7 +38,8 @@ from .base import (
 SITE = "macbid"
 API = "https://api.macdiscount.com"
 WEB = "https://www.mac.bid"
-USER_AGENT = "Mozilla/5.0 (compatible; HA-AuctionWatcher; +https://github.com/wolfheartrising/HA_AuctionWatcher)"
+# No User-Agent of our own: requests carry Home Assistant's standard web client identity
+# (HomeAssistant/<version> aiohttp/<version> Python/<version>). Never a browser's.
 RENEW_EARLY_SECONDS = 120  # renew the 30-minute key this long before it expires
 
 # Mac.bid's search box queries a separate search server with this public, search-only key
@@ -71,7 +72,7 @@ IN_PLAY_LATE_SECONDS = 60     # ...and every minute in their last 2 hours
 def lot_refresh_seconds(seconds_left: float | None, in_play: bool = False) -> int:
     """How often one lot needs checking: items you're bidding on often; watched items often only near their end."""
     if seconds_left is not None and seconds_left <= 15 * 60:
-        return 0          # every check
+        return 0 if in_play else 60   # yours: every check; only watching: once a minute (lots close in batches)
     if in_play:
         return IN_PLAY_LATE_SECONDS if seconds_left is not None and seconds_left <= 2 * 3600 else IN_PLAY_SECONDS
     if seconds_left is None:
@@ -293,6 +294,46 @@ def parse_details(d: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# The amounts Mac.bid's own "Set your max bid" dropdown offers (from its item page code):
+# every $1 up to $100, $5 to $500, $10 to $1,000, $50 to $50,000; only amounts above the current bid.
+BID_STEPS = ((1, 100, 1), (105, 500, 5), (510, 1000, 10), (1050, 50000, 50))
+
+
+def is_valid_bid(amount: int) -> bool:
+    return any(lo <= amount <= hi and (amount - lo) % step == 0 for lo, hi, step in BID_STEPS)
+
+
+def round_down_bid(amount: float) -> int:
+    """The largest amount the dropdown offers that's <= amount (never rounds up)."""
+    a = int(amount)
+    for lo, hi, step in reversed(BID_STEPS):
+        if a >= lo:
+            return min(hi, lo + (a - lo) // step * step)
+    return 0
+
+
+def next_valid_bid(current: float | None) -> int:
+    """The first amount the dropdown offers above the current bid."""
+    c = float(current or 0)
+    for lo, hi, step in BID_STEPS:
+        if c < hi:
+            first = lo if c < lo else lo + (int(c - lo) // step + 1) * step
+            if first <= hi:
+                return first
+    return BID_STEPS[-1][1]
+
+
+def valid_bids(current: float | None, count: int = 40) -> list[int]:
+    """The next `count` amounts the dropdown offers above the current bid."""
+    out, a = [], next_valid_bid(current)
+    while len(out) < count and a <= BID_STEPS[-1][1]:
+        out.append(a)
+        a = next_valid_bid(a)
+        if out and a == out[-1]:
+            break
+    return out
+
+
 NEXT_BID_KEYS = ("next_bid", "next_min_bid", "minimum_next_bid", "min_next_bid", "min_bid", "minimum_bid", "next_bid_amount")
 INCREMENT_KEYS = ("bid_increment", "increment", "next_increment", "bid_delta")
 
@@ -306,11 +347,10 @@ def lot_now(lot: dict[str, Any], my_id: str) -> dict[str, Any]:
     if nxt is None:
         step = next((_num(lot.get(k)) for k in INCREMENT_KEYS if _num(lot.get(k))), None)
         nxt = price + step if step else None
-    known = nxt is not None
     return {
         "price": price,
-        "min_next": int(round(nxt)) if known else int(price) + 1,
-        "min_next_known": known,
+        "min_next": int(round(nxt)) if nxt is not None else next_valid_bid(price),
+        "min_next_known": True,
         "winning": bool(my_id) and str(lot.get("winning_bidder_id") or "") == str(my_id),
         "your_max": _num(lot.get("max_bid")) or _num(lot.get("user_max_bid")),
     }
@@ -478,7 +518,7 @@ class MacBidClient:
 
     def _headers(self, with_auth: bool = True) -> dict[str, str]:
         h = {"Content-Type": "application/json", "Accept": "application/json",
-             "User-Agent": USER_AGENT, "Origin": WEB, "Referer": WEB + "/"}
+             "Origin": WEB, "Referer": WEB + "/"}
         if with_auth and self.auth.get("access_token"):
             h["Authorization"] = self.auth["access_token"]
         return h
@@ -646,7 +686,7 @@ class MacBidClient:
                               "filter_by": filter_by, "per_page": per_page, "page": page}]}
         try:
             async with self._session.post(SEARCH_URL, params={"x-typesense-api-key": SEARCH_KEY}, json=body,
-                                          headers={"User-Agent": USER_AGENT, "Origin": WEB, "Content-Type": "application/json"},
+                                          headers={"Origin": WEB, "Content-Type": "application/json"},
                                           timeout=aiohttp.ClientTimeout(total=20)) as resp:
                 if resp.status == 429:
                     raise RateLimited("Mac.bid search says too many requests")

@@ -157,6 +157,13 @@ def on_amount(req: ProxyRequest, amount: int, current_price: float | None, now: 
         return False, f"The most I can bid for you on this one is ${req.hard_max}. Reply with ${req.hard_max} or less."
     if amount < floor:
         return False, f"The current bid is ${int(current_price or 0)}, so your max has to be at least ${floor}."
+    if req.site == "macbid":
+        from .sites.macbid import is_valid_bid, next_valid_bid, round_down_bid
+        if not is_valid_bid(amount):
+            lower = round_down_bid(amount)
+            options = [x for x in (lower, next_valid_bid(lower)) if x >= floor and x <= req.hard_max]
+            return False, ("Mac.bid only takes its own steps at this price"
+                           + (f": reply with {' or '.join('$' + str(x) for x in options)}." if options else "."))
     req.their_max = amount
     req.state = CONFIRMING if req.state != CONFIRMED else req.state
     req.note(f"they named a max of ${amount}", now)
@@ -195,7 +202,7 @@ def on_decline(req: ProxyRequest, now: float | None = None) -> None:
 def ask_text(name: str, title: str, url: str, price: float | None, hard_max: int, ends: str | None) -> str:
     return (f"Hi {name}! Want me to bid on this for you?\n\n{title}\nCurrent bid: ${int(price or 0)}"
             + (f" · ends {ends}" if ends else "") + f"\n{url}\n\n"
-            f"Reply with the most you'd pay as a bid (whole dollars, up to ${hard_max}).\n"
+            f"Reply with the most you'd pay as a bid (up to ${hard_max}; Mac.bid takes $1 steps to $100, $5 to $500, $10 to $1,000).\n"
             "Mac.bid adds a 15% buyer's premium, a $3 lot fee and sales tax on top of the winning bid. "
             "Reply \"stop\" any time to cancel.")
 

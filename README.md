@@ -63,6 +63,10 @@ Timed liquidation auctions: you pay what you bid, plus fees, and pick up in pers
 - **Awaiting pickup** tab: won items with a countdown to the pickup deadline, checked every 6 hours.
 - **Alerts**: outbid, ending soon (default 10 minutes before), price passed your max, won / ended, and a pickup reminder (default 24 hours before the deadline).
 
+**Mac.bid bid amounts** are the same ones its website's "Set your max bid" list offers: $1 steps up to $100, $5 to $500,
+$10 to $1,000, then $50. The Max bid box is that list; automatic bids round your max *down* to it (never up); someone you
+bid for is asked to pick one of those amounts. The minimum next bid is the first of them above the current bid.
+
 ## eBay
 
 Uses eBay's **official APIs** only (no page scraping, which eBay blocks and its user agreement forbids).
@@ -218,7 +222,7 @@ Settings live on the **Auctions page**:
 | Pickup reminder | 24 h before the deadline |
 | Default max bid ($, 0 = none) | 0 |
 | Most dollars tied up in max bids (0 = no limit) | 0 |
-| Check every N s in an item's last 15 min / idle | 10 s / 45 min (max 15); items you're bidding on: every 2 min (1 min in their last 2 h) |
+| Check every N s in an item's last 15 min / idle | 10 s / 45 min (max 15); items you're bidding on: every 2 min (1 min in their last 2 h, the N s in their last 15 min); items you only watch: once a minute in their last 15 min |
 | Keep ended auctions | 3 days |
 
 | eBay | Default |
@@ -240,7 +244,7 @@ All sites: extra auction IDs to follow.
 - GovAuctions "other bidders" counts everyone except you seen bidding within the window (3 minutes by default). The site only shows the last 9 bids, so the integration remembers names across checks.
 - People with booked bids only show up once their bids actually fire; anyone who bid before the entry limit can come back (except in No Re-Entry auctions).
 - Mac.bid accepts a bid request first and processes it after, so a bid only counts as placed once Mac.bid's own data shows you as a bidder.
-- Respect each site's terms. Auction Watcher identifies itself in its user agent and polls modestly; it does not try to look like a person.
+- Respect each site's terms. Auction Watcher uses Home Assistant's standard web client (not a browser's identity), sends the same requests the sites' own pages send, and polls modestly; it does not try to look like a person.
 
 ## Development
 

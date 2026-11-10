@@ -120,6 +120,6 @@ def test_live_minimum_names_and_rounding_notice():
     on_agree(r, None)
     assert "recorded your max as $120" in result_text("bid_placed", "Oboe", {"raised": True, "amount": 120, "sent": 115}, r)
     now = mb.lot_now({"current_bid": 115, "winning_bidder_id": 7, "max_bid": 120}, "7")
-    assert now["price"] == 115 and now["winning"] and now["your_max"] == 120 and now["min_next"] == 116 and not now["min_next_known"]
+    assert now["price"] == 115 and now["winning"] and now["your_max"] == 120 and now["min_next"] == 120 and now["min_next_known"]
     assert mb.lot_now({"current_bid": 115, "bid_increment": 5}, "7")["min_next"] == 120
     assert mb.lot_now({"current_bid": 115, "next_bid": 120}, "7")["min_next_known"]

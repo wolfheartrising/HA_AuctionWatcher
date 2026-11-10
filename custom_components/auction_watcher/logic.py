@@ -343,8 +343,10 @@ def choose_timed_interval(states: dict[str, AuctionState], now: float, fast: int
     soonest = min(lefts) if lefts else None
     playing = [s.ends_at.timestamp() - now for k, s in states.items()
                if in_play and k in in_play and s.status == STATUS_LIVE and s.ends_at]
+    if playing and min(playing) <= 15 * 60:
+        return fast                      # an item you're in is about to end: every few seconds
     if soonest is not None and soonest <= 15 * 60:
-        return fast
+        return 60                        # only watched items ending: once a minute is plenty
     if playing:
         return 60 if min(playing) <= 2 * 3600 else 120
     if soonest is None:
@@ -495,6 +497,7 @@ MB_MODE_OFF = "off"
 MB_MODE_NOW = "now"
 MB_MODE_LATE = "late"
 MB_RETRY_SECONDS = 30
+MB_MAX_FAILURES = 2  # after this many unrecorded bids on one item, stop and let you look (no repeated identical bids)
 
 
 @dataclass
@@ -520,6 +523,7 @@ class MacBidMemory:
     pending: int = 0          # sent, waiting for Mac.bid's data to show it
     pending_since: float = 0.0
     answer: str = ""          # what Mac.bid replied when we sent it
+    failures: int = 0         # bids sent that Mac.bid never recorded; automatic bidding stops at MB_MAX_FAILURES
 
 
 def decide_macbid(
@@ -552,6 +556,9 @@ def decide_macbid(
         return "", 0, "auto-bidding is switched off"
     if budget_left is not None and max_bid > budget_left:
         return "", 0, f"a ${max_bid} max would go past your Mac.bid budget (${max(budget_left, 0)} left)"
+    if mem.failures >= MB_MAX_FAILURES:
+        return "", 0, (f"stopped after {mem.failures} bids Mac.bid didn't record; check the item on Mac.bid, "
+                       "then save the auto-bid again to retry")
     if now - mem.last_attempt < MB_RETRY_SECONDS:
         return "", 0, mem.status
     return "place", int(max_bid), "late bid" if settings.mode == MB_MODE_LATE else "max bid"

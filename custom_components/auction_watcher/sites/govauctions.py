@@ -39,7 +39,8 @@ PACKS_CATEGORY = 7  # the site's "Packs" category filter
 BASE_URL = "https://www.govauctions.com"
 COOKIE_DOMAIN = "govauctions.com"
 ACTIVE_WINDOW_SECONDS = 60
-USER_AGENT = "Mozilla/5.0 (compatible; HA-AuctionWatcher/0.1; +https://github.com/wolfheartrising/HA_AuctionWatcher)"
+# No User-Agent of our own: requests carry Home Assistant's standard web client identity
+# (HomeAssistant/<version> aiohttp/<version> Python/<version>). Never a browser's.
 
 
 # ---------------------------------------------------------------- parsing
@@ -295,7 +296,6 @@ class GovAuctionsClient:
             "Accept": "application/json, text/plain, */*",
             "X-Requested-With": "XMLHttpRequest",
             "Referer": f"{BASE_URL}/my-bids",
-            "User-Agent": USER_AGENT,
         }
         if json_body is not None:
             headers["Origin"] = BASE_URL

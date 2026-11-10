@@ -1,7 +1,7 @@
 """Constants for Auction Watcher."""
 
 DOMAIN = "auction_watcher"
-VERSION = "1.3.6"  # keep in sync with manifest.json (a test checks this)
+VERSION = "1.4.0"  # keep in sync with manifest.json (a test checks this)
 
 CONF_SITE = "site"
 CONF_COOKIE = "cookie"

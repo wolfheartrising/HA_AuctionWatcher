@@ -110,7 +110,8 @@ def test_timed_polling_speeds_up_near_the_end():
     end = s["67465504"].ends_at.timestamp()
     assert choose_timed_interval(s, end - 3 * 86400, 10, 45) == 15 * 60
     assert choose_timed_interval(s, end - 3600, 10, 45) == 120
-    assert choose_timed_interval(s, end - 300, 10, 45) == 10
+    assert choose_timed_interval(s, end - 300, 10, 45) == 60                          # only watching
+    assert choose_timed_interval(s, end - 300, 10, 45, in_play={"67465504"}) == 10    # yours
 
 
 def test_items_you_bid_on_are_checked_often():
@@ -126,7 +127,8 @@ def test_items_you_bid_on_are_checked_often():
 
 
 def test_lot_refresh_schedule():
-    assert mb.lot_refresh_seconds(5 * 60) == 0        # last 15 minutes: every check
+    assert mb.lot_refresh_seconds(5 * 60) == 60       # last 15 minutes, only watching: once a minute
+    assert mb.lot_refresh_seconds(5 * 60, in_play=True) == 0   # yours: every check
     assert mb.lot_refresh_seconds(90 * 60) == 120     # last 2 hours: every 2 minutes
     assert mb.lot_refresh_seconds(20 * 3600) == 900   # otherwise every 15 minutes
     assert mb.lot_refresh_seconds(None) == 900

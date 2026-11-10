@@ -10,10 +10,17 @@
  * until you save it, and the page re-draws from those drafts.
  */
 
-const PANEL_VERSION = "1.3.6";  // must match const.py VERSION (a test checks)
+const PANEL_VERSION = "1.4.0";  // must match const.py VERSION (a test checks)
 const SITE_NAMES = { govauctions: "GovAuctions", macbid: "Mac.bid", ebay: "eBay" };
 // What the per-auction spending cap is called on each site
 const LIMIT_LABEL = { govauctions: "Max bids", macbid: "Max bid ($)", ebay: "Max price ($)" };
+// Mac.bid's own "Set your max bid" amounts: $1 to $100, $5 to $500, $10 to $1,000, $50 to $50,000
+const MB_STEPS = [[1, 100, 1], [105, 500, 5], [510, 1000, 10], [1050, 50000, 50]];
+function mbValidBids(current, count = 60) {
+  const out = [];
+  for (const [lo, hi, step] of MB_STEPS) for (let a = lo; a <= hi && out.length < count; a += step) if (a > (current || 0)) out.push(a);
+  return out;
+}
 const SITE_COLORS = { govauctions: "#e53935", macbid: "#43a047", ebay: "#1e88e5" };
 const siteDot = (site, title) =>
   `<span class="dot" style="background:${SITE_COLORS[site] || "#888"}" title="${esc(title || SITE_NAMES[site] || site)}"></span>`;
@@ -1110,15 +1117,24 @@ class AuctionWatcherPanel extends HTMLElement {
         <div class="limits">
           <div class="lim-row">
             <label>${esc(LIMIT_LABEL[a.site] || "Max bid ($)")}
-              <input data-id="${id}" data-field="limit" type="number" min="0" step="1" inputmode="numeric"
-                value="${esc(limit)}" placeholder="none"></label>
+              ${a.site === "macbid" && a.status === "live" ? (() => {
+                const opts = mbValidBids(a.price);
+                const cur = Number(limit) || 0;
+                if (cur && !opts.includes(cur)) opts.unshift(cur);
+                return `<select data-id="${id}" data-field="limit">
+                  <option value="" ${cur ? "" : "selected"}>none</option>
+                  ${opts.map((v) => `<option value="${v}" ${v === cur ? "selected" : ""}>$${num(v)}${v <= (a.price || 0) ? " (below the current bid)" : ""}</option>`).join("")}
+                </select>`;
+              })() : `<input data-id="${id}" data-field="limit" type="number" min="0" step="1" inputmode="numeric"
+                value="${esc(limit)}" placeholder="none">`}</label>
             ${a.site === "macbid" && a.status === "live"
               ? `<button type="button" class="bid-now" data-act="mb_place" data-id="${id}">Bid now</button>
                  <button type="button" class="secondary" data-act="limit" data-id="${id}" title="Save the max without bidding (for alerts and late auto-bids)">Save</button>`
               : `<button type="button" data-act="limit" data-id="${id}">Save</button>`}
             <span class="saved">${esc(this._saved["limit:" + a.auction_id] || this._saved["mb:" + a.auction_id] || "")}</span>
           </div>
-          ${a.site === "macbid" && a.status === "live" ? `<div class="note">Minimum next bid: <b>${money(a.min_next_bid)}</b>${a.min_next_known ? "" : " or more (Mac.bid's steps grow with the price, e.g. $5 above $100; it's checked live when you bid)"}.
+          ${a.site === "macbid" && a.status === "live" ? `<div class="note">Minimum next bid: <b>${money(a.min_next_bid)}</b>. The list shows the same amounts Mac.bid's website offers
+              ($1 steps to $100, $5 to $500, $10 to $1,000, then $50).
             Your max is the most you'll pay; Mac.bid raises your bid for you up to it.
             ${a.assurance_cost ? (a.has_assurance ? ` · ✅ Buyer's Assurance added` : ` · Buyer's Assurance ${money(a.assurance_cost)}: you'll be asked when you bid.`) : ""}</div>` : ""}
           <div class="total" data-total="${id}">${this._totalText(a)}</div>
@@ -1213,7 +1229,12 @@ class AuctionWatcherPanel extends HTMLElement {
           <option value="bid" ${mode === "bid" ? "selected" : ""}>Bid for them (they confirm)</option>
           <option value="watch" ${mode === "watch" ? "selected" : ""}>Just keep them posted</option></select>` : ""}
         <select data-id="${id}" data-field="proxy_person">${people.map((x) => `<option value="${esc(x.id)}" ${this._val(aid, "proxy_person", p?.person_id || people[0]?.id) === x.id ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select>
-        ${mode === "bid" ? `<label>${gov ? "my max bids" : "my max $"}<input data-id="${id}" data-field="proxy_max" type="number" min="1" step="1" class="small"
+        ${mode === "bid" && !gov ? `<label>my max <select data-id="${id}" data-field="proxy_max">
+          ${(() => { const cur = Number(this._val(aid, "proxy_max", p?.hard_max || wish || "")) || 0; const o = mbValidBids(a.price, 80);
+            if (cur && !o.includes(cur)) o.unshift(cur);
+            return `<option value="">choose</option>` + o.map((v) => `<option value="${v}" ${v === cur ? "selected" : ""}>$${num(v)}</option>`).join(""); })()}
+          </select></label>` : ""}
+        ${mode === "bid" && gov ? `<label>my max bids<input data-id="${id}" data-field="proxy_max" type="number" min="1" step="1" class="small"
           value="${esc(this._val(aid, "proxy_max", p?.hard_max || wish || ""))}"></label>` : ""}
         <button type="button" data-act="proxy_ask" data-id="${id}" data-site="${esc(a.site)}" ${people.length ? "" : "disabled"}>${
           mode === "watch" ? (p && p.mode === "watch" && open ? "Watching" : "Keep them posted") : p && open && p.mode === "bid" ? "Update" : wish ? "Ask them to confirm" : "Ask them"}</button>

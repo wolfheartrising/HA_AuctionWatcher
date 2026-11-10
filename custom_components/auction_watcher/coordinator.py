@@ -719,6 +719,8 @@ class MacBidCoordinator(AuctionWatcherCoordinator):
         if settings.mode != MB_MODE_OFF and not self.bid_limit(aid):
             raise SiteError("Set a max bid for this item first")
         self._mb[aid] = settings
+        if aid in self._mbmem:
+            self._mbmem[aid].failures = 0  # you looked and saved again: allow another try
         await self._save()
         self.async_update_listeners()
 
@@ -759,9 +761,12 @@ class MacBidCoordinator(AuctionWatcherCoordinator):
         if s is None or s.status != STATUS_LIVE:
             raise SiteError("That item isn't live")
         now = await self.async_lot_now(aid)  # the price may have moved since the last check
+        if not mb.is_valid_bid(int(amount)):
+            lower = mb.round_down_bid(amount)
+            raise SiteError(f"Mac.bid only takes its own steps at this price: ${lower} or ${mb.next_valid_bid(lower)}"
+                            " (the same amounts its website offers)")
         if amount < now["min_next"]:
-            raise SiteError(f"The current bid is ${now['price']:.0f}; Mac.bid's minimum next bid is ${now['min_next']}"
-                            + ("" if now["min_next_known"] else " or more (its raise steps grow with the price)"))
+            raise SiteError(f"The current bid is ${now['price']:.0f}; Mac.bid's minimum next bid is ${now['min_next']}")
         left = self._macbid_budget_left(self.data or {}, exclude=aid)
         if left is not None and amount > left:
             raise SiteError(f"A ${amount} max would go past your budget (${max(left, 0)} left: Mac.bid budget or the spending cap)")
@@ -826,6 +831,7 @@ class MacBidCoordinator(AuctionWatcherCoordinator):
                 lot = (self._lots.get(aid) or (0, {}))[1] or {}
                 recorded = mb.lot_now(lot, self.client.user_id).get("your_max")
                 mem.placed, mem.pending = int(recorded) if recorded else sent, 0
+                mem.failures = 0
                 raised = bool(recorded and recorded > sent)
                 mem.status = (f"max bid ${mem.placed} confirmed: "
                               + ("you're winning" if s.extra.get("winning") else "someone's max is higher")
@@ -838,6 +844,7 @@ class MacBidCoordinator(AuctionWatcherCoordinator):
                                           "amount": mem.placed, "sent": sent, "raised": raised})
             elif now - mem.pending_since > 45:
                 amount, mem.pending = mem.pending, 0
+                mem.failures += 1
                 mem.status = (f"Mac.bid accepted the request for a ${amount} max but no bid shows up. "
                               f"Its answer: {mem.answer}")
                 _LOGGER.warning("Mac.bid bid on lot %s not recorded. Answer was: %s", aid, mem.answer)
@@ -864,6 +871,13 @@ class MacBidCoordinator(AuctionWatcherCoordinator):
                 mem.status = reason
                 continue
             try:
+                live = await self.async_lot_now(aid)
+                amount = mb.round_down_bid(amount)  # only amounts the website offers; never above your max
+                if amount < live["min_next"]:
+                    mem.last_attempt = now
+                    mem.status = (f"not bidding: the price moved to ${live['price']:.0f} and Mac.bid's minimum is "
+                                  f"${live['min_next']}, above your ${amount} max")
+                    continue
                 await self._place(s, amount, f"auto: {reason}", settings.assurance)
             except AuthError:
                 raise
