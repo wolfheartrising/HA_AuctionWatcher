@@ -3,12 +3,26 @@
  *
  * Reads the auction sensors Home Assistant already has (attribute
  * auction_watcher: true) and the account sensors (auction_watcher_account),
- * so it needs no extra API. Countdowns tick every second between polls.
- * Plain web component, no build step.
+ * so it needs no extra API. Plain web component, no build step.
+ *
+ * Home Assistant pushes new state every few seconds. To keep that from
+ * wiping what you're typing, every field you touch is kept as a "draft"
+ * until you save it, and the page re-draws from those drafts.
  */
 
 const SITE_NAMES = { govauctions: "GovAuctions" };
+// What the per-auction spending cap is called on each site
+const LIMIT_LABEL = { govauctions: "Max bids" };
 const SHORT_CLOCK = 15; // seconds; same as FINAL_PHASE_MAX_CLOCK in logic.py
+
+const SORTS = {
+  name: { label: "Name", key: (a) => String(a.title || "").toLowerCase() },
+  price: { label: "Price (high first)", key: (a) => -Number(a.price || 0) },
+  bidders: { label: "Fewest other bidders", key: (a) => (a.active_bidders ?? 999) },
+  yours: { label: "Most of your bids", key: (a) => -Number(a.your_bids || 0) },
+  clock: { label: "Clock / starts soonest", key: (a) => clockSeconds(a) },
+  opportunity: { label: "Opportunities first", key: (a) => (a.opportunity ? 0 : a.status === "live" ? 1 : 2) },
+};
 
 const esc = (v) =>
   String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -25,15 +39,32 @@ function fmtDuration(sec) {
   return `${s}s`;
 }
 
+function clockSeconds(a) {
+  if (a.status === "upcoming" && a.starts_at) return (Date.parse(a.starts_at) - Date.now()) / 1000;
+  if (a.ends_at) return (Date.parse(a.ends_at) - Date.now()) / 1000;
+  if (a.clock_seconds !== null && a.clock_seconds !== undefined) return Number(a.clock_seconds);
+  return 1e12;
+}
+
+function store(key, value) {
+  try {
+    if (value === undefined) return localStorage.getItem(key);
+    localStorage.setItem(key, value);
+  } catch (e) { /* private window etc. */ }
+  return null;
+}
+
 class AuctionWatcherPanel extends HTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: "open" });
     this._tab = "active";
+    this._sort = store("auction_watcher_sort") || "name";
+    if (!SORTS[this._sort]) this._sort = "name";
     this._signature = "";
-    this._pending = false;
-    this._saved = {};
-    this._open = {};
+    this._saved = {};   // short "Saved" messages, by key
+    this._open = {};    // which "Booking & auto" sections are open
+    this._drafts = {};  // unsaved field values: {auctionId: {fieldName: value}}
   }
 
   set hass(hass) {
@@ -63,8 +94,11 @@ class AuctionWatcherPanel extends HTMLElement {
       if (a.auction_watcher !== true) continue;
       out.push({ entity_id: s.entity_id, price: s.state, updated: Date.parse(s.last_updated), unavailable: s.state === "unavailable", ...a });
     }
-    const rank = (a) => (a.opportunity ? 0 : a.status === "live" ? 1 : a.status === "upcoming" ? 2 : 3);
-    return out.sort((a, b) => rank(a) - rank(b) || String(a.title).localeCompare(String(b.title)));
+    const key = SORTS[this._sort].key;
+    return out.sort((a, b) => {
+      const ka = key(a), kb = key(b);
+      return ka < kb ? -1 : ka > kb ? 1 : String(a.title).localeCompare(String(b.title));
+    });
   }
 
   _accounts() {
@@ -74,26 +108,36 @@ class AuctionWatcherPanel extends HTMLElement {
   }
 
   _tabs(auctions) {
-    const sites = [...new Set(auctions.map((a) => a.site))].sort();
+    const sites = [...new Set(auctions.map((a) => a.site).filter(Boolean))].sort();
     return [
       { id: "active", label: "Active", filter: (a) => a.category === "bidding" && (a.status === "live" || a.status === "upcoming") },
       { id: "watching", label: "Watching", filter: (a) => a.category === "watching" && a.status !== "ended" },
       { id: "ended", label: "Ended", filter: (a) => a.status === "ended" },
-      ...sites.map((site) => ({ id: "site:" + site, label: SITE_NAMES[site] || site, filter: (a) => a.site === site })),
+      ...sites.map((site) => ({ id: "site-" + site, label: SITE_NAMES[site] || site, filter: (a) => a.site === site })),
     ];
+  }
+
+  // A field's value: your unsaved draft if you've touched it, else the saved value
+  _val(id, field, saved) {
+    const d = this._drafts[id];
+    return d && field in d ? d[field] : saved;
   }
 
   // ---------------------------------------------------------------- rendering
 
   _maybeRender(force = false) {
     if (!this._hass || !this.isConnected) return;
-    // Don't redraw under someone typing a bid limit; redraw once they're done.
+    // While a text box has focus, don't redraw under the cursor; redraw on blur.
     const active = this.shadowRoot.activeElement;
-    if (!force && active && active.tagName === "INPUT") { this._pending = true; return; }
+    if (!force && active && active.tagName === "INPUT" && active.type !== "checkbox" && active.type !== "radio") {
+      this._pending = true;
+      return;
+    }
     const auctions = this._auctions();
     const accounts = this._accounts();
-    const signature = JSON.stringify([this._tab, auctions.map((a) => [a.entity_id, a.price, a.updated, a.bid_limit,
-      a.auto_cancel, a.auto_rebook, a.rebook_mode, a.rebook_amount, a.max_price, a.auto_status, a.your_booked_left]), accounts, this._saved]);
+    const signature = JSON.stringify([this._tab, this._sort, auctions.map((a) => [a.entity_id, a.price, a.updated, a.bid_limit,
+      a.auto_cancel, a.auto_rebook, a.rebook_mode, a.rebook_amount, a.max_price, a.auto_status, a.your_booked_left]),
+      accounts, this._saved]);
     if (!force && signature === this._signature) return;
     this._signature = signature;
     this._pending = false;
@@ -120,6 +164,11 @@ class AuctionWatcherPanel extends HTMLElement {
             ${num(acc.points)} points · ${esc(acc.polling_mode || "")}${acc.poll_every_seconds ? `, every ${fmtDuration(acc.poll_every_seconds)}` : ""}
           </div>`).join("") || `<div class="pill">No site set up yet: Settings → Devices &amp; services → Add integration → Auction Watcher</div>`}
         ${opp ? `<div class="pill hot">🎯 ${opp} with few bidders left</div>` : ""}
+        <label class="sort">Sort
+          <select data-action="sort">
+            ${Object.entries(SORTS).map(([k, s]) => `<option value="${k}" ${k === this._sort ? "selected" : ""}>${esc(s.label)}</option>`).join("")}
+          </select>
+        </label>
       </div>
       <div class="tabs" role="tablist">
         ${tabs.map((t) => {
@@ -128,71 +177,56 @@ class AuctionWatcherPanel extends HTMLElement {
         }).join("")}
       </div>
       <div class="grid">
-        ${shown.length ? shown.map((a) => this._card(a)).join("") : `<div class="empty">Nothing here right now.</div>`}
+        ${shown.length ? shown.map((a) => this._safeCard(a)).join("") : `<div class="empty">Nothing here right now.</div>`}
       </div>`;
 
-    // Home Assistant's own sidebar button, for phones / narrow screens
     const slot = this.shadowRoot.querySelector(".menu");
     this._menuButton = document.createElement("ha-menu-button");
     this._menuButton.hass = this._hass;
     this._menuButton.narrow = this._narrow;
     slot.appendChild(this._menuButton);
 
-    this.shadowRoot.querySelectorAll("[data-tab]").forEach((b) =>
+    const root = this.shadowRoot;
+    root.querySelectorAll("[data-tab]").forEach((b) =>
       b.addEventListener("click", () => { this._tab = b.dataset.tab; this._maybeRender(true); }));
-    this.shadowRoot.querySelector("[data-action=refresh]").addEventListener("click", () =>
+    root.querySelector("[data-action=refresh]").addEventListener("click", () =>
       this._hass.callService("auction_watcher", "refresh", {}));
-    this.shadowRoot.querySelectorAll("form.limit").forEach((f) => f.addEventListener("submit", (ev) => this._saveLimit(ev)));
-    this.shadowRoot.querySelectorAll(".card input").forEach((i) =>
-      i.addEventListener("blur", () => { if (this._pending) setTimeout(() => this._maybeRender(), 0); }));
-    this.shadowRoot.querySelectorAll("details.booking").forEach((d) =>
+    root.querySelector("[data-action=sort]").addEventListener("change", (ev) => {
+      this._sort = ev.target.value; store("auction_watcher_sort", this._sort); this._maybeRender(true);
+    });
+    // Remember every edit as a draft so a refresh can't wipe it
+    root.querySelectorAll("[data-field]").forEach((el) => {
+      const remember = () => {
+        const id = el.dataset.id, f = el.dataset.field;
+        (this._drafts[id] ||= {})[f] = el.type === "checkbox" ? el.checked : el.type === "radio" ? el.value : el.value;
+        if (f === "limit" || f === "max_price") {
+          // Update the total as you type, without redrawing the card
+          const a = this._auctions().find((x) => String(x.auction_id) === String(id));
+          const box = root.querySelector(`[data-total="${CSS.escape(id)}"]`);
+          if (a && box) box.innerHTML = this._totalText(a);
+        }
+      };
+      el.addEventListener(el.type === "checkbox" || el.type === "radio" ? "change" : "input", remember);
+      el.addEventListener("blur", () => { if (this._pending) setTimeout(() => this._maybeRender(), 0); });
+    });
+    root.querySelectorAll("details.booking").forEach((d) =>
       d.addEventListener("toggle", () => { this._open[d.dataset.id] = d.open; }));
-    this.shadowRoot.querySelectorAll("[data-act]").forEach((b) =>
-      b.addEventListener("click", () => this._bookingAction(b.dataset.act, b.dataset.id, b.closest("details"))));
+    root.querySelectorAll("[data-act]").forEach((b) =>
+      b.addEventListener("click", () => this._action(b.dataset.act, b.dataset.id)));
     this._tick();
   }
 
-  async _bookingAction(act, id, box) {
-    const key = "auto:" + id;
-    const val = (name) => box.querySelector(`[name="${name}"]`);
+  _safeCard(a) {
     try {
-      if (act === "book") {
-        const count = parseInt(val("book_count").value, 10) || 0;
-        if (count < 1) throw new Error("Enter how many bids to book");
-        const maxPrice = parseFloat(val("max_price").value) || undefined;
-        if (!confirm(`Book ${count} bids on this auction? The first one is placed right away; the rest wait their turn. This spends points.`)) return;
-        const res = await this._hass.callService("auction_watcher", "book_bids",
-          { auction_id: id, count, ...(maxPrice ? { max_price: maxPrice } : {}) }, undefined, false, true);
-        const booked = res?.response?.booked ?? count;
-        this._saved[key] = booked < count ? `Booked ${booked} (capped by your limit or balance)` : `Booked ${booked}`;
-      } else if (act === "cancel") {
-        if (!confirm("Cancel your booked bids on this auction? Unused points go back to your balance.")) return;
-        await this._hass.callService("auction_watcher", "cancel_booked_bids", { auction_id: id });
-        this._saved[key] = "Cancelled";
-      } else if (act === "auto") {
-        const mode = box.querySelector(`input[type=radio]:checked`)?.value || "fixed";
-        await this._hass.callService("auction_watcher", "set_auto_booking", {
-          auction_id: id,
-          auto_cancel: val("auto_cancel").checked,
-          auto_rebook: val("auto_rebook").checked,
-          rebook_mode: mode,
-          rebook_amount: Math.max(1, parseInt(val("rebook_amount").value, 10) || 10),
-          max_price: Math.max(0, parseFloat(val("max_price").value) || 0),
-        });
-        this._saved[key] = "Saved";
-      }
+      return this._card(a);
     } catch (err) {
-      this._saved[key] = "Couldn't do that: " + (err?.message || err);
+      return `<div class="card"><b>${esc(a.title || a.entity_id)}</b><div class="note">Couldn't show this auction: ${esc(err?.message || err)}</div></div>`;
     }
-    this._open[id] = true;
-    this._maybeRender(true);
-    setTimeout(() => { delete this._saved[key]; this._maybeRender(true); }, 6000);
   }
 
   _clock(a) {
     // Real deadlines tick down. A penny auction's short clock is reset by every
-    // bid, which we only see at the next check, so it's shown "as of" that check
-    // instead of counting to a misleading 0.
+    // bid, which we only see at the next check, so it's shown "as of" that check.
     if (a.status === "upcoming" && a.starts_at) return { label: "Starts in", deadline: Date.parse(a.starts_at) };
     if (a.ends_at) return { label: "Ends in", deadline: Date.parse(a.ends_at) };
     if (a.status === "live" && a.clock_seconds !== null && a.clock_seconds !== undefined) {
@@ -204,15 +238,17 @@ class AuctionWatcherPanel extends HTMLElement {
   }
 
   _card(a) {
+    const id = esc(a.auction_id);
     const c = this._clock(a);
     const img = safeUrl(a.image);
     const url = safeUrl(a.url);
-    const labels = (a.labels || []).map((l) => `<span class="tag">${esc(l)}</span>`).join("");
+    const notes = a.label_notes || {};
+    const labels = (a.labels || []).map((l) =>
+      `<div class="label"><span class="tag">${esc(l)}</span>${notes[l] ? ` <span class="muted">${esc(notes[l])}</span>` : ""}</div>`).join("");
     const bidders = (a.recent_bidders || []).map(esc).join(", ");
     const active = a.active_bidders === null || a.active_bidders === undefined ? "–" : `${a.active_bidders}${a.active_bidders >= 9 ? "+" : ""}`;
-    const limitText = a.bid_limit ? ` / ${num(a.bid_limit)}` : "";
-    const saved = this._saved[a.auction_id];
     const status = a.unavailable ? "unavailable" : a.status;
+    const limitLabel = LIMIT_LABEL[a.site] || "Bid limit";
     return `
       <div class="card ${a.opportunity ? "opp" : ""} ${a.bid_limit_reached ? "capped" : ""}">
         <div class="top">
@@ -221,23 +257,24 @@ class AuctionWatcherPanel extends HTMLElement {
             <a class="name" href="${url}" target="_blank" rel="noopener">${esc(a.title)}</a>
             <div class="sub">${esc(SITE_NAMES[a.site] || a.site)} · <span class="status ${esc(status)}">${esc(status)}</span>
               ${a.opportunity ? `<span class="badge hot">🎯 few bidders</span>` : ""}
-              ${a.bid_limit_reached ? `<span class="badge cap">⛔ limit reached</span>` : ""}
+              ${a.bid_limit_reached ? `<span class="badge cap">⛔ max bids reached</span>` : ""}
               ${a.closed_to_new && !a.your_bids ? `<span class="badge">closed to new bidders</span>` : ""}
             </div>
-            <div class="tags">${labels}</div>
           </div>
         </div>
+        ${labels ? `<div class="labels">${labels}</div>` : ""}
         <div class="big">
           <div><div class="k">Price</div><div class="v">${money(a.price)}</div></div>
           <div><div class="k">${c.label}</div>
             ${c.asOf
               ? `<div class="v ${c.value <= 3 ? "urgent" : ""}">${c.value}s</div><div class="k ago" data-since="${c.asOf}"></div>`
               : `<div class="v timer" data-deadline="${c.deadline ?? ""}">–</div>`}</div>
-          <div><div class="k">Bidders (last ${esc(a.active_window_minutes || 1)} min)</div><div class="v">${active}</div></div>
+          <div><div class="k">Other bidders (${esc(a.active_window_minutes || 1)} min)</div><div class="v">${active}</div>
+            ${a.you_are_bidding ? `<div class="k">+ you</div>` : ""}</div>
         </div>
         ${bidders ? `<div class="line"><span class="k">Bidding:</span> ${bidders}</div>` : ""}
         <div class="rows">
-          <div><span class="k">Your bids</span> ${num(a.your_bids)}${limitText} <span class="muted">(${money(a.your_points_cost)})</span></div>
+          <div><span class="k">Your bids</span> ${num(a.your_bids)}${a.bid_limit ? ` / ${num(a.bid_limit)}` : ""} <span class="muted">(${money(a.your_points_cost)})</span></div>
           <div><span class="k">Booked left</span> ${num(a.your_booked_left)}</div>
           <div><span class="k">If you won now</span> ${money(a.cost_if_won_now)} <span class="muted">(pay ${money(a.pay_if_won)})</span></div>
           <div><span class="k">Buy It Now</span> ${money(a.buy_it_now)}</div>
@@ -246,50 +283,92 @@ class AuctionWatcherPanel extends HTMLElement {
         </div>
         ${a.history_wins ? `
           <div class="hist"><span class="k">Past ${num(a.history_wins)} wins${a.history_period_days ? ` (${a.history_period_days} days)` : ""}:</span>
-            median ${money(a.history_median_final_price)}, winners used ~${num(a.history_median_winner_bids)} bids
-            ${a.history_avg_winner_cost ? `, avg cost ${money(a.history_avg_winner_cost)}` : ""}</div>` : ""}
-        <form class="limit" data-id="${esc(a.auction_id)}">
-          <label>Bid limit <input name="limit" type="number" min="0" step="1" inputmode="numeric" value="${esc(a.bid_limit || "")}" placeholder="none"></label>
-          <button type="submit">Save</button>
-          <span class="saved">${saved ? esc(saved) : ""}</span>
-        </form>
+            median ${money(a.history_median_final_price)}, winners used ~${num(a.history_median_winner_bids)} bids${a.history_avg_winner_cost ? `, avg cost ${money(a.history_avg_winner_cost)}` : ""}</div>` : ""}
+        <div class="limits">
+          <div class="lim-row">
+            <label>${esc(limitLabel)}
+              <input data-id="${id}" data-field="limit" type="number" min="0" step="1" inputmode="numeric"
+                value="${esc(this._val(a.auction_id, "limit", a.bid_limit || ""))}" placeholder="none"></label>
+            <button type="button" data-act="limit" data-id="${id}">Save</button>
+            <span class="saved">${esc(this._saved["limit:" + a.auction_id] || "")}</span>
+          </div>
+          <div class="note">The most bids you'll spend here in total, including the ${num(a.your_bids)} already placed.</div>
+          <div class="lim-row">
+            <label>Max price
+              <input data-id="${id}" data-field="max_price" type="number" min="0" step="0.01" inputmode="decimal"
+                value="${esc(this._val(a.auction_id, "max_price", a.max_price || ""))}" placeholder="none"></label>
+            <button type="button" data-act="max_price" data-id="${id}">Save</button>
+            <span class="saved">${esc(this._saved["max_price:" + a.auction_id] || "")}</span>
+          </div>
+          <div class="note">Your booked bids stop once the auction price passes this.${this._isOneCent(a) ? " On a 1¢ auction the price doesn't change what you pay." : ""}</div>
+          <div class="total" data-total="${id}">${this._totalText(a)}</div>
+        </div>
         ${a.status === "ended" ? "" : this._bookingControls(a)}
       </div>`;
   }
 
+  _isOneCent(a) {
+    return (a.labels || []).some((l) => /1¢/.test(l));
+  }
+
+  // Total max cost = max bids × point cost + what you'd pay if you won at your max price
+  _totalText(a) {
+    const aid = a.auction_id;
+    const limit = parseInt(this._val(aid, "limit", a.bid_limit || 0), 10) || 0;
+    const maxPrice = parseFloat(this._val(aid, "max_price", a.max_price || 0)) || 0;
+    if (!limit) return `<span class="muted">Set ${esc(LIMIT_LABEL[a.site] || "a bid limit")} to see your total max cost.</span>`;
+    const pointCost = Number(a.point_cost ?? 0.13);
+    const bidsCost = limit * pointCost;
+    let pay, payText;
+    if (this._isOneCent(a)) { pay = 0.01; payText = "1¢ to win (1¢ auction)"; }
+    else if (maxPrice) {
+      const m = (a.labels || []).join(" ").match(/(\d{1,3})\s*%\s*off/i);
+      pay = m ? maxPrice * (1 - Number(m[1]) / 100) : maxPrice;
+      payText = `${money(pay)} if you win at your max price`;
+    } else { pay = null; payText = "plus the final price (no max price set)"; }
+    const total = pay === null ? null : bidsCost + pay;
+    return `<b>Total max cost: ${total === null ? money(bidsCost) + "+" : money(total)}</b>
+      <span class="muted">= ${num(limit)} bids × ${money(pointCost)} (${money(bidsCost)}) + ${esc(payText)}.
+      Spent so far: ${money(a.your_points_cost)}.</span>`;
+  }
+
   _bookingControls(a) {
     const id = esc(a.auction_id);
+    const aid = a.auction_id;
     const auto = a.auto_cancel || a.auto_rebook;
-    const noLimit = !a.bid_limit;
+    const mode = this._val(aid, "rebook_mode", a.rebook_mode || "fixed");
+    const limitLabel = LIMIT_LABEL[a.site] || "bid limit";
     return `
-      <details class="booking" ${auto || this._open[a.auction_id] ? "open" : ""} data-id="${id}">
+      <details class="booking" ${auto || this._open[aid] ? "open" : ""} data-id="${id}">
         <summary>Booking &amp; auto ${auto ? `<span class="badge on">auto on</span>` : ""}</summary>
         <div class="bk-row">
-          <input name="book_count" type="number" min="1" step="1" inputmode="numeric" value="${esc(a.rebook_amount || 10)}">
+          <input data-id="${id}" data-field="book_count" type="number" min="1" step="1" inputmode="numeric"
+            value="${esc(this._val(aid, "book_count", a.rebook_amount || 10))}">
           <button type="button" data-act="book" data-id="${id}">Book bids</button>
           <button type="button" class="secondary" data-act="cancel" data-id="${id}" ${a.your_booked_left ? "" : "disabled"}>
             Cancel booked${a.your_booked_left ? ` (${num(a.your_booked_left)})` : ""}</button>
         </div>
-        <label class="bk-line">Max price (site stops bidding above it)
-          <input name="max_price" type="number" min="0" step="0.01" inputmode="decimal" value="${esc(a.max_price || "")}" placeholder="none"></label>
-        <label class="bk-check"><input name="auto_cancel" type="checkbox" ${a.auto_cancel ? "checked" : ""} ${noLimit ? "disabled" : ""}>
+        <label class="bk-check"><input data-id="${id}" data-field="auto_cancel" type="checkbox"
+          ${this._val(aid, "auto_cancel", a.auto_cancel) ? "checked" : ""}>
           Auto-cancel booked bids when it gets crowded</label>
-        <label class="bk-check"><input name="auto_rebook" type="checkbox" ${a.auto_rebook ? "checked" : ""} ${noLimit ? "disabled" : ""}>
+        <label class="bk-check"><input data-id="${id}" data-field="auto_rebook" type="checkbox"
+          ${this._val(aid, "auto_rebook", a.auto_rebook) ? "checked" : ""}>
           Auto-rebook when it thins out again</label>
         <div class="bk-line">Rebook
-          <label><input type="radio" name="rebook_mode_${id}" value="fixed" ${a.rebook_mode !== "remaining" ? "checked" : ""} ${noLimit ? "disabled" : ""}>
-            <input name="rebook_amount" type="number" min="1" step="1" inputmode="numeric" value="${esc(a.rebook_amount || 10)}" ${noLimit ? "disabled" : ""}> bids</label>
-          <label><input type="radio" name="rebook_mode_${id}" value="remaining" ${a.rebook_mode === "remaining" ? "checked" : ""} ${noLimit ? "disabled" : ""}>
+          <label><input data-id="${id}" data-field="rebook_mode" type="radio" name="rebook_mode_${id}" value="fixed" ${mode !== "remaining" ? "checked" : ""}>
+            <input data-id="${id}" data-field="rebook_amount" type="number" min="1" step="1" inputmode="numeric"
+              value="${esc(this._val(aid, "rebook_amount", a.rebook_amount || 10))}"> bids</label>
+          <label><input data-id="${id}" data-field="rebook_mode" type="radio" name="rebook_mode_${id}" value="remaining" ${mode === "remaining" ? "checked" : ""}>
             what was left when it cancelled</label>
         </div>
         <div class="bk-row">
           <button type="button" data-act="auto" data-id="${id}">Save booking settings</button>
-          <span class="saved">${esc(this._saved["auto:" + a.auction_id] || "")}</span>
+          <span class="saved">${esc(this._saved["auto:" + aid] || "")}</span>
         </div>
-        <div class="note">${noLimit
-          ? "Set a bid limit above to allow auto-cancel and auto-rebook."
-          : `Crowded means more than your alert number of bidders. Nothing is ever booked past your bid limit (${num(a.bid_limit)}).`}
-          The first booked bid is placed right away, so booking 1 is the same as bidding once.
+        <div class="note">
+          Crowded = more other bidders than your alert number (you aren't counted).
+          Auto needs a ${esc(limitLabel)} value above, and never books past it.
+          The first booked bid is placed right away.
           ${a.auto_status ? `<br><b>Auto:</b> ${esc(a.auto_status)}` : ""}</div>
       </details>`;
   }
@@ -308,21 +387,74 @@ class AuctionWatcherPanel extends HTMLElement {
     });
   }
 
-  async _saveLimit(ev) {
-    ev.preventDefault();
-    const form = ev.currentTarget;
-    const id = form.dataset.id;
-    const raw = form.querySelector("input").value.trim();
-    const limit = raw === "" ? 0 : Math.max(0, parseInt(raw, 10) || 0);
+  // ---------------------------------------------------------------- actions
+
+  _field(id, field, fallback) {
+    const a = this._auctions().find((x) => String(x.auction_id) === String(id)) || {};
+    const saved = { limit: a.bid_limit, max_price: a.max_price, book_count: a.rebook_amount || 10, auto_cancel: a.auto_cancel,
+      auto_rebook: a.auto_rebook, rebook_mode: a.rebook_mode || "fixed", rebook_amount: a.rebook_amount || 10 }[field];
+    const v = this._val(id, field, saved);
+    return v === undefined || v === null || v === "" ? fallback : v;
+  }
+
+  async _action(act, id) {
+    const key = (act === "limit" || act === "max_price" ? act + ":" : "auto:") + id;
+    const int = (v) => Math.max(0, parseInt(v, 10) || 0);
+    const dec = (v) => Math.max(0, parseFloat(v) || 0);
     try {
-      await this._hass.callService("auction_watcher", "set_bid_limit", { auction_id: id, limit });
-      this._saved[id] = limit ? "Saved" : "Limit removed";
+      if (act === "limit") {
+        const limit = int(this._field(id, "limit", 0));
+        await this._hass.callService("auction_watcher", "set_bid_limit", { auction_id: id, limit });
+        this._clearDrafts(id, ["limit"]);
+        this._saved[key] = limit ? "Saved" : "Removed";
+      } else if (act === "max_price") {
+        const maxPrice = dec(this._field(id, "max_price", 0));
+        await this._hass.callService("auction_watcher", "set_auto_booking", { auction_id: id, max_price: maxPrice });
+        this._clearDrafts(id, ["max_price"]);
+        this._saved[key] = maxPrice ? "Saved" : "Removed";
+      } else if (act === "book") {
+        const count = int(this._field(id, "book_count", 0));
+        if (count < 1) throw new Error("enter how many bids to book");
+        const maxPrice = dec(this._field(id, "max_price", 0));
+        if (!confirm(`Book ${count} bids on this auction? The first one is placed right away; the rest wait their turn. This spends points.`)) return;
+        const res = await this._hass.callService("auction_watcher", "book_bids",
+          { auction_id: id, count, ...(maxPrice ? { max_price: maxPrice } : {}) }, undefined, false, true);
+        const booked = res?.response?.booked ?? count;
+        this._saved[key] = booked < count ? `Booked ${booked} (capped by max bids or balance)` : `Booked ${booked}`;
+      } else if (act === "cancel") {
+        if (!confirm("Cancel your booked bids on this auction? Unused points go back to your balance.")) return;
+        await this._hass.callService("auction_watcher", "cancel_booked_bids", { auction_id: id });
+        this._saved[key] = "Cancelled";
+      } else if (act === "auto") {
+        const wantsAuto = !!this._field(id, "auto_cancel", false) || !!this._field(id, "auto_rebook", false);
+        const limit = int(this._field(id, "limit", 0));
+        if (wantsAuto && !limit) throw new Error("set Max bids for this auction first (box above)");
+        // Save Max bids / Max price too if you typed them, so one button does it all
+        await this._hass.callService("auction_watcher", "set_bid_limit", { auction_id: id, limit });
+        await this._hass.callService("auction_watcher", "set_auto_booking", {
+          auction_id: id,
+          auto_cancel: !!this._field(id, "auto_cancel", false),
+          auto_rebook: !!this._field(id, "auto_rebook", false),
+          rebook_mode: this._field(id, "rebook_mode", "fixed"),
+          rebook_amount: Math.max(1, int(this._field(id, "rebook_amount", 10))),
+          max_price: dec(this._field(id, "max_price", 0)),
+        });
+        this._clearDrafts(id, ["limit", "max_price", "auto_cancel", "auto_rebook", "rebook_mode", "rebook_amount"]);
+        this._saved[key] = "Saved";
+      }
     } catch (err) {
-      this._saved[id] = "Couldn't save: " + (err?.message || err);
+      this._saved[key] = "Couldn't do that: " + (err?.message || err);
     }
-    form.querySelector("input").blur();
+    if (act === "book" || act === "cancel" || act === "auto") this._open[id] = true;
     this._maybeRender(true);
-    setTimeout(() => { delete this._saved[id]; this._maybeRender(true); }, 4000);
+    setTimeout(() => { delete this._saved[key]; this._maybeRender(true); }, 6000);
+  }
+
+  _clearDrafts(id, fields) {
+    const d = this._drafts[id];
+    if (!d) return;
+    fields.forEach((f) => delete d[f]);
+    if (!Object.keys(d).length) delete this._drafts[id];
   }
 }
 
@@ -334,9 +466,12 @@ const STYLE = `
   .toolbar .title { flex: 1; font-size: 20px; }
   .icon { background: none; border: 0; color: inherit; font-size: 22px; cursor: pointer; padding: 6px 10px; border-radius: 50%; }
   .icon:hover { background: rgba(255,255,255,.15); }
-  .summary { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 16px 0; }
+  .summary { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 16px 0; align-items: center; }
   .pill { background: var(--card-background-color); border: 1px solid var(--divider-color); border-radius: 16px; padding: 6px 12px; font-size: 14px; }
   .pill.hot { border-color: var(--warning-color, #ff9800); }
+  .sort { margin-left: auto; font-size: 14px; color: var(--secondary-text-color); display: flex; gap: 6px; align-items: center; }
+  .sort select { padding: 5px 8px; border-radius: 6px; border: 1px solid var(--divider-color); background: var(--card-background-color);
+                 color: var(--primary-text-color); }
   .tabs { display: flex; gap: 4px; padding: 12px 16px 0; overflow-x: auto; scrollbar-width: none; border-bottom: 1px solid var(--divider-color); }
   .tabs::-webkit-scrollbar { display: none; }
   .tab { background: none; border: 0; border-bottom: 2px solid transparent; color: var(--secondary-text-color); padding: 10px 14px;
@@ -348,7 +483,7 @@ const STYLE = `
   .card { background: var(--card-background-color); border-radius: var(--ha-card-border-radius, 12px); padding: 14px;
           box-shadow: var(--ha-card-box-shadow, none); border: 1px solid var(--divider-color); display: flex; flex-direction: column; gap: 10px; }
   .card.opp { border: 2px solid var(--warning-color, #ff9800); }
-  .card.capped { opacity: .8; }
+  .card.capped { opacity: .85; }
   .top { display: flex; gap: 12px; }
   .top img, .noimg { width: 72px; height: 72px; object-fit: contain; border-radius: 8px; background: #fff; flex: none; }
   .noimg { display: grid; place-items: center; font-size: 28px; background: var(--secondary-background-color); }
@@ -362,8 +497,10 @@ const STYLE = `
   .badge { font-size: 12px; border-radius: 10px; padding: 1px 8px; background: var(--secondary-background-color); }
   .badge.hot { background: var(--warning-color, #ff9800); color: #000; }
   .badge.cap { background: var(--error-color, #db4437); color: #fff; }
-  .tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
-  .tag { font-size: 11px; border: 1px solid var(--divider-color); border-radius: 8px; padding: 0 6px; color: var(--secondary-text-color); }
+  .badge.on { background: var(--success-color, #43a047); color: #fff; }
+  .labels { display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
+  .tag { font-size: 11px; border: 1px solid var(--divider-color); border-radius: 8px; padding: 0 6px; color: var(--primary-text-color);
+         white-space: nowrap; }
   .big { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; text-align: center; background: var(--secondary-background-color);
          border-radius: 8px; padding: 8px 4px; }
   .big .v { font-size: 20px; font-weight: 500; font-variant-numeric: tabular-nums; }
@@ -374,25 +511,25 @@ const STYLE = `
   .rows .k { display: block; }
   .line, .hist { font-size: 13px; }
   .muted { color: var(--secondary-text-color); }
-  form.limit { display: flex; align-items: center; gap: 8px; font-size: 14px; border-top: 1px solid var(--divider-color); padding-top: 10px; }
-  form.limit input { width: 90px; padding: 6px; border-radius: 6px; border: 1px solid var(--divider-color);
-                     background: var(--primary-background-color); color: var(--primary-text-color); }
-  form.limit button { padding: 6px 12px; border-radius: 6px; border: 0; background: var(--primary-color); color: var(--text-primary-color, #fff); cursor: pointer; }
+  .limits { display: flex; flex-direction: column; gap: 4px; font-size: 14px; border-top: 1px solid var(--divider-color); padding-top: 10px; }
+  .lim-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 4px; }
+  .limits label { display: flex; align-items: center; gap: 6px; min-width: 150px; justify-content: space-between; }
+  .total { margin-top: 6px; padding: 8px; border-radius: 8px; background: var(--secondary-background-color); font-size: 13px; }
+  input[type=number] { width: 84px; padding: 6px; border-radius: 6px; border: 1px solid var(--divider-color);
+                       background: var(--primary-background-color); color: var(--primary-text-color); }
+  button { padding: 6px 12px; border-radius: 6px; border: 0; background: var(--primary-color); color: var(--text-primary-color, #fff); cursor: pointer; }
+  button.secondary { background: var(--secondary-background-color); color: var(--primary-text-color); border: 1px solid var(--divider-color); }
+  button:disabled { opacity: .5; cursor: default; }
+  .toolbar .icon { background: none; color: inherit; }
+  .tab { border-radius: 0; }
   .saved { color: var(--secondary-text-color); font-size: 13px; }
   details.booking { border-top: 1px solid var(--divider-color); padding-top: 8px; font-size: 14px; }
   details.booking summary { cursor: pointer; color: var(--primary-color); font-weight: 500; }
-  .badge.on { background: var(--success-color, #43a047); color: #fff; }
   .bk-row, .bk-line { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
   .bk-check { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
-  details.booking input[type=number] { width: 80px; padding: 6px; border-radius: 6px; border: 1px solid var(--divider-color);
-    background: var(--primary-background-color); color: var(--primary-text-color); }
-  details.booking button { padding: 6px 12px; border-radius: 6px; border: 0; background: var(--primary-color);
-    color: var(--text-primary-color, #fff); cursor: pointer; }
-  details.booking button.secondary { background: var(--secondary-background-color); color: var(--primary-text-color);
-    border: 1px solid var(--divider-color); }
-  details.booking button:disabled, details.booking input:disabled { opacity: .5; cursor: default; }
-  .note { color: var(--secondary-text-color); font-size: 12px; margin-top: 8px; }
-  @media (max-width: 420px) { .grid { grid-template-columns: 1fr; padding: 12px; } .rows { grid-template-columns: 1fr; } }
+  .note { color: var(--secondary-text-color); font-size: 12px; }
+  details .note { margin-top: 8px; }
+  @media (max-width: 420px) { .grid { grid-template-columns: 1fr; padding: 12px; } .rows { grid-template-columns: 1fr; } .sort { margin-left: 0; } }
 `;
 
 customElements.get("auction-watcher-panel") || customElements.define("auction-watcher-panel", AuctionWatcherPanel);

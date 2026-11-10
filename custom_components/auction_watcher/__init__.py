@@ -8,7 +8,7 @@ import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse, SupportsResponse
-from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError, Unauthorized
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_create_clientsession
 from homeassistant.helpers.typing import ConfigType
@@ -45,7 +45,18 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             and isinstance(getattr(e, "runtime_data", None), AuctionWatcherCoordinator)
         ]
 
+    async def _require_admin(call: ServiceCall) -> None:
+        """Anything that spends points or changes limits is admin-only.
+        Calls with no user (your own automations, scripts) are allowed."""
+        user_id = call.context.user_id
+        if user_id is None:
+            return
+        user = await hass.auth.async_get_user(user_id)
+        if user is None or not user.is_admin:
+            raise Unauthorized(context=call.context)
+
     async def set_bid_limit(call: ServiceCall) -> None:
+        await _require_admin(call)
         auction_id = str(call.data["auction_id"]).strip()
         targets = [c for c in _coordinators() if c.data and auction_id in c.data]
         if not targets:
@@ -64,6 +75,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         raise ServiceValidationError(f"Auction {auction_id} isn't one you're following")
 
     async def book_bids(call: ServiceCall) -> ServiceResponse:
+        await _require_admin(call)
         aid = str(call.data["auction_id"]).strip()
         try:
             booked = await _owner(aid).async_book(aid, call.data["count"], call.data.get("max_price"))
@@ -72,6 +84,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         return {"booked": booked}
 
     async def cancel_booked(call: ServiceCall) -> None:
+        await _require_admin(call)
         aid = str(call.data["auction_id"]).strip()
         try:
             await _owner(aid).async_cancel(aid)
@@ -79,6 +92,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             raise HomeAssistantError(str(err)) from err
 
     async def set_auto(call: ServiceCall) -> None:
+        await _require_admin(call)
         aid = str(call.data["auction_id"]).strip()
         coord = _owner(aid)
         current = vars(coord.auto_settings(aid))

@@ -1,7 +1,7 @@
 """Constants for Auction Watcher."""
 
 DOMAIN = "auction_watcher"
-VERSION = "0.4.0"  # keep in sync with manifest.json (a test checks this)
+VERSION = "0.5.0"  # keep in sync with manifest.json (a test checks this)
 
 CONF_SITE = "site"
 CONF_COOKIE = "cookie"
@@ -33,7 +33,7 @@ UPCOMING_WINDOW = 30 * 60
 LISTS_REFRESH_SECONDS = 60       # how often to re-read "my auctions" while in fast mode
 HISTORY_REFRESH_SECONDS = 6 * 3600
 HISTORY_FETCHES_PER_UPDATE = 2   # be gentle: fetch price history a little at a time
-DEFAULT_ALERT_MAX_BIDDERS = 2
+DEFAULT_ALERT_MAX_BIDDERS = 1  # OTHER bidders (you're not counted): 1 = you against one person
 DEFAULT_ALERT_MAX_PRICE = 0.0    # 0 = no price limit
 DEFAULT_BID_LIMIT = 0            # 0 = no per-auction limit
 DEFAULT_POINT_COST = 0.13        # GovAuctions points are 13 cents

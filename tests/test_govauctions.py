@@ -188,3 +188,14 @@ def test_cookie_formats():
     assert c == {"A": "2", "REMEMBERME": "x=y"}
     assert parse_cookie_input("Cookie: A=1; B=two=2") == {"A": "1", "B": "two=2"}
     assert cookie_header({"A": "1", "B": "2"}) == "A=1; B=2"
+
+
+def test_label_notes_explain_special_types():
+    assert "1¢" in ga.label_note("1¢ Auction")
+    assert "half" in ga.label_note("Win-Win")
+    assert "can't bid again" in ga.label_note("No Re-Entry")
+    assert "40%" in ga.label_note("40% Off")
+    assert ga.label_note("1¢ Auction", "The site's own words") == "The site's own words"
+    static = ga.parse_static({"static": {"1": {"name": "X", "icons": [{"title": "1¢ Auction", "message": "Most winners pay 1¢"}],
+                                                "noReEntry": True}}})["1"]
+    assert static["label_notes"] == {"1¢ Auction": "Most winners pay 1¢", "No Re-Entry": ga.label_note("No Re-Entry")}

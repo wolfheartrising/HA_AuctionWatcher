@@ -10,13 +10,13 @@ and never past the bid limit you set for that auction.
 
 ## What it does (GovAuctions)
 
-- **Its own "Auctions" page in the sidebar**: Active / Watching / Ended / per-site tabs, a card per auction with picture, price, clock, bidders, your bids and cost, past winners, and a bid limit you can set right there. Long countdowns tick every second; the short penny-auction clock shows its value "as of" the last check, since every bid resets it.
+- **Its own "Auctions" page in the sidebar** (admins only): Active / Watching / Ended / per-site tabs and a sort menu (name, price, fewest bidders, your bids, clock). A card per auction with picture, price, clock, other bidders, your bids and cost, past winners, what each special label (1¢, Win-Win, No Re-Entry, ...) means, and **Max bids** and **Max price** with a calculated **total max cost**. What you type is kept until you save, even while the page updates. Long countdowns tick every second; the short penny-auction clock shows its value "as of" the last check, since every bid resets it.
 - **Follows everything you're in**: your My Bids list, your watch list (favorites), plus any extra auction IDs you add.
-- **One sensor per auction**: state is the price. Attributes hold the clock, leader, **active bidders** (everyone seen bidding in the last 3 minutes, configurable, so people who pause and jump back in still count), whether it's closed to new bidders, your bids and what they cost, booked bids left, labels (1¢, Win-Win, ...), entry limit, Buy It Now, and **what winning right now would cost you**.
+- **One sensor per auction**: state is the price. Attributes hold the clock, leader, **other active bidders** (everyone except you seen bidding in the last 3 minutes, configurable, so people who pause and jump back in still count), whether it's closed to new bidders, your bids and what they cost, booked bids left, labels (1¢, Win-Win, ...), entry limit, Buy It Now, and **what winning right now would cost you**.
 - **Price history**: past wins of the same product, with median final price, the median number of bids winners used, and the site's own cost estimate.
 - **Polls only as fast as needed**: every 10 s while something you follow is live, every minute shortly before one starts, every 45 min otherwise. The slow check also keeps the login fresh, and refreshed cookies are saved automatically.
 - **Alerts**, each sent once (not every poll):
-  - **Few bidders left**: down to ≤ N active bidders (default 2), in the real 5-second phase (not during the long first countdown), under your max price, and you're allowed to bid. Optionally only after it has stayed that low for N seconds (default 0: right away, since 2 bidders can end an auction in seconds).
+  - **Few bidders left**: down to ≤ N *other* bidders (default 1: you against one person), in the real 5-second phase (not during the long first countdown), under your max price, and you're allowed to bid. Optionally only after it has stayed that low for N seconds (default 0: right away, since 2 bidders can end an auction in seconds).
   - **Bid limit reached**: you've spent your limit on an auction.
   - **Auction ended** and **auction won**.
 - **Built-in delivery**, picked in ⚙️:
@@ -32,7 +32,7 @@ and never past the bid limit you set for that auction.
 Each auction card on the **Auctions** page has a *Booking & auto* section. These spend real points.
 
 - **Book bids / Cancel booked**: the same calls as the site's own buttons (`auction_watcher.book_bids`, `auction_watcher.cancel_booked_bids`). Manual booking is clamped to the auction's bid limit and your balance. The site places the first booked bid right away, so booking 1 is the same as bidding once; cancelling returns only the bids not yet placed.
-- **Max price**: handed to the site's own price cap, so your booked bids stop above it.
+- **Max bids** and **Max price** (top of each card, saved separately): Max bids is the total you'll spend there including bids already placed; Max price is handed to the site's own price cap. The card shows the **total max cost** = max bids × point cost + what you'd pay to win at your max price (1¢ on 1¢ auctions).
 - **Auto-cancel when crowded** (off by default): when the auction has more bidders than your alert number, your booked bids are cancelled and the unused points come back.
 - **Auto-rebook when it thins out** (off by default): when it's back down to your alert number and you have nothing booked, it books again: either a **fixed amount** or **what was left when it auto-cancelled**.
 
@@ -41,6 +41,8 @@ Safety rules, always on:
 - It only acts in the real 5-second phase, never during the first long countdown.
 - It **never auto-cancels where that would lock you out**: *No Re-Entry* auctions, or auctions closed to new bidders that you haven't bid in.
 - At most one action per auction every 30 seconds; every booking, cancel or failure sends an alert (*Bids booked or cancelled* in the alert settings).
+
+**Who can use it:** the Auctions page and every action that books, cancels or changes limits are admin-only (automations and scripts you write still work). Home Assistant has no per-user permissions for sensors, so non-admin users could still find the auction sensors if they go looking.
 
 This is automated use of your account. Check the site's terms and decide for yourself; you are responsible for what it spends.
 

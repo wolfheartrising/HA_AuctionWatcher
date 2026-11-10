@@ -92,11 +92,47 @@ def parse_live(data: dict[str, Any], now: float) -> tuple[dict[str, dict[str, An
     return out, _int(account.get("bc"))
 
 
+# Short notes for the special auction types (from GovAuctions' own rules pages).
+# The site's own icon text is used when it sends one; these fill the gaps.
+LABEL_NOTES = {
+    "1¢ auction": "Winner pays 1¢, whatever the final price. Your cost is your bids.",
+    "win-win": "Winner gets half of the points they used back.",
+    "spoils": "Winner also gets free points equal to the Buy It Now dollar amount.",
+    "runner-up": "Second place gets 50% off Buy It Now (and points back if used).",
+    "leaderboard": "Top 3 by time as highest bidder get extra points at the end.",
+    "no re-entry": "After the entry limit, anyone without active booked bids can't bid again. Don't run out of booked bids.",
+    "duel": "After the entry limit, if two bidders place the last four bids, a 60 s countdown can lock it to just those two.",
+    "early bird": "Booked bids can only be set up until 10 s before the start.",
+    "overload": "At most 100 bids booked at a time.",
+    "triple-booked": "You can have booked bids in at most three Triple-Booked auctions at once.",
+    "splitsies": "Several identical auctions start together; you may join only one.",
+    "reveal": "Usernames are hidden until it ends.",
+    "one per user": "Once you've won this item, you can't bid on it again.",
+    "mystery": "Item revealed 5 minutes before the start; bids can be booked only after that.",
+    "no exchange": "Can't be exchanged for points if you win.",
+    "free-to-bid": "No points needed: set a max bid and it bids for you, like a classic auction.",
+}
+
+
+def label_note(label: str, site_message: str | None = None) -> str:
+    if site_message:
+        return site_message
+    key = label.lower()
+    for name, note in LABEL_NOTES.items():
+        if name in key:
+            return note
+    m = re.search(r"(\d{1,3})\s*%", key)
+    if m:
+        return f"Winner's final price is discounted {m.group(1)}%."
+    return ""
+
+
 def parse_static(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     for aid, s in (data.get("static") or {}).items():
         images = s.get("images") or {}
         labels = [i.get("title") for i in s.get("icons") or [] if i.get("title")]
+        site_msgs = {i.get("title"): i.get("message") for i in s.get("icons") or [] if i.get("title")}
         for flag, label in (("onePerUser", "One Per User"), ("noReEntry", "No Re-Entry")):
             if s.get(flag):
                 labels.append(label)
@@ -111,6 +147,7 @@ def parse_static(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
             "no_jumper_limit": _float(s.get("noJumperLimit")),
             "starts_at": datetime.fromtimestamp(start, timezone.utc) if start else None,
             "labels": labels,
+            "label_notes": {l: label_note(l, site_msgs.get(l)) for l in labels},
             "category_name": s.get("categoryName"),
         }
     return out
@@ -217,6 +254,7 @@ def build_state(
         labels=labels,
         extra={
             "no_jumper_limit": static.get("no_jumper_limit"),
+            "label_notes": static.get("label_notes", {}),
             "product_id": static.get("product_id"),
             "category_name": static.get("category_name"),
         },
@@ -295,6 +333,13 @@ class GovAuctionsClient:
     async def history(self, auction_id: str) -> PriceHistory | None:
         data = await self._get("/api/v2/auction/extraStaticData", params={"auctionId": auction_id})
         return parse_history(data, auction_id)
+
+    async def me(self) -> dict[str, str]:
+        """Your username and id, so you can be left out of bidder counts.
+        Only these two fields are kept; the rest of the account response is ignored."""
+        data = await self._get("/api/v2/users/me")
+        data = data.get("user") if isinstance(data.get("user"), dict) else data
+        return {"id": str(data.get("id") or ""), "name": str(data.get("name") or data.get("username") or "")}
 
     # ---- booking: these spend points. Same calls the site's own Book / Cancel buttons make.
 

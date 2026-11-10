@@ -94,6 +94,7 @@ class AuctionWatcherCoordinator(DataUpdateCoordinator[dict[str, AuctionState]]):
         )
         self.client = client
         self.points: int | None = None
+        self.username: str | None = None
         self.mode = "starting"
         self.options_snapshot = dict(entry.options)
         self._store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}")
@@ -285,6 +286,12 @@ class AuctionWatcherCoordinator(DataUpdateCoordinator[dict[str, AuctionState]]):
             extra = [x.strip() for x in str(self._opt(e, CONF_EXTRA_IDS, "")).replace(",", " ").split() if x.strip().isdigit()]
             tracked = sorted(set(self._lists["all"]) | set(self._lists["watching"]) | set(extra))
 
+            if self.username is None:
+                try:
+                    self.username = (await self.client.me())["name"] or ""
+                except SiteError:
+                    self.username = None  # try again next time; counts include you until then
+
             # One request covers every followed auction, and keeps the login fresh when idle
             live, self.points = await self.client.live(tracked, now)
 
@@ -319,11 +326,15 @@ class AuctionWatcherCoordinator(DataUpdateCoordinator[dict[str, AuctionState]]):
             st = ga.build_state(aid, live.get(aid), static, hist, watching, point_cost, now)
             rows = (live.get(aid) or {}).get("bid_rows")
             if rows is not None:
-                # Count everyone seen in the last few minutes, not just the last 9 bids
+                # Count everyone seen in the last few minutes, not just the last 9 bids,
+                # and leave you out: "2" always means two OTHER people.
                 self._bidders.add(aid, rows)
                 active = self._bidders.active(aid, now, window_min * 60)
-                st.active_bidders, st.recent_bidders = len(active), active
+                others = [u for u in active if u != self.username]
+                st.active_bidders, st.recent_bidders = len(others), others
+                st.extra["you_are_bidding"] = self.username in active
             st.extra["active_window_minutes"] = window_min
+            st.extra["point_cost"] = point_cost
             states[aid] = st
         self._bidders.forget_except(set(tracked))
 

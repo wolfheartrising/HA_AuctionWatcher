@@ -36,7 +36,7 @@
         "title": "Auction Watcher settings",
         "description": "When to alert, where alerts go, and how often to check.",
         "data": {
-          "alert_max_bidders": "Alert when active bidders are at most",
+          "alert_max_bidders": "Alert when OTHER active bidders are at most (you aren't counted)",
           "active_window_minutes": "Count anyone who bid within the last N minutes",
           "stable_seconds": "…and only after it stays that low for N seconds (0 = right away)",
           "alert_max_price": "Only alert below this price (0 = any price)",
@@ -52,7 +52,8 @@
         "data_description": {
           "active_window_minutes": "The site only shows the last 9 bids. Counting a few minutes back catches people who pause and jump back in.",
           "stable_seconds": "With 2 bidders an auction can end in seconds, so 0 alerts as soon as it qualifies.",
-          "notify_entities": "Alexa gets a short spoken version; text targets like Telegram get the auction link."
+          "notify_entities": "Alexa gets a short spoken version; text targets like Telegram get the auction link.",
+          "alert_max_bidders": "1 = you against one other person. Also what auto-cancel/rebook call crowded: more than this is crowded."
         }
       }
     }

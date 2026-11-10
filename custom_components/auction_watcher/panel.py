@@ -40,7 +40,8 @@ async def async_register_panel(hass: HomeAssistant) -> None:
         sidebar_icon="mdi:gavel",
         # ?v= makes browsers fetch the new file after an update
         module_url=f"{STATIC_URL}/{WEBCOMPONENT}.js?v={VERSION}",
-        require_admin=False,
+        # Admins only: the page can book bids and spend points
+        require_admin=True,
         config={},
     )
     hass.data[_PANEL_DONE] = True
