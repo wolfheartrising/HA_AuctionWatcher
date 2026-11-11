@@ -6,6 +6,18 @@ The section for a version becomes its release notes, so HACS shows them under "U
 After updating: restart Home Assistant if Python changed, then reload the Auctions page (it offers a Reload button
 when it's older than the plugin).
 
+## 1.10.0
+- **OLA bidding (opt-in).** OLA items now get **Bid now** and **Bid $X (next)** buttons like Mac.bid: you set a
+  whole-dollar max, OLA raises your bid for you up to it, and the max counts toward your weekly budget and the
+  spending cap. Admin-only, confirmed from OLA's own data (you only show as bidding once OLA records it), and nothing
+  bids on its own. Bids can't be cancelled, only raised.
+- Built the SignalR transport for OLA's realtime bidding hub (standard ASP.NET Core SignalR: negotiate → handshake →
+  invoke → completion; honest user agent, no app impersonation).
+- **Heads-up / still to confirm:** OLA's exact bidding wire details (the live-bidding-token endpoint, the hub method
+  name/arguments and how a placed max reads back) are taken from the app files and **not yet live-verified** — they're
+  isolated in `sites/ola.py` so confirming them with OLA is a one-line change. Treat the first real bid as a test and
+  watch that it lands; the status line tells you whether OLA recorded it.
+
 ## 1.9.0
 - **OLA closer to full parity (read side):** cards now fill in condition, total bids, shipping cost and full-size images
   from the item detail (`/auction-items/{id}/details`), and items you've won that aren't collected yet show on the

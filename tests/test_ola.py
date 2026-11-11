@@ -1,6 +1,10 @@
-"""OLA read-only handler: tolerant parsing of the documented read endpoints."""
+"""OLA handler: tolerant parsing of the read endpoints, plus the SignalR bidding transport."""
 
+import asyncio
+import json
 import time
+
+import aiohttp
 
 from aw.sites import ola
 from aw.sites.base import AuthError
@@ -85,3 +89,105 @@ def test_prune_old_ended_keeps_recent_and_watchlist():
 
     pruned = ola.prune_old_ended({"1": old_hist, "2": recent_hist, "3": old_watch, "4": live}, now, keep_days=3)
     assert set(pruned) == {"2", "3", "4"}
+
+
+# ---------------------------------------------------------------- bidding transport
+
+def test_is_valid_bid_whole_dollars_at_least_min():
+    assert ola.is_valid_bid(13, 13) and ola.is_valid_bid(20, 13)
+    assert not ola.is_valid_bid(12, 13)      # below OLA's next minimum
+    assert not ola.is_valid_bid(13.5, 13)    # OLA bids in whole dollars
+    assert not ola.is_valid_bid(0, 1)
+    assert ola.is_valid_bid(5, None)         # no minimum known: any positive whole dollar
+    assert not ola.is_valid_bid("nope", 1)
+
+
+def test_split_records_and_json_or_none():
+    sep = ola.RECORD_SEP
+    assert ola._split_records("a" + sep + "b" + sep) == ["a", "b"]
+    assert ola._json_or_none('{"x":1}') == {"x": 1}
+    assert ola._json_or_none("not json") is None
+
+
+class _ACM:
+    def __init__(self, obj):
+        self._obj = obj
+
+    async def __aenter__(self):
+        return self._obj
+
+    async def __aexit__(self, *a):
+        return False
+
+
+class _Resp:
+    def __init__(self, status, data):
+        self.status = status
+        self._data = data
+
+    async def json(self, content_type=None):
+        return self._data
+
+
+class _Msg:
+    def __init__(self, mtype, data=""):
+        self.type = mtype
+        self.data = data
+
+
+class _WS:
+    def __init__(self, incoming):
+        self._in = list(incoming)
+        self.sent = []
+
+    async def send_str(self, s):
+        self.sent.append(s)
+
+    async def receive(self, timeout=None):
+        return self._in.pop(0) if self._in else _Msg(aiohttp.WSMsgType.CLOSED)
+
+
+class _Session:
+    def __init__(self, negotiate, ws):
+        self._neg = negotiate
+        self._ws = ws
+        self.ws_url = None
+
+    def post(self, url, headers=None, timeout=None):
+        return _ACM(_Resp(200, self._neg))
+
+    def ws_connect(self, url, headers=None, heartbeat=None, timeout=None):
+        self.ws_url = url
+        return _ACM(self._ws)
+
+
+def test_signalr_invoke_handshake_then_result():
+    sep = ola.RECORD_SEP
+    ws = _WS([
+        _Msg(aiohttp.WSMsgType.TEXT, "{}" + sep),                                          # handshake ack
+        _Msg(aiohttp.WSMsgType.TEXT, json.dumps({"type": 6}) + sep),                        # ping, ignored
+        _Msg(aiohttp.WSMsgType.TEXT, json.dumps({"type": 3, "invocationId": "1", "result": {"ok": True}}) + sep),
+    ])
+    sess = _Session({"connectionToken": "ctok"}, ws)
+    hub = ola.OlaSignalR(sess, "https://bidding-api.olabid.com/bidding-hub", "acc", "key", "btok")
+    res = asyncio.run(hub.invoke("ChangeMaxBid", [{"maxBid": 25}]))
+    assert res == {"ok": True}
+    assert json.loads(ws.sent[0].rstrip(sep)) == {"protocol": "json", "version": 1}
+    inv = json.loads(ws.sent[1].rstrip(sep))
+    assert inv["type"] == 1 and inv["target"] == "ChangeMaxBid" and inv["arguments"] == [{"maxBid": 25}]
+    assert sess.ws_url.startswith("wss://") and "id=ctok" in sess.ws_url and "access_token=btok" in sess.ws_url
+
+
+def test_signalr_invoke_raises_on_completion_error():
+    sep = ola.RECORD_SEP
+    ws = _WS([
+        _Msg(aiohttp.WSMsgType.TEXT, "{}" + sep),
+        _Msg(aiohttp.WSMsgType.TEXT, json.dumps({"type": 3, "invocationId": "1", "error": "bid too low"}) + sep),
+    ])
+    sess = _Session({"connectionId": "c"}, ws)
+    hub = ola.OlaSignalR(sess, "https://h/bidding-hub", "acc", "key")
+    try:
+        asyncio.run(hub.invoke("ChangeMaxBid", []))
+        assert False
+    except ola.SiteError as e:
+        assert "bid too low" in str(e)

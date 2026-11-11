@@ -110,19 +110,38 @@ class ProxyManager(OwnerMixin):
         return entries
 
     def _target(self, chat_id: str) -> dict[str, Any]:
-        """Address a chat the way Home Assistant's Telegram bot expects: newer versions want the chat's
-        notify entity (one per allowed chat); older ones take the chat id."""
+        """Address a chat using the chat's notify entity (HA 2026.9.0+ requirement).
+        Tries to find the entity_id for the chat; returns minimal params if not found."""
         cid = str(chat_id)
         reg = er.async_get(self.hass)
+        
+        # First: try to find the notify entity by matching chat_id in subentries
         for e in self._bot_entries():
-            for sid, sub in (getattr(e, "subentries", None) or {}).items():
+            subentries = getattr(e, "subentries", None) or {}
+            for sid, sub in subentries.items():
                 if str((sub.data or {}).get("chat_id")) != cid:
                     continue
                 for ent in er.async_entries_for_config_entry(reg, e.entry_id):
                     if ent.domain == "notify" and getattr(ent, "config_subentry_id", None) == sid:
-                        return {"entity_id": [ent.entity_id]}
-        target = int(cid) if cid.lstrip("-").isdigit() else cid
-        return {"chat_id": [target], **self._bot()}
+                        result = {"entity_id": [ent.entity_id]}
+                        if self.bot_entry:
+                            result["config_entry_id"] = self.bot_entry
+                        return result
+        
+        _LOGGER.debug("No telegram_bot notify entity found for chat_id %s; falling back to entity_id construction", cid)
+        # Fallback: if we know the bot entry, construct the expected entity_id
+        bot_entries = self._bot_entries()
+        if bot_entries:
+            entry = bot_entries[0]
+            # Try the standard naming pattern: notify.telegram_bot_<entry_id>_<chat_id>
+            clean_chat_id = cid.lstrip("-")
+            entity_id = f"notify.telegram_bot_{entry.entry_id}_{clean_chat_id}"
+            result = {"entity_id": [entity_id]}
+            if self.bot_entry:
+                result["config_entry_id"] = self.bot_entry
+            return result
+        
+        return {}
 
     def _my_bot_ids(self) -> set[str]:
         """Numeric ids of the bot(s) we talk through: the part of a bot's token before the colon."""

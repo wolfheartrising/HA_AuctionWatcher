@@ -82,9 +82,9 @@ def war_collapse(recent_bidders: list[str] | None, *, leader: str | None = None,
         "non_leader_count": count,
         "collapse": collapse,
         "detail": (
-            "round-robin collapse: only one non-leader is still firing"
-            if collapse else
-            "steady field" if count > 1 else "leader-only"
+            "leader-only: no non-leader is still firing" if count == 0 else
+            "round-robin collapse: only one non-leader is still firing" if collapse else
+            "steady field"
         ),
     }
 

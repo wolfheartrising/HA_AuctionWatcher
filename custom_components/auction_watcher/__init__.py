@@ -132,7 +132,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         aid = str(call.data["auction_id"]).strip()
         coord = _owner(aid)
         if not hasattr(coord, "async_place_bid"):
-            raise ServiceValidationError("Max bids from Home Assistant are only for Mac.bid")
+            raise ServiceValidationError("Max bids from Home Assistant are only for Mac.bid and OLA")
         try:
             amount = await coord.async_place_bid(aid, int(call.data["amount"]), bool(call.data.get("buyers_assurance", False)))
         except SiteError as err:

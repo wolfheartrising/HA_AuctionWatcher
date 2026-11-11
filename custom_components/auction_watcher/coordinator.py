@@ -107,6 +107,7 @@ from .logic import (
 from .sites.base import (
     STATUS_ENDED,
     STATUS_LIVE,
+    STATUS_PICKUP,
     STATUS_UPCOMING,
     AuctionState,
     AuthError,
@@ -1266,13 +1267,14 @@ class EbayCoordinator(AuctionWatcherCoordinator):
 
 
 class OlaCoordinator(AuctionWatcherCoordinator):
-    """OLA (olabid.com) via its app API: your watchlist, winning items and bid history.
-    Read-only for now (bidding is over OLA's SignalR hub, not built yet)."""
+    """OLA (olabid.com) via its app API: your watchlist, winning items and bid history, plus
+    opt-in max bids over OLA's realtime hub (admin-only, capped, confirmed from OLA's own data)."""
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry, client: "ola.OlaClient") -> None:
         super().__init__(hass, entry, client)  # type: ignore[arg-type]
         self._mine: dict[str, AuctionState] = {}
         self._ola_details: dict[str, tuple[float, dict]] = {}
+        self._ola_mem: dict[str, dict[str, Any]] = {}  # item -> {pending, since, answer, placed, status}
         self._timed = TimedSnapshot()
         self._backoff_until = 0.0
 
@@ -1280,17 +1282,116 @@ class OlaCoordinator(AuctionWatcherCoordinator):
     def opportunities(self) -> list[str]:
         return []
 
+    def _ola_committed(self, exclude: str | None = None) -> float:
+        """Dollars tied up on OLA right now: your current max on live items you're bidding on/winning."""
+        total = 0.0
+        for aid, s in (self.data or {}).items():
+            if aid == exclude or s.status != STATUS_LIVE:
+                continue
+            if s.extra.get("winning") or s.extra.get("you_are_bidding"):
+                total += float(s.extra.get("your_max_bid") or s.price or 0)
+        return total
+
     def dollars_used(self, since: float, exclude: str | None = None) -> float:
-        return 0.0  # no bidding from here yet, so nothing counts toward the spending cap
+        """Counted toward the spending cap: maxes tied up on live OLA items plus items won (awaiting pickup)."""
+        won = sum(float(s.price or 0) for aid, s in (self.data or {}).items()
+                  if aid != exclude and s.status == STATUS_PICKUP)
+        return round(self._ola_committed(exclude) + won, 2)
+
+    def _ola_budget_left(self, exclude: str | None = None) -> int | None:
+        """Dollars a new max may use: the OLA weekly budget and the spending cap, whichever is tighter
+        (that item's own current max isn't counted). None = no limit."""
+        left: int | None = None
+        budget = self._budget()
+        if budget:
+            left = int(budget - self._ola_committed(exclude))
+        g = global_settings.get(self.hass)
+        cap_left = g.left(time.time(), exclude=(self, exclude or "")) if g else None
+        if cap_left is not None:
+            cl = int(max(cap_left, 0))
+            left = cl if left is None else min(left, cl)
+        return left
+
+    async def async_item_now(self, auction_id: str) -> dict[str, Any]:
+        client: ola.OlaClient = self.client  # type: ignore[assignment]
+        return await client.item_now(str(auction_id), time.time())
 
     async def async_quick_bid(self, auction_id: str) -> str:
-        raise SiteError("Bidding on OLA from here isn't built yet; bid in the OLA app")
+        """OLA "Bid $X (next)": the minimum next bid OLA allows right now (read live when tapped).
+        It's a max of that amount; your budget and spending cap still apply."""
+        aid = str(auction_id)
+        live = await self.async_item_now(aid)
+        if live["winning"]:
+            raise SiteError("You're already winning this one")
+        amount = int(live["min_next"] or 0)
+        if amount <= 0:
+            raise SiteError("OLA didn't give a minimum next bid for this item")
+        if self.bid_limit(aid) < amount:
+            await self.async_set_bid_limit(aid, amount)
+        await self.async_place_bid(aid, amount)
+        return f"${amount} max sent"
+
+    async def async_place_bid(self, auction_id: str, amount: int, assurance: bool = False) -> int:
+        """Manual max bid from the page / the place_bid service (OLA). Opt-in, admin-only and capped."""
+        aid = str(auction_id)
+        s = (self.data or {}).get(aid)
+        if s is None or s.status != STATUS_LIVE:
+            raise SiteError("That item isn't live")
+        live = await self.async_item_now(aid)  # the price may have moved since the last check
+        if live["winning"] and (live.get("your_max") or 0) >= int(amount):
+            raise SiteError("You're already winning with a max at or above that")
+        if not ola.is_valid_bid(amount, live["min_next"]):
+            mn = int(live["min_next"] or 0)
+            raise SiteError(f"OLA's minimum next bid is ${mn}; enter a whole-dollar max of at least that")
+        left = self._ola_budget_left(exclude=aid)
+        if left is not None and int(amount) > left:
+            raise SiteError(f"A ${amount} max would go past your budget (${max(left, 0)} left: OLA budget or the spending cap)")
+        client: ola.OlaClient = self.client  # type: ignore[assignment]
+        event_id = str(s.extra.get("auction_event_id") or s.extra.get("mb_auction_id") or aid)
+        try:
+            answer = await client.place_max_bid(aid, event_id, int(amount))
+        except AuthError:
+            raise
+        _LOGGER.info("OLA answered a $%s max on item %s: %s", amount, aid, answer)
+        # OLA accepts the request first and processes it after, so it only counts once OLA's own
+        # data shows you as a bidder/winner (checked on the next updates).
+        self._ola_mem[aid] = {"pending": int(amount), "since": time.time(), "answer": str(answer)[:200],
+                              "status": f"sent a ${amount} max; checking that OLA recorded it…"}
+        self._ola_details.pop(aid, None)  # re-read this item on the next check
+        await self.async_request_refresh()
+        return int(amount)
+
+    async def _verify_ola(self, states: dict[str, AuctionState], now: float) -> None:
+        """Confirm sent bids from OLA's own data (you show up as a bidder, or as the winner)."""
+        for aid, mem in list(self._ola_mem.items()):
+            if not mem.get("pending"):
+                continue
+            s = states.get(aid)
+            if s is not None and (s.extra.get("winning") or s.extra.get("you_are_bidding")):
+                sent = int(mem["pending"])
+                recorded = s.extra.get("your_max_bid")
+                placed = int(recorded) if recorded else sent
+                mem.update({"pending": 0, "placed": placed})
+                mem["status"] = ("max bid confirmed: "
+                                 + ("you're winning" if s.extra.get("winning") else "someone's max is higher")
+                                 + "; OLA raises for you up to your max")
+                self._emit("bid_placed", {**self._booking_data(aid, placed, "placed by you", s),
+                                          "amount": placed, "sent": sent, "raised": bool(recorded and recorded > sent)})
+            elif now - float(mem.get("since", now)) > 60:
+                amount = int(mem["pending"])
+                mem["pending"] = 0
+                mem["status"] = f"OLA accepted the request for a ${amount} max but no bid shows up yet (answer: {mem.get('answer')})"
+                _LOGGER.warning("OLA bid on item %s not confirmed. Answer was: %s", aid, mem.get("answer"))
+                if s is not None:
+                    self._emit("bid_failed", {**self._booking_data(aid, amount, mem["status"], s), "amount": amount})
+            else:
+                self._ola_details.pop(aid, None)  # keep re-reading it until confirmed
 
     async def async_book(self, auction_id: str, count: int, max_price: float | None = None) -> int:
-        raise SiteError("Bidding on OLA from here isn't built yet; bid in the OLA app")
+        raise SiteError("OLA takes a single max bid, not booked bid counts; use Bid now")
 
     async def async_cancel(self, auction_id: str) -> None:
-        raise SiteError("Bidding on OLA from here isn't built yet")
+        raise SiteError("OLA max bids can't be cancelled (like Mac.bid); they only go up")
 
     async def _async_update_data(self) -> dict[str, AuctionState]:
         e = self.config_entry
@@ -1351,6 +1452,8 @@ class OlaCoordinator(AuctionWatcherCoordinator):
                 self.hass.config_entries.async_update_entry(e, data={**e.data, CONF_AUTH: client.auth})
 
         states = await self._apply_keep_ended(dict(self._mine), now)
+        if self._ola_mem:
+            await self._verify_ola(states, now)
         events, self._timed = evaluate_timed(
             states, self.rules, self._timed, now,
             ending_minutes=int(self._opt(e, CONF_ENDING_MINUTES, DEFAULT_ENDING_MINUTES)),

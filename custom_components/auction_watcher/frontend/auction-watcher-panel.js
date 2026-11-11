@@ -10,10 +10,10 @@
  * until you save it, and the page re-draws from those drafts.
  */
 
-const PANEL_VERSION = "1.9.0";  // must match const.py VERSION (a test checks)
+const PANEL_VERSION = "1.10.0";  // must match const.py VERSION (a test checks)
 const SITE_NAMES = { govauctions: "GovAuctions", macbid: "Mac.bid", ebay: "eBay", ola: "OLA" };
 // What the per-auction spending cap is called on each site
-const LIMIT_LABEL = { govauctions: "Max bids", macbid: "Max bid ($)", ebay: "Max price ($)" };
+const LIMIT_LABEL = { govauctions: "Max bids", macbid: "Max bid ($)", ebay: "Max price ($)", ola: "Max bid ($)" };
 // Mac.bid's own "Set your max bid" amounts: $1 to $100, $5 to $500, $10 to $1,000, $50 to $50,000
 const MB_STEPS = [[1, 100, 1], [105, 500, 5], [510, 1000, 10], [1050, 50000, 50]];
 function mbValidBids(current, count = 60) {
@@ -1199,6 +1199,11 @@ class AuctionWatcherPanel extends HTMLElement {
                    ? `<button type="button" class="secondary" data-act="mb_lower" data-id="${id}"
                         title="You're winning: pull your max back to the current price (Mac.bid allows this while you lead)">Lower my max to ${money(a.price)}</button>` : ""}
                  <button type="button" class="secondary" data-act="limit" data-id="${id}" title="Save the max without bidding (for alerts and late auto-bids)">Save</button>`
+              : a.site === "ola" && a.status === "live"
+              ? `<button type="button" class="bid-now" data-act="ola_place" data-id="${id}">Bid now</button>
+                 ${!a.winning && a.min_next_bid ? `<button type="button" class="secondary" data-act="quick" data-id="${id}"
+                    title="Place the smallest bid OLA accepts right now (checked live when you tap)">Bid ${money(a.min_next_bid)} (next)</button>` : ""}
+                 <button type="button" class="secondary" data-act="limit" data-id="${id}" title="Save the max without bidding (for alerts)">Save</button>`
               : `<button type="button" data-act="limit" data-id="${id}">Save</button>`}
             <span class="saved">${esc(this._saved["limit:" + a.auction_id] || this._saved["mb:" + a.auction_id] || "")}</span>
           </div>
@@ -1206,8 +1211,9 @@ class AuctionWatcherPanel extends HTMLElement {
               ($1 steps to $100, $5 to $500, $10 to $1,000, then $50).
             Your max is the most you'll pay; Mac.bid raises your bid for you up to it.
             ${a.assurance_cost ? (a.has_assurance ? ` · ✅ Buyer's Assurance added` : ` · Buyer's Assurance ${money(a.assurance_cost)}: you'll be asked when you bid.`) : ""}</div>` : ""}
+          ${a.site === "ola" && a.status === "live" && a.min_next_bid ? `<div class="note">Minimum next bid: <b>${money(a.min_next_bid)}</b> (OLA bids in whole dollars). Your max is the most you'll pay; OLA raises your bid for you up to it. Bids can't be cancelled, only raised.</div>` : ""}
           <div class="total" data-total="${id}">${this._totalText(a)}</div>
-          ${a.site === "macbid" ? "" : `<div class="note">You get an alert when the price passes this. Bid on ${esc(SITE_NAMES[a.site] || a.site)} itself; this doesn't place bids.</div>`}
+          ${a.site === "macbid" || a.site === "ola" ? "" : `<div class="note">You get an alert when the price passes this. Bid on ${esc(SITE_NAMES[a.site] || a.site)} itself; this doesn't place bids.</div>`}
         </div>
         ${a.site === "macbid" ? this._macbidExtras(a) : ""}
       </div>`;
@@ -1567,17 +1573,40 @@ class AuctionWatcherPanel extends HTMLElement {
     setTimeout(() => { delete this._saved[key]; this._maybeRender(true); }, 8000);
   }
 
+  async _olaPlace(id) {
+    const key = "mb:" + id;
+    const a = this._auctions().find((x) => String(x.auction_id) === String(id)) || {};
+    const max = parseInt(this._field(id, "limit", a.bid_limit || 0), 10) || 0;
+    try {
+      if (!max) throw new Error("enter your max bid first");
+      if (a.min_next_bid && max < a.min_next_bid) throw new Error(`your max must be at least ${money(a.min_next_bid)}`);
+      if (!confirm(`Send a $${max} max on "${a.title}"?\n\nOLA raises your bid for you up to $${max}. Bids can't be cancelled, only raised. If you win you pay the final price plus any OLA fees and shipping.`)) return;
+      await this._hass.callService("auction_watcher", "set_bid_limit", { auction_id: id, limit: max });
+      this._clearDrafts(id, ["limit"]);
+      await this._hass.callService("auction_watcher", "place_bid", { auction_id: id, amount: max, buyers_assurance: false }, undefined, false, true);
+      this._saved[key] = `Sent a $${max} max: checking OLA recorded it`;
+    } catch (err) {
+      this._saved[key] = "Couldn't bid: " + (err?.message || err);
+    }
+    this._open[id] = true;
+    this._maybeRender(true);
+    setTimeout(() => { delete this._saved[key]; this._maybeRender(true); }, 8000);
+  }
+
   async _action(act, id, site) {
     if (act === "mb_place" || act === "mb_auto" || act === "mb_lower") return this._macbidAction(act, id);
+    if (act === "ola_place") return this._olaPlace(id);
     if (act === "quick") {
       const a = this._auctions().find((x) => String(x.auction_id) === String(id)) || {};
       const msg = a.site === "macbid"
         ? `Bid the next step on "${a.title}"?\n\nThat's the smallest bid Mac.bid accepts right now (about ${money(a.min_next_bid)}; checked live when you tap). If you win at it you pay about ${money(((a.min_next_bid || 0) * 1.15 + 3) * (1 + (a.sales_tax || 0)))} with the 15% premium, $3 fee and tax. Bids can't be cancelled.`
+        : a.site === "ola"
+        ? `Bid the next step on "${a.title}"?\n\nThat's the smallest bid OLA accepts right now (about ${money(a.min_next_bid)}; checked live when you tap). It's a max — OLA raises for you up to it. Bids can't be cancelled, only raised. If you win you pay the final price plus any OLA fees and shipping.`
         : `Place 1 bid on "${a.title}"?\n\nIt costs 1 point (${money(a.point_cost || 0.13)}) and is placed right away.`;
       if (!confirm(msg)) return;
       try {
         const res = await this._hass.callService("auction_watcher", "quick_bid", { auction_id: id }, undefined, false, true);
-        this._saved["stop:" + id] = (res?.response?.done || "Done") + (a.site === "macbid" ? ": checking Mac.bid recorded it" : "");
+        this._saved["stop:" + id] = (res?.response?.done || "Done") + (a.site === "macbid" ? ": checking Mac.bid recorded it" : a.site === "ola" ? ": checking OLA recorded it" : "");
       } catch (err) {
         this._saved["stop:" + id] = "Couldn't bid: " + (err?.message || err);
       }

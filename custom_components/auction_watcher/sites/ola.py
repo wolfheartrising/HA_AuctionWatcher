@@ -1,4 +1,4 @@
-"""OLA (Online Liquidation Auction, olabid.com) — read-only for now.
+"""OLA (Online Liquidation Auction, olabid.com) — reads plus opt-in bidding.
 
 Uses OLA's own app API (endpoints the vendor documented for us; honest user agent, no app
 impersonation). Email sign-in -> access + refresh tokens, then your watchlist, winning items and
@@ -34,6 +34,16 @@ API = "https://auction-api.olabid.com/api/v2"
 API_KEY = "1BAF2123-00D7-421E-B999-FB0B222D6577"
 ITEM_URL = "https://link.olabid.com/item-details?id={id}"
 RENEW_EARLY_SECONDS = 60
+
+# ---- bidding over OLA's realtime SignalR hub -----------------------------------
+# OLA places bids on a Microsoft SignalR hub (seen in the app bundle: a bidding hub + a short-lived
+# "live bidding token", like Mac.bid's websocket). The three values below are from the bundle and
+# are NOT yet live-confirmed; they're gathered here so confirming them with OLA is a one-line change.
+# place_max_bid is only ever called when you tap Bid — nothing here bids on its own.
+BIDDING_HUB = "https://bidding-api.olabid.com/bidding-hub"
+BIDDING_TOKEN_PATH = "/account/live-bidding-token"  # bundle: getLiveBiddingTokens (confirm path + shape)
+HUB_PLACE_BID = "ChangeMaxBid"  # bundle: sets your proxy max (confirm the method name and arguments)
+RECORD_SEP = "\x1e"  # SignalR's message terminator (0x1e)
 
 _logged_fields = False
 # OLA won-item statuses that still need collecting (awaiting pickup) vs already done
@@ -222,6 +232,110 @@ def parse_items(data: Any, category: str, now: float, my_id: str = "") -> dict[s
     return out
 
 
+# ---------------------------------------------------------------- bidding transport
+
+def _split_records(data: Any) -> list[str]:
+    """SignalR frames several messages in one websocket packet, split by 0x1e."""
+    return [r for r in str(data or "").split(RECORD_SEP) if r]
+
+
+def _json_or_none(text: str) -> Any:
+    try:
+        return json.loads(text)
+    except (ValueError, TypeError):
+        return None
+
+
+def is_valid_bid(amount: Any, min_next: Any) -> bool:
+    """A whole-dollar max that is at least OLA's next minimum bid (OLA bids in whole dollars)."""
+    try:
+        amt = int(amount)
+    except (TypeError, ValueError):
+        return False
+    if amt <= 0 or float(amt) != float(amount):
+        return False
+    mn = _num(min_next)
+    return mn is None or amt >= int(mn)
+
+
+class OlaSignalR:
+    """A minimal ASP.NET Core SignalR client (JSON protocol) for one call: negotiate -> open the
+    websocket -> handshake -> invoke one method -> wait for its completion. Standard SignalR only;
+    honest user agent, no app impersonation."""
+
+    def __init__(self, session: aiohttp.ClientSession, hub_url: str, access_token: str | None,
+                 api_key: str, bidding_token: str | None = None) -> None:
+        self._session = session
+        self._hub = hub_url
+        self._access = access_token or ""
+        self._api_key = api_key
+        self._bidding = bidding_token or ""
+
+    def _headers(self) -> dict[str, str]:
+        h = {"X-Api-Key": self._api_key, "Accept": "application/json"}
+        if self._access:
+            h["Authorization"] = f"Bearer {self._access}"
+        return h
+
+    async def _negotiate(self) -> dict[str, Any]:
+        url = f"{self._hub}/negotiate?negotiateVersion=1"
+        try:
+            async with self._session.post(url, headers=self._headers(),
+                                          timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                if resp.status in (401, 403):
+                    raise AuthError(f"OLA bidding hub refused the token ({resp.status})")
+                if resp.status >= 400:
+                    raise SiteError(f"OLA bidding hub negotiate failed ({resp.status})")
+                data = await resp.json(content_type=None)
+        except aiohttp.ClientError as err:
+            raise SiteError(f"Couldn't reach OLA's bidding hub: {err}") from err
+        return data if isinstance(data, dict) else {}
+
+    async def invoke(self, target: str, arguments: list[Any]) -> Any:
+        """Call one hub method and return its result (raising SiteError if OLA rejects it)."""
+        info = await self._negotiate()
+        conn = info.get("connectionToken") or info.get("connectionId")
+        if not conn:
+            raise SiteError("OLA's bidding hub didn't return a connection id")
+        ws_url = self._hub.replace("https://", "wss://", 1).replace("http://", "ws://", 1) + f"?id={conn}"
+        token = self._bidding or self._access
+        if token:
+            ws_url += f"&access_token={token}"
+        try:
+            async with self._session.ws_connect(ws_url, headers=self._headers(), heartbeat=15,
+                                                 timeout=aiohttp.ClientTimeout(total=20)) as ws:
+                await ws.send_str(json.dumps({"protocol": "json", "version": 1}) + RECORD_SEP)
+                hs = await ws.receive(timeout=20)
+                if hs.type == aiohttp.WSMsgType.TEXT:
+                    for rec in _split_records(hs.data):
+                        obj = _json_or_none(rec)
+                        if isinstance(obj, dict) and obj.get("error"):
+                            raise SiteError(f"OLA bidding handshake failed: {obj['error']}")
+                inv_id = "1"
+                await ws.send_str(json.dumps({"type": 1, "invocationId": inv_id,
+                                              "target": target, "arguments": list(arguments)}) + RECORD_SEP)
+                deadline = time.time() + 20
+                while time.time() < deadline:
+                    msg = await ws.receive(timeout=20)
+                    if msg.type != aiohttp.WSMsgType.TEXT:
+                        if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING,
+                                        aiohttp.WSMsgType.ERROR):
+                            break
+                        continue
+                    for rec in _split_records(msg.data):
+                        obj = _json_or_none(rec)
+                        if not isinstance(obj, dict):
+                            continue
+                        if obj.get("type") == 3 and obj.get("invocationId") == inv_id:  # completion
+                            if obj.get("error"):
+                                raise SiteError(f"OLA rejected the bid: {obj['error']}")
+                            return obj.get("result")
+                        # type 6 = ping, type 1/4 = hub->client messages: ignore for a one-shot call
+        except aiohttp.ClientError as err:
+            raise SiteError(f"OLA bidding hub connection failed: {err}") from err
+        raise SiteError("OLA's bidding hub didn't confirm the bid in time")
+
+
 # ---------------------------------------------------------------- client
 
 class OlaClient:
@@ -377,6 +491,46 @@ class OlaClient:
             if len(got) < page_size:
                 break
         return hits
+
+    # ---- bidding (opt-in; only called when you tap Bid) ----------------------
+
+    async def item_now(self, item_id: str, now: float) -> dict[str, Any]:
+        """Read one item live for the current price, the minimum next bid and who's winning."""
+        st = item_state(await self.item_details(item_id), CATEGORY_BIDDING, now, self.user_id)
+        return {
+            "price": st.price,
+            "min_next": st.extra.get("min_next_bid") or st.price,
+            "winning": bool(st.extra.get("winning")),
+            "your_max": st.extra.get("your_max_bid"),
+            "status": st.status,
+        }
+
+    async def bidding_token(self) -> str:
+        """The short-lived token for the realtime bidding hub (separate from the access token).
+        If OLA's path isn't the one we have yet, returns "" and the hub falls back to the access token."""
+        await self.ensure_fresh()
+        try:
+            data = await self._call("GET", BIDDING_TOKEN_PATH)
+        except SiteError:
+            return ""
+        d = data.get("data") if isinstance(data, dict) and isinstance(data.get("data"), dict) else data
+        if not isinstance(d, dict):
+            return ""
+        return str(_first(d, "token", "biddingToken", "liveBiddingToken", "accessToken", "value") or "")
+
+    async def place_max_bid(self, item_id: str, auction_id: str, amount: int) -> Any:
+        """Send a proxy maximum over OLA's bidding hub. Like Mac.bid, OLA accepts the request first
+        and processes it after, so the coordinator only treats you as bidding once OLA's own data
+        shows it (verify-by-readback). Opt-in and admin-only; never automatic."""
+        await self.ensure_fresh()
+        token = await self.bidding_token()
+        hub = OlaSignalR(self._session, BIDDING_HUB, self.auth.get("access_token"), self._api_key, token or None)
+        _LOGGER.info("OLA bidding: invoking %s for item %s auction %s ($%s max)",
+                     HUB_PLACE_BID, item_id, auction_id, amount)
+        # Argument shape isn't live-confirmed; send the fields the bundle names so a model-bound hub
+        # can read them. Confirm the exact method and arguments with OLA, then adjust here only.
+        return await hub.invoke(HUB_PLACE_BID,
+                                [{"auctionItemId": item_id, "auctionId": auction_id, "maxBid": int(amount)}])
 
 
 def build_states(watchlist: dict[str, AuctionState], winning: dict[str, AuctionState],

@@ -21,6 +21,8 @@ from typing import Any
 import aiohttp
 
 BACKEND_HOST = "https://auction-api.olabid.com/api/v2"
+# OLA's app API key — required on every request or the API answers 401 (override with --api-key).
+API_KEY = "1BAF2123-00D7-421E-B999-FB0B222D6577"
 
 
 class OLAError(RuntimeError):
@@ -64,16 +66,18 @@ def _as_int(value: Any) -> int | None:
 class OLAClient:
     """Minimal OLA API client for read-only account/auction endpoints."""
 
-    def __init__(self, session: aiohttp.ClientSession, access_token: str | None = None) -> None:
+    def __init__(self, session: aiohttp.ClientSession, access_token: str | None = None,
+                 api_key: str | None = None) -> None:
         self._session = session
         self._access_token = access_token
+        self._api_key = (api_key or "").strip() or API_KEY
 
     @property
     def access_token(self) -> str | None:
         return self._access_token
 
     def _headers(self) -> dict[str, str]:
-        headers = {"Accept": "application/json"}
+        headers = {"Accept": "application/json", "X-Api-Key": self._api_key}
         if self._access_token:
             headers["Authorization"] = f"Bearer {self._access_token}"
         return headers
@@ -200,7 +204,7 @@ def _extract_items_count(payload: Any) -> int | None:
 async def _run(args: argparse.Namespace) -> None:
     timeout = aiohttp.ClientTimeout(total=args.timeout)
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        client = OLAClient(session, access_token=args.access_token)
+        client = OLAClient(session, access_token=args.access_token, api_key=args.api_key)
 
         if args.email and args.password:
             auth = await client.sign_in_email(args.email, args.password)
@@ -278,6 +282,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--email", help="Sign in using /account/sign-in/email")
     parser.add_argument("--password", help="Password for --email")
     parser.add_argument("--access-token", help="Existing access token (Bearer)")
+    parser.add_argument("--api-key", help="Override OLA's X-Api-Key (defaults to the built-in app key)")
     parser.add_argument("--show-tokens", action="store_true", help="Print raw tokens after login")
     parser.add_argument("--timeout", type=float, default=30.0, help="HTTP timeout seconds")
     parser.add_argument("--passcode", help="Passcode for /account/submit-passcode flow")
