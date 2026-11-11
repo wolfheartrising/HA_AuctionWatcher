@@ -970,6 +970,7 @@ class AuctionWatcherPanel extends HTMLElement {
           <div class="head">
             <a class="name" href="${url}" target="_blank" rel="noopener">${esc(a.title)}</a>
             ${this._stopButton(a)}
+            ${this._watchButton(a)}
             <div class="sub">${esc(SITE_NAMES[a.site] || a.site)} · <span class="status ${esc(status)}">${esc(status)}</span>
               ${a.opportunity ? `<span class="badge hot">🎯 few bidders</span>` : ""}
                 ${a.gov_phase_label ? `<span class="badge ${a.gov_war ? "hot" : "on"}">${esc(a.gov_phase_label)}</span>` : ""}
@@ -1141,6 +1142,7 @@ class AuctionWatcherPanel extends HTMLElement {
           <div class="head">
             <a class="name" href="${url}" target="_blank" rel="noopener">${esc(a.title)}</a>
             ${this._stopButton(a)}
+            ${this._watchButton(a)}
             <div class="sub">${esc(SITE_NAMES[a.site] || a.site)} · <span class="status ${esc(a.status)}">${esc(status)}</span> ${badge}</div>
             ${(a.labels || []).length ? `<div class="labels">${a.labels.map((l) => `<span class="tag cond-label ${esc(String(l).toLowerCase().replace(/\s+/g, "-"))}">${esc(l)}</span>`).join(" ")}</div>` : ""}
           </div>
@@ -1366,6 +1368,22 @@ class AuctionWatcherPanel extends HTMLElement {
     if (a.status !== "live" && a.status !== "upcoming") return false;
     return a.site === "macbid" ? a.mb_mode === "late"
       : !!(a.auto_cancel || a.auto_rebook || a.topup_at || a.your_booked_left);
+  }
+
+  _hasBids(a) {
+    if (a.site === "govauctions") return Number(a.your_bids || 0) > 0 || Number(a.your_booked_left || 0) > 0;
+    return !!(a.you_are_bidding || a.winning || a.your_max_bid);
+  }
+
+  _watchButton(a) {
+    const followed = !!a.on_watchlist || a.category === "watching";
+    if (!followed) return "";
+    if (this._hasBids(a)) return "";
+    if (a.site === "ola") return "";
+    const key = `watch:${a.site}:${a.auction_id}`;
+    return `<button type="button" class="unfollow-btn" data-act="watch_off" data-id="${esc(a.auction_id)}" data-site="${esc(a.site)}"
+      title="Remove this item from the site's watch/follow list">Unfollow</button>
+      ${this._saved[key] ? `<div class="note"><b>${esc(this._saved[key])}</b></div>` : ""}`;
   }
 
   _stopButton(a) {
@@ -1595,6 +1613,20 @@ class AuctionWatcherPanel extends HTMLElement {
       }
       return;
     }
+    if (act === "watch_off") {
+      const a = this._auctions().find((x) => String(x.auction_id) === String(id) && (!site || x.site === site)) || {};
+      if (!confirm(`Unfollow "${a.title || id}" on ${SITE_NAMES[site || a.site] || (site || a.site)}?\n\nThis only removes it from the watch/follow list. It won't cancel bids.`)) return;
+      const key = `watch:${site || a.site}:${id}`;
+      try {
+        await this._hass.callService("auction_watcher", "watch", { auction_id: id, site: site || a.site, on: false });
+        this._saved[key] = "Unfollowed";
+      } catch (err) {
+        this._saved[key] = "Couldn't unfollow: " + (err?.message || err);
+      }
+      this._maybeRender(true);
+      setTimeout(() => { delete this._saved[key]; this._maybeRender(true); }, 8000);
+      return;
+    }
     if (act === "proxy_ask" || act === "proxy_cancel") return this._proxyAction(act, id, site);
     if (act === "proxy_forget" || act === "proxy_reassign") {
       const key = "proxy:" + id;
@@ -1701,6 +1733,8 @@ const STYLE = `
   .quick { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; }
   .stop-btn { float: right; margin-left: 8px; background: var(--error-color, #db4437); color: #fff; border: 0; border-radius: 6px;
               padding: 4px 10px; font-size: 13px; font-weight: 600; cursor: pointer; }
+  .unfollow-btn { float: right; margin-left: 8px; background: var(--card-background-color); color: var(--primary-text-color); border: 1px solid var(--divider-color); border-radius: 6px;
+                  padding: 4px 10px; font-size: 12px; font-weight: 600; cursor: pointer; }
   details.packs-intro, .packs-more { grid-column: 1 / -1; }
   details.packs-intro summary, details.hist summary { cursor: pointer; }
   .banner { margin: 12px 16px 0; padding: 10px 14px; border-radius: 12px; border: 1px solid var(--error-color, #db4437);

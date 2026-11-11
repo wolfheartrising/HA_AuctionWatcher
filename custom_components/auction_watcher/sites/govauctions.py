@@ -285,7 +285,8 @@ def build_state(
                                    your_cap=static.get("no_jumper_limit") or None,
                                    blocked_count=history.extra.get("blocked_whale_count", 0),
                                    veteran_count=history.extra.get("veteran_count", 0),
-                                   weekly_budget=None)
+                                   weekly_budget=None,
+                                   cap_label="entry limit")
         if proposal:
             extra["gov_chase_verdict"] = proposal.get("verdict")
             extra["gov_chase_label"] = proposal.get("label")

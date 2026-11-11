@@ -1315,6 +1315,8 @@ class OlaCoordinator(AuctionWatcherCoordinator):
             self._mine = ola.build_states(watch, winning, history, outbid)
             for aid, st in wins.items():  # won items (awaiting pickup) sit on their own tab
                 self._mine.setdefault(aid, st)
+            keep_days = float(self._opt(e, CONF_KEEP_ENDED_DAYS, DEFAULT_KEEP_ENDED_DAYS))
+            self._mine = ola.prune_old_ended(self._mine, now, keep_days)
             # Fill a few live items with full detail (condition, total bids, shipping), newest first
             filled = 0
             for aid, st in self._mine.items():

@@ -89,15 +89,21 @@ def war_collapse(recent_bidders: list[str] | None, *, leader: str | None = None,
     }
 
 
-def chase_ability(previous_winners: list[dict[str, Any]], *, your_cap: float | None = None,
-                 blocked_count: int = 0, veteran_count: int = 0, cheap_threshold: float = 150.0,
-                 your_bids: int | None = None, median_winner_bids: float | None = None
-                 ) -> dict[str, Any] | None:
+def chase_ability(
+    previous_winners: list[dict[str, Any]], *,
+    your_cap: float | None = None,
+    blocked_count: int = 0,
+    veteran_count: int = 0,
+    cheap_threshold: float = 150.0,
+    your_bids: int | None = None,
+    median_winner_bids: float | None = None,
+    cap_label: str = "your cap",
+) -> dict[str, Any] | None:
     """Phase-1 decision support: is this auction worth chasing?
 
     The main signal is whether the auction's historical finish is realistically
     within your remaining budget. A cheap close matters, but the far stronger
-    warning is "your cap is still far below the normal winning cost" and the
+    warning is "the reference cap is far below the normal winning cost" and the
     room is full of seasoned bidders who tend to outlast you.
     """
     prices = winner_prices(previous_winners)
@@ -143,7 +149,7 @@ def chase_ability(previous_winners: list[dict[str, Any]], *, your_cap: float | N
 
     summary_bits = []
     if your_cap_ratio is not None:
-        summary_bits.append(f"{your_cap_ratio}× your cap")
+        summary_bits.append(f"{your_cap_ratio}× {cap_label}")
     summary_bits.append(f"median ${median:.2f}")
     if cheap is not None:
         summary_bits.append(f"{cheap * 100:.0f}% close cheap")
@@ -202,7 +208,8 @@ def decision_summary(previous_winners: list[dict[str, Any]], *, your_cap: float 
                     weekly_budget: float | None = None,
                     cheap_threshold: float = 150.0,
                     your_bids: int | None = None,
-                    median_winner_bids: float | None = None) -> dict[str, Any] | None:
+                    median_winner_bids: float | None = None,
+                    cap_label: str = "your cap") -> dict[str, Any] | None:
     """Bundle the phase-1 chase verdict and budget cap into one object."""
     proposal = chase_ability(previous_winners,
                             your_cap=your_cap,
@@ -210,7 +217,8 @@ def decision_summary(previous_winners: list[dict[str, Any]], *, your_cap: float 
                             veteran_count=veteran_count,
                             cheap_threshold=cheap_threshold,
                             your_bids=your_bids,
-                            median_winner_bids=median_winner_bids)
+                            median_winner_bids=median_winner_bids,
+                            cap_label=cap_label)
     cap = suggested_cap(previous_winners, weekly_budget=weekly_budget, cheap_threshold=cheap_threshold)
     if proposal is None and cap is None:
         return None

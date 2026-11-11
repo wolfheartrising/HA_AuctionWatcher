@@ -222,6 +222,28 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         except SiteError as err:
             raise HomeAssistantError(str(err)) from err
 
+    async def watch(call: ServiceCall) -> None:
+        """Turn a site's watch/follow on or off for one item."""
+        await _require_admin(call)
+        site = call.data.get("site", "govauctions")
+        on = bool(call.data.get("on", True))
+        coord = next((e.runtime_data for e in hass.config_entries.async_entries(DOMAIN)
+                      if e.state is ConfigEntryState.LOADED and e.data.get(CONF_SITE, "govauctions") == site), None)
+        if coord is None or not hasattr(coord, "async_watch"):
+            raise ServiceValidationError(f"No {site} account is set up (or this site doesn't support follow/unfollow yet)")
+        aid = str(call.data["auction_id"]).strip()
+        st = (coord.data or {}).get(aid)
+        if st is not None and not on:
+            has_spent = st.your_bids > 0 or st.your_booked_left > 0 or st.your_booked_total > 0
+            if site != "govauctions":
+                has_spent = has_spent or bool(st.extra.get("you_are_bidding") or st.extra.get("winning") or st.extra.get("your_max_bid"))
+            if has_spent:
+                raise ServiceValidationError("Won't unfollow this item because bids are already on it")
+        try:
+            await coord.async_watch(aid, on)
+        except SiteError as err:
+            raise HomeAssistantError(str(err)) from err
+
     async def stop(call: ServiceCall) -> ServiceResponse:
         """Stop everything automatic on one item (the card's Stop button)."""
         await _require_admin(call)
@@ -256,6 +278,14 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             vol.Required("auction_id"): cv.string,
             vol.Optional("site", default="govauctions"): vol.In(["govauctions", "macbid", "ebay"]),
             vol.Optional("limit"): vol.All(vol.Coerce(int), vol.Range(min=0, max=100000)),
+        }),
+    )
+    hass.services.async_register(
+        DOMAIN, "watch", watch,
+        schema=vol.Schema({
+            vol.Required("auction_id"): cv.string,
+            vol.Optional("site", default="govauctions"): vol.In(["govauctions", "macbid", "ebay", "ola"]),
+            vol.Optional("on", default=True): cv.boolean,
         }),
     )
 

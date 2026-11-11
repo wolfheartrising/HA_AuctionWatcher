@@ -387,3 +387,19 @@ def build_states(watchlist: dict[str, AuctionState], winning: dict[str, AuctionS
         for aid, st in src.items():
             out[aid] = st
     return out
+
+
+def prune_old_ended(states: dict[str, AuctionState], now: float, keep_days: float) -> dict[str, AuctionState]:
+    """Drop long-finished ended items so first sync doesn't flood the page with old history."""
+    cutoff = now - max(0.0, float(keep_days)) * 86400.0
+    out: dict[str, AuctionState] = {}
+    for aid, st in states.items():
+        if st.status != STATUS_ENDED:
+            out[aid] = st
+            continue
+        if st.extra.get("on_watchlist"):
+            out[aid] = st
+            continue
+        if st.ends_at and st.ends_at.timestamp() >= cutoff:
+            out[aid] = st
+    return out

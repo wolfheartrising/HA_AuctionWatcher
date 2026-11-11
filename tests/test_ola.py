@@ -70,3 +70,18 @@ def test_keyword_helpers_shape():
                       {"id": 849294, "name": "segway", "isActive": True}]}
     out = [{"id": str(ola._first(k, "id") or ""), "name": ola._first(k, "name", "keyword") or ""} for k in ola._as_list(data)]
     assert out == [{"id": "731361", "name": "milwaukee"}, {"id": "849294", "name": "segway"}]
+
+
+def test_prune_old_ended_keeps_recent_and_watchlist():
+    from datetime import datetime, timezone
+    now = 1_700_000_000.0
+    old_end = datetime.fromtimestamp(now - 10 * 86400, timezone.utc)
+    recent_end = datetime.fromtimestamp(now - 86400, timezone.utc)
+
+    old_hist = ola.item_state({"id": "1", "name": "Old", "auctionEndsAt": old_end.isoformat(), "status": "Sold"}, "bidding", now)
+    recent_hist = ola.item_state({"id": "2", "name": "Recent", "auctionEndsAt": recent_end.isoformat(), "status": "Sold"}, "bidding", now)
+    old_watch = ola.item_state({"id": "3", "name": "Watched old", "auctionEndsAt": old_end.isoformat(), "status": "Sold"}, "watching", now)
+    live = ola.item_state({"id": "4", "name": "Live", "auctionEndsAt": "2099-01-01T00:00:00"}, "bidding", now)
+
+    pruned = ola.prune_old_ended({"1": old_hist, "2": recent_hist, "3": old_watch, "4": live}, now, keep_days=3)
+    assert set(pruned) == {"2", "3", "4"}

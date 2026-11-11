@@ -119,6 +119,7 @@ def test_build_state_exposes_decision_summary():
     state = ga.build_state("1", {"live": True, "price": 72.0, "clock_seconds": 15}, STATIC["static"]["17782125"], hist, set(), 0.13, NOW)
     assert state.extra["gov_chase_verdict"] in {"green", "yellow", "red"}
     assert state.extra["suggested_cap"]
+    assert "your cap" not in state.extra["gov_chase_summary"]
 
 
 def _states(steak_active=2, steak_bids=876):
