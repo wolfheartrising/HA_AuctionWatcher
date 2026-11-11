@@ -73,3 +73,13 @@ def test_title_only_drops_the_sites_loose_matches():
     hits = [Hit("govauctions", "1", "DJI Air 3S Drone", "u"), Hit("macbid", "2", "Champion Generator 3500W", "u")]
     assert [h.item_id for h in filter_hits(hits, 0, "generator")] == ["2"]
     assert len(filter_hits(hits, 0, None)) == 2
+
+
+def test_same_keyword_from_ola_and_macbid_is_one_search():
+    from aw.searches import add_search
+    s = []
+    a = add_search(s, "wyze", sites=["macbid"], source_site="macbid", source_id="wyze")
+    b = add_search(s, " Wyze ", source_site="ola", source_id="731363")   # OLA import, case/space-insensitive
+    assert a is b and len(s) == 1                      # merged, not duplicated
+    assert a.sources == {"macbid": "wyze", "ola": "731363"}
+    assert "macbid" in a.sites and "ola" in a.sites    # now searched on both

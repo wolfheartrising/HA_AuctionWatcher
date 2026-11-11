@@ -31,6 +31,7 @@ from .const import (
     CONF_RUNAME,
     SITE_EBAY,
     SITE_OLA,
+    CONF_OLA_API_KEY,
     CONF_AUTH,
     CONF_DEVICE_ID,
     CONF_EMAIL,
@@ -298,7 +299,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: AuctionWatcherConfigEntr
         coordinator: AuctionWatcherCoordinator = EbayCoordinator(hass, entry, client_e)
     elif entry.data.get(CONF_SITE) == SITE_OLA:
         client_o = ola.OlaClient(session, entry.data.get(CONF_AUTH),
-                                 email=entry.data.get(CONF_EMAIL), password=entry.data.get(CONF_PASSWORD))
+                                 email=entry.data.get(CONF_EMAIL), password=entry.data.get(CONF_PASSWORD),
+                                 api_key=entry.data.get(CONF_OLA_API_KEY))
         coordinator = OlaCoordinator(hass, entry, client_o)
     elif entry.data.get(CONF_SITE) == SITE_MACBID:
         client = mb.MacBidClient(

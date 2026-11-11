@@ -41,6 +41,7 @@ class PriceHistory:
     avg_winner_bids: float
     median_winner_bids: float
     avg_winner_cost: float | None  # site's own estimate, if given
+    extra: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

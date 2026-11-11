@@ -79,7 +79,46 @@ def test_history_summary():
     h = ga.parse_history(data, "1")
     assert (h.wins, h.median_final_price, h.median_winner_bids, h.period_days) == (3, 40.0, 500, 30)
     assert h.avg_winner_cost == 110.0
+    assert h.extra["collapse_rate"] == 1.0
     assert ga.parse_history({}, "1") is None
+
+
+def test_decision_support_helpers():
+    from aw.packs import best_bet_score, chase_ability, decision_summary, gov_phase, suggested_cap, war_collapse
+
+    winners = [
+        {"price": "30.00", "bids_placed": "80"},
+        {"price": "40.00", "bids_placed": "90"},
+        {"price": "140.00", "bids_placed": "170"},
+        {"price": "180.00", "bids_placed": "220"},
+    ]
+    assert chase_ability(winners, your_cap=80.0)["verdict"] == "yellow"
+    cap = suggested_cap(winners, weekly_budget=500.0)
+    assert cap["cap"] >= 40.0 and cap["fights"] >= 1
+    assert cap["cover"] >= 0.5
+    summary = decision_summary(winners, your_cap=80.0, weekly_budget=500.0)
+    assert summary is not None
+    assert summary["suggested_cap"] >= 40.0
+    assert gov_phase(45) == "mid-war"
+    collapse = war_collapse(["A", "B", "Leader"], leader="Leader", clock_seconds=8)
+    assert collapse["collapse"] is False
+    assert war_collapse(["Leader", "A"], leader="Leader", clock_seconds=7)["collapse"] is True
+    bet = best_bet_score(winners, current_price=50.0, your_cap=80.0, active_bidders=2)
+    assert bet is not None
+    assert bet["label"] in {"Best bet", "Strong", "Okay"}
+
+
+def test_build_state_exposes_decision_summary():
+    winners = [
+        {"price": "30.00", "bids_placed": "80"},
+        {"price": "35.00", "bids_placed": "90"},
+        {"price": "140.00", "bids_placed": "170"},
+        {"price": "180.00", "bids_placed": "220"},
+    ]
+    hist = ga.parse_history({"1": {"previous_winners": winners}}, "1")
+    state = ga.build_state("1", {"live": True, "price": 72.0, "clock_seconds": 15}, STATIC["static"]["17782125"], hist, set(), 0.13, NOW)
+    assert state.extra["gov_chase_verdict"] in {"green", "yellow", "red"}
+    assert state.extra["suggested_cap"]
 
 
 def _states(steak_active=2, steak_bids=876):

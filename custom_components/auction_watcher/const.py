@@ -1,7 +1,7 @@
 """Constants for Auction Watcher."""
 
 DOMAIN = "auction_watcher"
-VERSION = "1.7.1"  # keep in sync with manifest.json (a test checks this)
+VERSION = "1.9.0"  # keep in sync with manifest.json (a test checks this)
 
 CONF_SITE = "site"
 CONF_COOKIE = "cookie"
@@ -65,6 +65,7 @@ PACKS_LIVE_SECONDS = 600    # live price / entry state of known packs
 SITE_MACBID = "macbid"
 SITE_EBAY = "ebay"
 SITE_OLA = "ola"
+CONF_OLA_API_KEY = "ola_api_key"   # override OLA's app API key if they ever rotate it
 CONF_APP_ID = "app_id"
 CONF_CERT_ID = "cert_id"
 CONF_RUNAME = "runame"

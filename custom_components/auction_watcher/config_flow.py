@@ -50,6 +50,7 @@ from .const import (
     CONF_PASSWORD,
     SITE_MACBID,
     SITE_OLA,
+    CONF_OLA_API_KEY,
     CONF_ACTIVE_WINDOW,
     CONF_STABLE_SECONDS,
     DEFAULT_ACTIVE_WINDOW,
@@ -129,10 +130,11 @@ async def _validate(cookie_text: str) -> tuple[str, dict[str, str]]:
 CONF_AUTH_TEXT = "saved_login"
 
 
-def _ola_fields() -> dict:
+def _ola_fields(api_key: str = "") -> dict:
     return {
         vol.Required(CONF_EMAIL): TextSelector(TextSelectorConfig(type=TextSelectorType.EMAIL, autocomplete="username")),
         vol.Required(CONF_PASSWORD): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD, autocomplete="current-password")),
+        vol.Optional(CONF_OLA_API_KEY, default=api_key): TextSelector(),
     }
 
 
@@ -141,15 +143,19 @@ async def _validate_ola(user_input: dict[str, Any]) -> tuple[str, dict[str, Any]
     password = user_input.get(CONF_PASSWORD) or ""
     if not email or not password:
         return "Enter your OLA email and password", {}
+    api_key = (user_input.get(CONF_OLA_API_KEY) or "").strip()
     async with aiohttp.ClientSession(cookie_jar=aiohttp.DummyCookieJar()) as session:
-        client = ola.OlaClient(session, email=email, password=password)
+        client = ola.OlaClient(session, email=email, password=password, api_key=api_key or None)
         try:
             await client.sign_in()
         except AuthError as err:
             return str(err), {}
         except SiteError as err:
             return f"Couldn't reach OLA: {err}", {}
-    return "", {CONF_SITE: SITE_OLA, CONF_AUTH: client.auth, CONF_EMAIL: email, CONF_PASSWORD: password}
+    data = {CONF_SITE: SITE_OLA, CONF_AUTH: client.auth, CONF_EMAIL: email, CONF_PASSWORD: password}
+    if api_key:
+        data[CONF_OLA_API_KEY] = api_key
+    return "", data
 
 
 def _macbid_fields() -> dict:
@@ -279,7 +285,8 @@ class AuctionWatcherConfigFlow(ConfigFlow, domain=DOMAIN):
                     return self.async_update_reload_and_abort(self._get_reauth_entry(), data=data)
                 return self.async_create_entry(title=SITES[SITE_OLA], data=data)
             errors["base"] = error
-        return self.async_show_form(step_id="ola", data_schema=vol.Schema(_ola_fields()), errors=errors)
+        api_key = self._get_reauth_entry().data.get(CONF_OLA_API_KEY, "") if self.source == SOURCE_REAUTH else ""
+        return self.async_show_form(step_id="ola", data_schema=vol.Schema(_ola_fields(api_key)), errors=errors)
 
     async def async_step_macbid(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         errors: dict[str, str] = {}
@@ -474,6 +481,8 @@ class AuctionWatcherOptionsFlow(OptionsFlow):
             return await self.async_step_macbid_options(user_input)
         if self.config_entry.data.get(CONF_SITE) == SITE_EBAY:
             return await self.async_step_ebay_options(user_input)
+        if self.config_entry.data.get(CONF_SITE) == SITE_OLA:
+            return await self.async_step_ola_options(user_input)
         if user_input is not None:
             return self._save(user_input)
         o = self.config_entry.options
@@ -494,6 +503,23 @@ class AuctionWatcherOptionsFlow(OptionsFlow):
             vol.Optional(CONF_EXTRA_IDS, default=o.get(CONF_EXTRA_IDS, "")): TextSelector(),
         })
         return self.async_show_form(step_id="init", data_schema=schema)
+
+    async def async_step_ola_options(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        if user_input is not None:
+            key = (user_input.pop(CONF_OLA_API_KEY, "") or "").strip()
+            if key:
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry, data={**self.config_entry.data, CONF_OLA_API_KEY: key})
+            return self._save(user_input)
+        o = self.config_entry.options
+        schema = vol.Schema({
+            vol.Required(CONF_ENDING_MINUTES, default=o.get(CONF_ENDING_MINUTES, DEFAULT_ENDING_MINUTES)): _num(0, 240, 1, "min"),
+            vol.Required(CONF_FAST_INTERVAL, default=o.get(CONF_FAST_INTERVAL, DEFAULT_FAST_INTERVAL)): _num(5, 120, 1, "s"),
+            vol.Required(CONF_IDLE_INTERVAL, default=o.get(CONF_IDLE_INTERVAL, DEFAULT_IDLE_INTERVAL)): _num(5, 240, 1, "min"),
+            vol.Required(CONF_KEEP_ENDED_DAYS, default=o.get(CONF_KEEP_ENDED_DAYS, DEFAULT_KEEP_ENDED_DAYS)): _num(0, 60, 1, "days"),
+            vol.Optional(CONF_OLA_API_KEY, default=self.config_entry.data.get(CONF_OLA_API_KEY, "")): TextSelector(),
+        })
+        return self.async_show_form(step_id="ola_options", data_schema=schema)
 
     async def async_step_ebay_options(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if user_input is not None:

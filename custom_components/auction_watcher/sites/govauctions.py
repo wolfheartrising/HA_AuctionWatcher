@@ -22,6 +22,7 @@ from typing import Any
 import aiohttp
 
 from ..cookies import cookie_header
+from ..packs import best_bet_score, decision_summary, gov_phase, war_collapse
 from .base import (
     CATEGORY_BIDDING,
     CATEGORY_WATCHING,
@@ -173,6 +174,15 @@ def parse_history(data: dict[str, Any], auction_id: str) -> PriceHistory | None:
     unit = str(block.get("pastWinnersIntervalUnit") or "day").lower()
     interval = _int(block.get("pastWinnersInterval")) or 30
     period_days = interval * {"week": 7, "month": 30}.get(unit.rstrip("s"), 1)
+    cheap_rate = round(sum(p <= 150 for p in prices) / len(prices), 2)
+    extra = {
+        "previous_winners": wins,
+        "collapse_rate": cheap_rate,
+        "cheap_wins_rate": cheap_rate,
+        "blocked_whale_count": _int(block.get("blocked_whale_count") or block.get("blocked_count") or 0) or 0,
+        "veteran_count": _int(block.get("veteran_count") or block.get("veterans") or 0) or 0,
+        "winning_limit_status": block.get("winning_limit_status"),
+    }
     return PriceHistory(
         wins=len(prices),
         period_days=period_days,
@@ -183,6 +193,7 @@ def parse_history(data: dict[str, Any], auction_id: str) -> PriceHistory | None:
         avg_winner_bids=round(statistics.mean(bids)),
         median_winner_bids=round(statistics.median(bids)),
         avg_winner_cost=round(statistics.mean(costs), 2) if costs else None,
+        extra=extra,
     )
 
 
@@ -237,6 +248,56 @@ def build_state(
     labels = static.get("labels", [])
     pay_if_won, cost_if_won_now = win_terms(labels, live.get("price"), your_bids, point_cost)
     bonus = bundle_points(static.get("title") or "")
+    phase = gov_phase(live.get("clock_seconds"), active_bidders=live.get("active_bidders"),
+                      non_leader_count=None)
+    collapse = war_collapse(live.get("recent_bidders", []), leader=live.get("leader"),
+                           active_bidders=live.get("active_bidders"), clock_seconds=live.get("clock_seconds"))
+    bet = None
+    if history and history.extra.get("previous_winners"):
+        bet = best_bet_score(history.extra["previous_winners"],
+                            current_price=live.get("price"),
+                            your_cap=static.get("no_jumper_limit") or None,
+                            active_bidders=live.get("active_bidders"),
+                            recent_bidders=live.get("recent_bidders", []))
+    extra = {
+        "no_jumper_limit": static.get("no_jumper_limit"),
+        "label_notes": static.get("label_notes", {}),
+        # Item + points bundles: the points' value comes off what winning costs you
+        "bundle_points": bonus,
+        "bundle_value": round(bonus * point_cost, 2) if bonus else None,
+        "net_cost_if_won_now": (round(cost_if_won_now - bonus * point_cost, 2)
+                                if bonus and cost_if_won_now is not None else None),
+        "product_id": static.get("product_id"),
+        "category_name": static.get("category_name"),
+        "gov_phase": phase,
+        "gov_phase_label": {"claiming": "Claiming", "mid-war": "Mid-war", "thinning": "Thinning", "end-game": "End-game"}.get(phase),
+        "gov_war": bool(phase in {"mid-war", "thinning", "end-game"} and live.get("active_bidders") is not None and live.get("active_bidders") <= 5),
+        "gov_war_badge": "War" if phase in {"mid-war", "thinning", "end-game"} and live.get("active_bidders") is not None and live.get("active_bidders") <= 5 else None,
+        "gov_collapse": bool(collapse and collapse.get("collapse")),
+        "gov_collapse_detail": collapse.get("detail") if collapse else None,
+        "gov_non_leader_bidders": collapse.get("non_leader_count") if collapse else None,
+        "gov_best_bet": bet.get("label") if bet else None,
+        "gov_best_bet_score": bet.get("score") if bet else None,
+        "gov_best_bet_summary": None if not bet else f"{bet['label']} ({bet['score']}/100): median ${bet['median_final_price']:.2f}"
+    }
+    if history and history.extra.get("previous_winners"):
+        proposal = decision_summary(history.extra["previous_winners"],
+                                   your_cap=static.get("no_jumper_limit") or None,
+                                   blocked_count=history.extra.get("blocked_whale_count", 0),
+                                   veteran_count=history.extra.get("veteran_count", 0),
+                                   weekly_budget=None)
+        if proposal:
+            extra["gov_chase_verdict"] = proposal.get("verdict")
+            extra["gov_chase_label"] = proposal.get("label")
+            extra["gov_chase_summary"] = proposal.get("summary")
+            extra["history_chase_summary"] = proposal.get("summary")
+            extra["collapse_rate"] = proposal.get("collapse_rate")
+            extra["median_final_price"] = proposal.get("median_final_price")
+            extra["suggested_cap"] = proposal.get("suggested_cap")
+            extra["suggested_cap_cover"] = proposal.get("suggested_cap_cover")
+            extra["suggested_cap_chase"] = proposal.get("suggested_cap_chase")
+            extra["suggested_cap_fights"] = proposal.get("suggested_cap_fights")
+            extra["budget_cap_note"] = proposal.get("budget_cap_note")
     return AuctionState(
         site=SITE,
         auction_id=auction_id,
@@ -263,17 +324,7 @@ def build_state(
         buy_it_now=static.get("buy_it_now"),
         history=history,
         labels=labels,
-        extra={
-            "no_jumper_limit": static.get("no_jumper_limit"),
-            "label_notes": static.get("label_notes", {}),
-            # Item + points bundles: the points' value comes off what winning costs you
-            "bundle_points": bonus,
-            "bundle_value": round(bonus * point_cost, 2) if bonus else None,
-            "net_cost_if_won_now": (round(cost_if_won_now - bonus * point_cost, 2)
-                                    if bonus and cost_if_won_now is not None else None),
-            "product_id": static.get("product_id"),
-            "category_name": static.get("category_name"),
-        },
+        extra=extra,
     )
 
 

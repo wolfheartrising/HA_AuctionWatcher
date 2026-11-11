@@ -10,8 +10,8 @@
  * until you save it, and the page re-draws from those drafts.
  */
 
-const PANEL_VERSION = "1.7.1";  // must match const.py VERSION (a test checks)
-const SITE_NAMES = { govauctions: "GovAuctions", macbid: "Mac.bid", ebay: "eBay" };
+const PANEL_VERSION = "1.9.0";  // must match const.py VERSION (a test checks)
+const SITE_NAMES = { govauctions: "GovAuctions", macbid: "Mac.bid", ebay: "eBay", ola: "OLA" };
 // What the per-auction spending cap is called on each site
 const LIMIT_LABEL = { govauctions: "Max bids", macbid: "Max bid ($)", ebay: "Max price ($)" };
 // Mac.bid's own "Set your max bid" amounts: $1 to $100, $5 to $500, $10 to $1,000, $50 to $50,000
@@ -21,7 +21,7 @@ function mbValidBids(current, count = 60) {
   for (const [lo, hi, step] of MB_STEPS) for (let a = lo; a <= hi && out.length < count; a += step) if (a > (current || 0)) out.push(a);
   return out;
 }
-const SITE_COLORS = { govauctions: "#e53935", macbid: "#43a047", ebay: "#1e88e5" };
+const SITE_COLORS = { govauctions: "#e53935", macbid: "#43a047", ebay: "#1e88e5", ola: "#fb8c00" };
 const siteDot = (site, title) =>
   `<span class="dot" style="background:${SITE_COLORS[site] || "#888"}" title="${esc(title || SITE_NAMES[site] || site)}"></span>`;
 const SHORT_CLOCK = 15; // seconds; same as FINAL_PHASE_MAX_CLOCK in logic.py
@@ -32,6 +32,7 @@ const SORTS = {
   bidders: { label: "Fewest other bidders", key: (a) => (a.active_bidders ?? 999) },
   yours: { label: "Most of your bids", key: (a) => -Number(a.your_bids || 0) },
   clock: { label: "Clock / starts soonest", key: (a) => clockSeconds(a) },
+  bestbet: { label: "Best bets first", key: (a) => (Number(a.gov_best_bet_score ?? 0) * -1) + (a.site === "govauctions" ? 0 : 10000) },
   opportunity: { label: "Opportunities first", key: (a) => (a.opportunity ? 0 : a.status === "live" ? 1 : 2) },
 };
 
@@ -77,7 +78,7 @@ class AuctionWatcherPanel extends HTMLElement {
     this._open = {};    // which "Booking & auto" sections are open
     this._drafts = {};  // unsaved field values: {auctionId: {fieldName: value}}
     this._sd = null;    // saved searches + results (fetched from Home Assistant when that tab is open)
-    this._sform = { keyword: "", max_price: "", sites: null, save_to_macbid: false };
+    this._sform = { keyword: "", max_price: "", sites: null, save_to_macbid: false, save_to_ola: false };
     this._sfilter = { search: null, site: null, newOnly: false };
     this._sLimit = 60;  // result rows drawn; "Show more" adds 60
   }
@@ -790,6 +791,7 @@ class AuctionWatcherPanel extends HTMLElement {
         <label class="chk">Max $ <input type="number" min="0" step="1" class="small" data-sform="max_price" value="${esc(f.max_price)}" placeholder="any"></label>
         <label class="chk" title="The sites' own searches are loose (they match descriptions and similar words)"><input type="checkbox" data-sform="title_only" ${f.title_only !== false ? "checked" : ""}> Title must contain the words</label>
         ${d.sites.includes("macbid") ? `<label class="chk"><input type="checkbox" data-sform="save_to_macbid" ${f.save_to_macbid ? "checked" : ""}> Also save to my Mac.bid alerts</label>` : ""}
+        ${d.sites.includes("ola") ? `<label class="chk"><input type="checkbox" data-sform="save_to_ola" ${f.save_to_ola ? "checked" : ""}> Also save to my OLA searches</label>` : ""}
         <button data-sact="add" ${this._sbusy ? "disabled" : ""}>Add</button>
       </div>
 
@@ -805,7 +807,7 @@ class AuctionWatcherPanel extends HTMLElement {
           <button class="schip-x" data-sact="remove" data-sid="${esc(x.id)}" title="Delete this search${x.sources?.macbid ? " (also from your Mac.bid alerts)" : ""}">×</button>
         </span>`).join("")}
       </div>
-      <div class="note">Colored dots show where a search is also saved: ${siteDot("govauctions")} GovAuctions ${siteDot("macbid")} Mac.bid ${siteDot("ebay")} eBay. Deleting one here deletes it there too.</div>
+      <div class="note">Colored dots show where a search is also saved: ${siteDot("govauctions")} GovAuctions ${siteDot("macbid")} Mac.bid ${siteDot("ebay")} eBay ${siteDot("ola")} OLA. Same keyword from two sites is one search (both dots); deleting it here deletes it on each.</div>
 
       ${d.sites.includes("macbid") ? `<details class="locs" ${this._locsOpen ? "open" : ""}>
         <summary>Mac.bid pickup locations: ${onCount ? `${onCount} on` : "all (no filter)"} ${d.macbid_from_account ? `<span class="muted">· from your Mac.bid account</span>` : `<span class="muted">· your own choice</span>`}</summary>
@@ -901,10 +903,10 @@ class AuctionWatcherPanel extends HTMLElement {
           setTimeout(() => { if (this._serr === "Type a keyword first") { this._serr = null; this._maybeRender(true); } }, 4000);
           return this._maybeRender(true);
         }
-        const payload = { action: "add", keyword, sites: f.sites || this._sd.sites, save_to_macbid: !!f.save_to_macbid,
+        const payload = { action: "add", keyword, sites: f.sites || this._sd.sites, save_to_macbid: !!f.save_to_macbid, save_to_ola: !!f.save_to_ola,
           title_only: f.title_only !== false };
         if (f.max_price !== "" && !isNaN(Number(f.max_price))) payload.max_price = Number(f.max_price);
-        this._sform = { keyword: "", max_price: "", sites: null, save_to_macbid: false, title_only: true };
+        this._sform = { keyword: "", max_price: "", sites: null, save_to_macbid: false, save_to_ola: false, title_only: true };
         await this._searchChange(payload);
         setTimeout(() => this._loadSearches(), 4000);
       }
@@ -970,13 +972,17 @@ class AuctionWatcherPanel extends HTMLElement {
             ${this._stopButton(a)}
             <div class="sub">${esc(SITE_NAMES[a.site] || a.site)} · <span class="status ${esc(status)}">${esc(status)}</span>
               ${a.opportunity ? `<span class="badge hot">🎯 few bidders</span>` : ""}
-              ${a.bid_limit_reached ? `<span class="badge cap">⛔ max bids reached</span>` : ""}
-              ${a.closed_to_new && !a.your_bids ? `<span class="badge">closed to new bidders</span>` : ""}
-              ${a.dropped ? `<span class="badge">no longer followed</span>` : ""}
-            </div>
+                ${a.gov_phase_label ? `<span class="badge ${a.gov_war ? "hot" : "on"}">${esc(a.gov_phase_label)}</span>` : ""}
+                ${a.gov_best_bet ? `<span class="badge on">${esc(a.gov_best_bet)}</span>` : ""}
+                ${a.gov_collapse ? `<span class="badge cap">Collapse</span>` : ""}
+                ${a.bid_limit_reached ? `<span class="badge cap">⛔ max bids reached</span>` : ""}
+                ${a.closed_to_new && !a.your_bids ? `<span class="badge">closed to new bidders</span>` : ""}
+                ${a.dropped ? `<span class="badge">no longer followed</span>` : ""}
+              </div>
           </div>
         </div>
         ${labels ? `<div class="labels">${labels}</div>` : ""}
+        ${a.gov_collapse_detail ? `<div class="note">${esc(a.gov_collapse_detail)}</div>` : ""}
         <div class="big">
           <div><div class="k">Price</div><div class="v">${money(a.price)}</div></div>
           <div><div class="k">${c.label}</div>
@@ -1004,6 +1010,10 @@ class AuctionWatcherPanel extends HTMLElement {
         ${a.history_wins ? `
           <div class="hist"><span class="k">Past ${num(a.history_wins)} wins${a.history_period_days ? ` (${a.history_period_days} days)` : ""}:</span>
             median ${money(a.history_median_final_price)}, winners used ~${num(a.history_median_winner_bids)} bids${a.history_avg_winner_cost ? `, avg cost ${money(a.history_avg_winner_cost)}` : ""}</div>` : ""}
+        ${a.gov_chase_summary ? `
+          <div class="hist"><span class="k">Chase verdict</span>
+            <span class="badge ${a.gov_chase_verdict === "green" ? "on" : a.gov_chase_verdict === "yellow" ? "hot" : a.gov_chase_verdict === "red" ? "cap" : ""}">${esc(a.gov_chase_label || a.gov_chase_verdict || "Review")}</span>
+            ${esc(a.gov_chase_summary)}${a.suggested_cap ? ` · suggested cap ${money(a.suggested_cap)}${a.suggested_cap_cover !== undefined && a.suggested_cap_cover !== null ? ` (${Math.round(a.suggested_cap_cover * 100)}% of wins under it)` : ""}` : ""}</div>` : ""}
         <div class="limits">
           <div class="lim-row">
             <label>${esc(limitLabel)}

@@ -30,6 +30,7 @@ from .const import (
     SITE_EBAY,
     SITE_GOVAUCTIONS,
     SITE_MACBID,
+    SITE_OLA,
     STORAGE_VERSION,
 )
 from .searches import SITE_ORDER, Hit, SavedSearch, add_search, filter_hits, hit_dict, new_matches, title_matches, to_dict
@@ -39,7 +40,7 @@ from .sites.base import AuthError, SiteError
 _LOGGER = logging.getLogger(__name__)
 
 DATA_KEY = f"{DOMAIN}_searches"
-SITE_LABELS = {SITE_GOVAUCTIONS: "GovAuctions", SITE_MACBID: "Mac.bid", SITE_EBAY: "eBay"}
+SITE_LABELS = {SITE_GOVAUCTIONS: "GovAuctions", SITE_MACBID: "Mac.bid", SITE_EBAY: "eBay", SITE_OLA: "OLA"}
 DEFAULT_RUN_TIME = "08:00"
 REFRESH_CHOICES = (0, 1, 2, 3, 6, 12)  # extra runs every N hours (0 = only the daily run)
 IMPORT_EVERY = 3600          # re-read your Mac.bid keywords at most hourly when the page opens
@@ -161,6 +162,10 @@ class SearchManager:
         c = self._coordinators().get(SITE_MACBID)
         return c.client if c else None
 
+    def _ola(self) -> Any:
+        c = self._coordinators().get(SITE_OLA)
+        return c.client if c else None
+
     async def _refresh_buildings(self, force: bool = False) -> None:
         client = self._macbid()
         if client is None or (not force and time.time() - self._buildings_at < BUILDINGS_EVERY and self.mb_all):
@@ -196,7 +201,26 @@ class SearchManager:
                 s.sources.pop(SITE_MACBID)
         for k in keywords:
             add_search(self.searches, k, source_site=SITE_MACBID, source_id=k)
+        await self._import_ola()
         await self._save()
+
+    async def _import_ola(self) -> None:
+        """Your OLA saved searches (keywords) become saved searches here too."""
+        client = self._ola()
+        if client is None:
+            return
+        try:
+            keywords = await client.keywords()
+        except (SiteError, AuthError) as err:
+            self.errors[SITE_OLA] = f"Couldn't read your OLA saved searches: {err}"
+            return
+        on_site = {k["name"].strip().lower(): k["id"] for k in keywords}
+        for s in self.searches:
+            if SITE_OLA in s.sources and s.keyword.strip().lower() not in on_site:
+                s.sources.pop(SITE_OLA)
+        for k in keywords:
+            sv = add_search(self.searches, k["name"], source_site=SITE_OLA, source_id=k["id"])
+            sv.sources[SITE_OLA] = k["id"]
 
     # ---------------- run
     async def async_run(self, only: str | None = None) -> None:
@@ -280,7 +304,7 @@ class SearchManager:
 
     # ---------------- changes from the page
     async def async_add(self, keyword: str, sites: list[str] | None, max_price: float, save_to_macbid: bool,
-                        title_only: bool = True) -> SavedSearch:
+                        title_only: bool = True, save_to_ola: bool = False) -> SavedSearch:
         s = add_search(self.searches, keyword, sites=sites or None, max_price=max_price, title_only=title_only)
         if save_to_macbid:
             client = self._macbid()
@@ -289,6 +313,13 @@ class SearchManager:
             current = await client.keywords()
             await client.save_keywords(mb.keywords_with(current, s.keyword))
             s.sources[SITE_MACBID] = s.keyword
+        if save_to_ola:
+            ola = self._ola()
+            if ola is None:
+                raise SiteError("No OLA account is set up")
+            if s.keyword.strip().lower() not in {k["name"].strip().lower() for k in await ola.keywords()}:
+                await ola.add_keyword(s.keyword)
+            s.sources[SITE_OLA] = s.keyword
         await self._save()
         self.hass.async_create_task(self.async_run(only=s.id))
         return s
@@ -305,6 +336,12 @@ class SearchManager:
                 remaining = mb.keywords_without(current, s.keyword)
                 if remaining != current:
                     await client.save_keywords(remaining)
+        if SITE_OLA in s.sources:
+            ola = self._ola()
+            if ola is not None:
+                kid = next((k["id"] for k in await ola.keywords() if k["name"].strip().lower() == s.keyword.strip().lower()), None)
+                if kid:
+                    await ola.remove_keyword(kid)
         self.searches.remove(s)
         for d in (self.seen, self.results, self.excluded):
             d.pop(search_id, None)
@@ -447,6 +484,7 @@ async def ws_view(hass: HomeAssistant, connection: Any, msg: dict[str, Any]) -> 
     vol.Optional("sites"): [vol.In(list(SITE_ORDER))],
     vol.Optional("max_price"): vol.All(vol.Coerce(float), vol.Range(min=0)),
     vol.Optional("save_to_macbid", default=False): bool,
+    vol.Optional("save_to_ola", default=False): bool,
     vol.Optional("title_only"): bool,
     vol.Optional("run_time"): str,
     vol.Optional("building"): str,
@@ -465,7 +503,7 @@ async def ws_change(hass: HomeAssistant, connection: Any, msg: dict[str, Any]) -
             if not (msg.get("keyword") or "").strip():
                 raise ValueError("Type a keyword")
             await m.async_add(msg["keyword"], msg.get("sites"), msg.get("max_price") or 0.0, msg["save_to_macbid"],
-                              msg.get("title_only", True))
+                              msg.get("title_only", True), msg.get("save_to_ola", False))
         elif action == "remove":
             await m.async_remove(msg.get("search_id", ""))
         elif action == "update":

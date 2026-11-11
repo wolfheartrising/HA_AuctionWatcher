@@ -68,7 +68,11 @@
         "description": "Sign in with your OLA (olabid.com) email and password. Read-only for now: your watchlist, winning items and bids show on the Auctions page; you still bid in the OLA app.",
         "data": {
           "email": "Email",
-          "password": "Password"
+          "password": "Password",
+          "ola_api_key": "API key (advanced, optional)"
+        },
+        "data_description": {
+          "ola_api_key": "Leave blank to use the built-in key. If OLA ever changes it and sign-in starts failing (error 401), paste the new key here. It's OLA's app API key (ask OLA, or it's the X-Api-Key value in their app)."
         }
       }
     },
@@ -163,6 +167,19 @@
           "default_bid_limit": "You get an alert when the price passes it. You can set it per item on the Auctions page.",
           "notify_entities": "Alexa gets a short spoken version; text targets like Telegram get the auction link.",
           "keep_ended_days": "Then they're removed, including their sensors. Auctions you stop following are kept too, marked 'no longer followed'."
+        }
+      },
+      "ola_options": {
+        "title": "OLA settings",
+        "data": {
+          "ending_soon_minutes": "Ending-soon alert (minutes before)",
+          "fast_interval": "Check every N seconds near an end",
+          "idle_interval": "Otherwise check every N minutes",
+          "keep_ended_days": "Keep ended auctions (days)",
+          "ola_api_key": "API key (advanced, optional)"
+        },
+        "data_description": {
+          "ola_api_key": "Leave blank to use the built-in key; paste a new one only if OLA sign-in starts failing with 401 (it's OLA's app X-Api-Key)."
         }
       }
     }

@@ -2,8 +2,11 @@
 
 Uses OLA's own app API (endpoints the vendor documented for us; honest user agent, no app
 impersonation). Email sign-in -> access + refresh tokens, then your watchlist, winning items and
-bid history. Bidding is over OLA's SignalR hub and isn't built yet, so this shows items and alerts
-only; you bid in the OLA app.
+bid history. Bidding is over OLA's realtime SignalR hub (a short-lived "live bidding token" plus a
+method on the hub, like Mac.bid's websocket); the transport is built here, but the hub's exact
+endpoint, token path and method name/arguments come from the app bundle and aren't live-confirmed
+yet (isolated in the "bidding" section below so confirming them is a one-line change). Nothing here
+bids on its own — the coordinator only calls place_max_bid when you tap Bid.
 
 Field names in OLA's JSON aren't documented, so parsing tries the common names and logs the real
 keys once (INFO "OLA item fields") — send that line to finalise the mapping. No Home Assistant
@@ -12,6 +15,7 @@ imports here, so it's unit-testable on its own.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from datetime import datetime, timezone
@@ -19,16 +23,22 @@ from typing import Any
 
 import aiohttp
 
-from .base import AuctionState, AuthError, SiteError, CATEGORY_BIDDING, CATEGORY_WATCHING, STATUS_ENDED, STATUS_LIVE
+from .base import (AuctionState, AuthError, SiteError, CATEGORY_BIDDING, CATEGORY_WATCHING,
+                   STATUS_ENDED, STATUS_LIVE, STATUS_PICKUP)
 
 _LOGGER = logging.getLogger(__name__)
 
 SITE = "ola"
 API = "https://auction-api.olabid.com/api/v2"
+# OLA's app API key (the same one shipped in their app; required on every request, with the owner's OK)
+API_KEY = "1BAF2123-00D7-421E-B999-FB0B222D6577"
 ITEM_URL = "https://link.olabid.com/item-details?id={id}"
 RENEW_EARLY_SECONDS = 60
 
 _logged_fields = False
+# OLA won-item statuses that still need collecting (awaiting pickup) vs already done
+PICKUP_PENDING = {"waitingforpayment", "readyforpickup", "scheduled", "waitingforpickup", "topickup", "paid"}
+DONE_STATUSES = {"pickedup", "shipped", "delivered", "completed", "refunded", "cancelled"}
 
 
 # ---------------------------------------------------------------- tolerant helpers
@@ -122,7 +132,7 @@ def parse_tokens(data: Any) -> dict[str, Any]:
     }
 
 
-def item_state(raw: dict[str, Any], category: str, now: float) -> AuctionState:
+def item_state(raw: dict[str, Any], category: str, now: float, my_id: str = "") -> AuctionState:
     """One OLA auction item -> AuctionState, trying the common field names."""
     global _logged_fields
     if not _logged_fields:
@@ -130,19 +140,25 @@ def item_state(raw: dict[str, Any], category: str, now: float) -> AuctionState:
         _LOGGER.info("OLA item fields (send this to finalise the mapping): %s",
                      {k: v for k, v in raw.items() if not isinstance(v, (dict, list))})
     item_id = str(_first(raw, "id", "itemId", "auctionItemId", "lotId", "auctionItemInventoryId") or "")
-    title = _first(raw, "title", "name", "productName", "itemName", "description") or f"OLA item {item_id}"
-    price = _num(_first(raw, "currentBid", "current_bid", "highBid", "currentPrice", "winningBid",
-                        "bidAmount", "latestBid", "price"))
+    title = _first(raw, "name", "title", "productName", "itemName") or f"OLA item {item_id}"
+    price = _num(_first(raw, "currentBidAmount", "currentBid", "current_bid", "highBid", "currentPrice",
+                        "winningBid", "bidAmount", "latestBid", "price"))
+    next_bid = _num(_first(raw, "nextBidAmount", "minimumNextBid", "minNextBid"))
     ends = _dt(_first(raw, "endsAt", "endDate", "auctionEndsAt", "closingDate", "endTime",
                       "auctionEndDate", "biddingEndsAt", "expiresAt"))
-    image = _first(raw, "imageUrl", "image", "thumbnailUrl", "thumbnail", "mainImage", "primaryImage")
+    image = _first(raw, "previewBlobUrl", "imageUrl", "image", "thumbnailUrl", "thumbnail", "mainImage", "primaryImage")
     if not image:
         imgs = _first(raw, "images", "imageUrls", "photos")
         if isinstance(imgs, list) and imgs:
             image = imgs[0] if isinstance(imgs[0], str) else _first(imgs[0], "url", "imageUrl", "src")
     your_max = _num(_first(raw, "myMaxBid", "maxBid", "proxyBid", "myBid", "yourMaxBid"))
-    winning = bool(_first(raw, "isWinning", "isCurrentBidder", "winning", "isHighBidder"))
-    status = STATUS_ENDED if ends and ends.timestamp() <= now else STATUS_LIVE
+    bidder = _first(raw, "currentBidderId", "winningBidderId", "highBidderId")
+    winning = bool(_first(raw, "isWinning", "isCurrentBidder", "winning", "isHighBidder")) or \
+        (bool(my_id) and bidder is not None and str(bidder) == str(my_id))
+    sold = str(_first(raw, "status") or "").lower() in ("sold", "ended", "closed", "finished")
+    finishes_ms = _num(_first(raw, "auctionFinishesInMs"))
+    ended = sold or (ends is not None and ends.timestamp() <= now) or (finishes_ms is not None and finishes_ms <= 0)
+    status = STATUS_ENDED if ended else STATUS_LIVE
     return AuctionState(
         site=SITE,
         auction_id=item_id,
@@ -164,7 +180,12 @@ def item_state(raw: dict[str, Any], category: str, now: float) -> AuctionState:
             "you_are_bidding": category == CATEGORY_BIDDING,
             "on_watchlist": category == CATEGORY_WATCHING,
             "your_max_bid": your_max,
-            "total_bids": _int(_first(raw, "bidCount", "totalBids", "numberOfBids", "bidsCount")),
+            "min_next_bid": next_bid,
+            "status_text": _first(raw, "status"),
+            "shipping": _num(_first(raw, "shippingCost")),
+            "is_paid": bool(_first(raw, "isPaid")) if _first(raw, "isPaid") is not None else None,
+            "sku": _first(raw, "sku"),
+            "total_bids": _int(_first(raw, "numberOfBids", "bidCount", "totalBids", "bidsCount")),
             "watchers": _int(_first(raw, "watcherCount", "watchers", "watchCount")),
             "retail_price": _num(_first(raw, "retailPrice", "msrp", "estimatedRetail", "retail")),
             "location": _first(raw, "locationName", "location", "warehouse", "pickupLocation"),
@@ -172,10 +193,30 @@ def item_state(raw: dict[str, Any], category: str, now: float) -> AuctionState:
     )
 
 
-def parse_items(data: Any, category: str, now: float) -> dict[str, AuctionState]:
+def search_hits(data: Any) -> list[dict[str, Any]]:
+    """OLA search results -> plain dicts (turned into Hit objects by the search manager)."""
+    out = []
+    for raw in _as_list(data):
+        item_id = str(_first(raw, "id", "itemId", "auctionItemId") or "")
+        if not item_id:
+            continue
+        out.append({
+            "item_id": item_id,
+            "title": _first(raw, "name", "title") or f"OLA item {item_id}",
+            "url": ITEM_URL.format(id=item_id),
+            "price": _num(_first(raw, "currentBidAmount", "currentBid", "price")),
+            "ends_at": (_dt(_first(raw, "auctionEndsAt", "endsAt")).isoformat()
+                        if _dt(_first(raw, "auctionEndsAt", "endsAt")) else None),
+            "image": _first(raw, "previewBlobUrl", "imageUrl", "image"),
+            "condition": _first(raw, "status"),
+        })
+    return out
+
+
+def parse_items(data: Any, category: str, now: float, my_id: str = "") -> dict[str, AuctionState]:
     out: dict[str, AuctionState] = {}
     for raw in _as_list(data):
-        st = item_state(raw, category, now)
+        st = item_state(raw, category, now, my_id)
         if st.auction_id:
             out[st.auction_id] = st
     return out
@@ -187,11 +228,12 @@ class OlaClient:
     """OLA app API client: email sign-in, token refresh, and read endpoints."""
 
     def __init__(self, session: aiohttp.ClientSession, auth: dict[str, Any] | None = None,
-                 email: str | None = None, password: str | None = None) -> None:
+                 email: str | None = None, password: str | None = None, api_key: str | None = None) -> None:
         self._session = session
         self.auth = dict(auth or {})
         self._email = email
         self._password = password
+        self._api_key = (api_key or "").strip() or API_KEY
         self.auth_changed = False
 
     @property
@@ -203,7 +245,7 @@ class OlaClient:
         return str(self.auth.get("user_id") or "")
 
     def _headers(self, auth: bool = True) -> dict[str, str]:
-        h = {"Content-Type": "application/json", "Accept": "application/json"}
+        h = {"Content-Type": "application/json", "Accept": "application/json", "X-Api-Key": self._api_key}
         if auth and self.auth.get("access_token"):
             h["Authorization"] = f"Bearer {self.auth['access_token']}"
         return h
@@ -228,10 +270,12 @@ class OlaClient:
                     raise SiteError(f"OLA says too many requests ({path})")
                 if resp.status >= 400:
                     raise SiteError(f"OLA answered {resp.status} for {path}")
+                if resp.status == 204 or resp.content_length == 0:
+                    return {}
                 try:
                     return await resp.json(content_type=None)
-                except (ValueError, aiohttp.ContentTypeError) as err:
-                    raise SiteError(f"OLA sent something that isn't JSON for {path}") from err
+                except (ValueError, aiohttp.ContentTypeError):
+                    return {}
         except aiohttp.ClientError as err:
             raise SiteError(f"Couldn't reach OLA: {err}") from err
 
@@ -279,20 +323,67 @@ class OlaClient:
         return data if isinstance(data, dict) else {}
 
     async def watchlist(self, now: float) -> dict[str, AuctionState]:
-        return parse_items(await self.get("/auction-items/my/watchlist"), CATEGORY_WATCHING, now)
+        return parse_items(await self.get("/auction-items/my/watchlist"), CATEGORY_WATCHING, now, self.user_id)
 
     async def winning(self, now: float) -> dict[str, AuctionState]:
-        return parse_items(await self.get("/auction-items/my/winning"), CATEGORY_BIDDING, now)
+        return parse_items(await self.get("/auction-items/my/winning"), CATEGORY_BIDDING, now, self.user_id)
 
     async def bids_history(self, now: float) -> dict[str, AuctionState]:
-        return parse_items(await self.get("/auction-items/my/bids/history"), CATEGORY_BIDDING, now)
+        return parse_items(await self.get("/auction-items/my/bids/history"), CATEGORY_BIDDING, now, self.user_id)
+
+    async def outbid(self, now: float) -> dict[str, AuctionState]:
+        return parse_items(await self.get("/auction-items/my/outbidded"), CATEGORY_BIDDING, now, self.user_id)
+
+    async def item_details(self, item_id: str) -> dict[str, Any]:
+        """Full item detail (condition, total bids, shipping): GET /auction-items/{id}/details."""
+        data = await self.get(f"/auction-items/{item_id}/details")
+        return data.get("data") if isinstance(data, dict) and isinstance(data.get("data"), dict) else (data or {})
+
+    async def wins(self, now: float) -> dict[str, AuctionState]:
+        """Items you've won: awaiting pickup (not yet collected) stay on the Awaiting-pickup tab."""
+        out = parse_items(await self.get("/auction-items/my/wins-history"), CATEGORY_BIDDING, now, self.user_id)
+        for st in out.values():
+            status = str(st.extra.get("status_text") or "").lower().replace(" ", "")
+            if status in DONE_STATUSES:
+                st.status = STATUS_ENDED
+            elif st.extra.get("winning") or status in PICKUP_PENDING:
+                st.status = STATUS_PICKUP
+        return out
+
+    async def keywords(self) -> list[dict[str, Any]]:
+        """Your OLA saved searches (the app calls them keywords): [{"id","name","active"}]."""
+        data = await self.get("/keywords/list")
+        return [{"id": str(_first(k, "id") or ""), "name": _first(k, "name", "keyword") or "", "active": bool(_first(k, "isActive"))}
+                for k in _as_list(data) if _first(k, "name", "keyword")]
+
+    async def add_keyword(self, name: str) -> None:
+        """Save a keyword (OLA saved search). Same as the app's add-keyword."""
+        await self.ensure_fresh()
+        await self._call("POST", "/keywords/create", {"keyword": name})
+
+    async def remove_keyword(self, keyword_id: str) -> None:
+        """Delete one of your OLA saved searches by id."""
+        await self.ensure_fresh()
+        await self._call("DELETE", f"/keywords/{keyword_id}/delete")
+
+    async def search(self, query: str, pages: int = 1, page_size: int = 50) -> list[dict[str, Any]]:
+        """Search OLA's live catalogue (same call as the app's search): POST /auction-items/list."""
+        hits: list[dict[str, Any]] = []
+        for page in range(1, pages + 1):
+            data = await self._call("POST", "/auction-items/list",
+                                    {"searchQuery": query, "pageNumber": page, "pageSize": page_size})
+            got = search_hits(data)
+            hits += got
+            if len(got) < page_size:
+                break
+        return hits
 
 
 def build_states(watchlist: dict[str, AuctionState], winning: dict[str, AuctionState],
-                 history: dict[str, AuctionState]) -> dict[str, AuctionState]:
-    """Merge the three lists. Winning wins over watchlist; history fills in ended items you bid on."""
+                 history: dict[str, AuctionState], outbid: dict[str, AuctionState] | None = None) -> dict[str, AuctionState]:
+    """Merge the lists. Later sources override: history (ended) < watchlist < outbid < winning."""
     out: dict[str, AuctionState] = {}
-    for src in (history, watchlist, winning):  # later sources override
+    for src in (history, watchlist, outbid or {}, winning):
         for aid, st in src.items():
             out[aid] = st
     return out

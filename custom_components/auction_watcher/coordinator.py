@@ -1272,6 +1272,7 @@ class OlaCoordinator(AuctionWatcherCoordinator):
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry, client: "ola.OlaClient") -> None:
         super().__init__(hass, entry, client)  # type: ignore[arg-type]
         self._mine: dict[str, AuctionState] = {}
+        self._ola_details: dict[str, tuple[float, dict]] = {}
         self._timed = TimedSnapshot()
         self._backoff_until = 0.0
 
@@ -1303,7 +1304,36 @@ class OlaCoordinator(AuctionWatcherCoordinator):
             except SiteError as err:
                 _LOGGER.debug("OLA bid history not loaded: %s", err)
                 history = {}
-            self._mine = ola.build_states(watch, winning, history)
+            try:
+                outbid = await client.outbid(now)
+            except SiteError:
+                outbid = {}
+            try:
+                wins = await client.wins(now)
+            except SiteError:
+                wins = {}
+            self._mine = ola.build_states(watch, winning, history, outbid)
+            for aid, st in wins.items():  # won items (awaiting pickup) sit on their own tab
+                self._mine.setdefault(aid, st)
+            # Fill a few live items with full detail (condition, total bids, shipping), newest first
+            filled = 0
+            for aid, st in self._mine.items():
+                if st.status != STATUS_LIVE or st.labels or filled >= 15:
+                    continue
+                cached = self._ola_details.get(aid)
+                if cached and now - cached[0] < 600:
+                    detail = cached[1]
+                else:
+                    try:
+                        detail = await client.item_details(aid)
+                    except SiteError:
+                        continue
+                    self._ola_details[aid] = (now, detail)
+                    filled += 1
+                full = ola.item_state(detail, st.category, now, client.user_id)
+                full.category = st.category
+                full.extra.update({k: v for k, v in st.extra.items() if k in ("on_watchlist", "winning", "you_are_bidding")})
+                self._mine[aid] = full
             try:
                 acct = await client.account()
                 self.username = ola._first(acct, "username", "firstName", "name", "email") or self.username

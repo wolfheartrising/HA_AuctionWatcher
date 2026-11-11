@@ -14,7 +14,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-SITE_ORDER = ("govauctions", "macbid", "ebay")
+SITE_ORDER = ("govauctions", "macbid", "ebay", "ola")
 MAX_HITS_PER_SITE = 60
 
 

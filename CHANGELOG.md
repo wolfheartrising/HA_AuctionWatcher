@@ -6,6 +6,28 @@ The section for a version becomes its release notes, so HACS shows them under "U
 After updating: restart Home Assistant if Python changed, then reload the Auctions page (it offers a Reload button
 when it's older than the plugin).
 
+## 1.9.0
+- **OLA closer to full parity (read side):** cards now fill in condition, total bids, shipping cost and full-size images
+  from the item detail (`/auction-items/{id}/details`), and items you've won that aren't collected yet show on the
+  **Awaiting pickup** tab (`/auction-items/my/wins-history`).
+- **OLA API key is now settable** (OLA setup, and its ⚙ Settings): leave blank for the built-in key; if OLA ever rotates
+  it and sign-in starts failing with 401, paste the new X-Api-Key there, no code update needed. Instructions included.
+- Bidding (OLA's SignalR hub) is still the remaining piece.
+
+## 1.8.0
+- **OLA joins the Saved searches tab.** Your OLA saved searches (OLA's "keywords": ubiquiti, segway, air compressor,
+  wyze, packout, milwaukee) are imported with an orange OLA dot, OLA's catalogue is searched (POST /auction-items/list)
+  and folded into the combined results, "Also save to my OLA searches" creates one on OLA, and deleting a search here
+  deletes it on OLA too (create POST /keywords/create {keyword}; delete DELETE /keywords/{id}/delete). An OLA
+  keyword you already have as a saved search merges into it (both dots), never a duplicate. OLA added to the dot legend.
+
+## 1.7.2
+- OLA sign-in now works: the API needs OLA's app `X-Api-Key` header (from the app files, with the owner's OK) on every
+  request. Item fields mapped to OLA's real names (name, currentBidAmount, nextBidAmount, previewBlobUrl image,
+  auctionEndsAt, currentBidderId = winning, retailPrice), so watchlist / winning / bid-history cards fill in fully.
+- OLA also reads your Outbid list (`/auction-items/my/outbidded`). Saved searches are readable too (`/keywords/list`,
+  e.g. ubiquiti/segway/air-compressor/wyze/packout/milwaukee); full Saved-searches-tab integration is a later step.
+
 ## 1.7.1
 - OLA: fixed sign-in — the API base needed the `/api/v2` prefix (was 404 on sign-in), and token expiry fields
   (`accessTokenExpiresIn` / `refreshTokenExpiresIn`) are read correctly.
