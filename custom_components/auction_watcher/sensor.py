@@ -227,6 +227,13 @@ class AuctionSensor(_Base):
         attrs["rebook_amount"] = auto.rebook_amount
         attrs["topup_at"] = auto.topup_at
         attrs["max_price"] = auto.max_price
+        attrs["smart_late"] = auto.smart_late
+        attrs["smart_target"] = auto.smart_target
+        attrs["smart_price"] = auto.smart_price
+        attrs["smart_pct"] = auto.smart_pct
+        attrs["smart_join_at"] = auto.smart_join_at
+        attrs["smart_claim"] = auto.smart_claim
+        attrs["walk_away"] = auto.walk_away
         attrs["auto_status"] = self.coordinator.auto_status(self.auction_id)
         if (p := proxy_manager.get(self.hass)) is not None and p.enabled:
             attrs["proxy"] = p.summary(s.site, self.auction_id)  # for someone else: who, their max, agreed or not

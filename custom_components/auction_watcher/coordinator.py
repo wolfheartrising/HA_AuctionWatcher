@@ -89,6 +89,7 @@ from .logic import (
     choose_interval,
     choose_timed_interval,
     decide_auto,
+    decide_smart_late,
     evaluate,
     evaluate_timed,
     MB_MODE_OFF,
@@ -552,8 +553,12 @@ class AuctionWatcherCoordinator(DataUpdateCoordinator[dict[str, AuctionState]]):
             if s is None:
                 continue
             mem = self._mem.setdefault(aid, AutoMemory())
-            action, count, reason = decide_auto(s, settings, mem, rules, available, now,
-                                                budget_left=budget_left, paused=self.auto_paused)
+            if settings.smart_late:
+                action, count, reason = decide_smart_late(s, settings, mem, rules, available, now,
+                                                          budget_left=budget_left, paused=self.auto_paused)
+            else:
+                action, count, reason = decide_auto(s, settings, mem, rules, available, now,
+                                                    budget_left=budget_left, paused=self.auto_paused)
             mem.status = reason
             if not action:
                 continue

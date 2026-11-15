@@ -6,6 +6,30 @@ The section for a version becomes its release notes, so HACS shows them under "U
 After updating: restart Home Assistant if Python changed, then reload the Auctions page (it offers a Reload button
 when it's older than the plugin).
 
+## 1.13.0
+- **Hide a search result.** Each result on the Saved searches tab now has an **✕** to hide it, so clutter you don't
+  care about drops off the list. Hidden items stay hidden across refreshes and restarts; a **"N hidden · show all"**
+  button brings them back. (Hidden items that end are forgotten automatically, so the list never grows stale.)
+
+## 1.12.0
+- **The card badges are now explained in the app.** A collapsible **ⓘ "What do the badges mean?"** legend sits above
+  the auctions, and every badge (phase, best bet, Collapse, Chase verdict, closed-to-new, max-bids-reached) has a
+  hover/long-press tooltip telling you what it means and where the number comes from.
+- **Fixed the contradictory early-auction badges.** "Best bet / Strong" and "Collapse" no longer fire during the
+  Claiming/Mid-war phase, where a low price and a quiet field are meaningless. The "price far below the median" and
+  "thin field" rewards (and the Collapse flag) now only count once the auction is in its **Thinning/End-game**, so the
+  right-now badges stop contradicting the historical Chase verdict on fresh auctions.
+
+## 1.11.0
+- **GovAuctions smart late-entry auto-mode (opt-in).** On a Gov card's Booking & auto panel, turn on **Smart
+  late-entry** to tie the decision layer to action: it (optionally) stakes **one claim bid before the entry limit**
+  so you keep the right to re-enter, **holds** through the early fight, then books your **remaining Max bids all at
+  once** only when the field has **thinned** to your join threshold (default: 2 or fewer other bidders) **and** the
+  price is at/under your **target** — the suggested cap, the median, median ± a %, or a price you set. It never books
+  above your **walk-away** price (defaults to the suggested cap), skips No-Re-Entry items for the claim, and still
+  respects your Max bids, weekly budget and the spending cap. Admin-only; nothing bids on its own until you enable it.
+- The existing auto-cancel / auto-rebook mode is unchanged; smart late-entry is a separate choice per item.
+
 ## 1.10.0
 - **OLA bidding (opt-in).** OLA items now get **Bid now** and **Bid $X (next)** buttons like Mac.bid: you set a
   whole-dollar max, OLA raises your bid for you up to it, and the max counts toward your weekly budget and the

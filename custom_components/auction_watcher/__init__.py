@@ -193,6 +193,13 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             vol.Optional("rebook_amount"): vol.All(vol.Coerce(int), vol.Range(min=1, max=10000)),
             vol.Optional("topup_at"): vol.All(vol.Coerce(int), vol.Range(min=0, max=1000)),
             vol.Optional("max_price"): vol.All(vol.Coerce(float), vol.Range(min=0)),
+            vol.Optional("smart_late"): cv.boolean,
+            vol.Optional("smart_target"): vol.In(["suggested_cap", "median", "median_pct", "fixed"]),
+            vol.Optional("smart_price"): vol.All(vol.Coerce(float), vol.Range(min=0)),
+            vol.Optional("smart_pct"): vol.All(vol.Coerce(float), vol.Range(min=-100, max=100)),
+            vol.Optional("smart_join_at"): vol.All(vol.Coerce(int), vol.Range(min=1, max=20)),
+            vol.Optional("smart_claim"): cv.boolean,
+            vol.Optional("walk_away"): vol.All(vol.Coerce(float), vol.Range(min=0)),
         }),
     )
 

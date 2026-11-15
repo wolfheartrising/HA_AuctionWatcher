@@ -83,3 +83,11 @@ def test_same_keyword_from_ola_and_macbid_is_one_search():
     assert a is b and len(s) == 1                      # merged, not duplicated
     assert a.sources == {"macbid": "wyze", "ola": "731363"}
     assert "macbid" in a.sites and "ola" in a.sites    # now searched on both
+
+
+def test_prune_dismissed_forgets_gone_items():
+    from aw.searches import prune_dismissed
+    dismissed = {"macbid:1", "govauctions:2", "ola:3"}
+    live = {"macbid:1", "ola:3", "ebay:9"}
+    assert prune_dismissed(dismissed, live) == {"macbid:1", "ola:3"}  # ":2" ended and is forgotten
+    assert prune_dismissed(set(), live) == set()

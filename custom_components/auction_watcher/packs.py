@@ -76,17 +76,19 @@ def war_collapse(recent_bidders: list[str] | None, *, leader: str | None = None,
     unique = list(dict.fromkeys(names))
     count = len(unique)
     phase = gov_phase(clock_seconds, active_bidders=active_bidders, non_leader_count=count)
-    collapse = count <= 1
-    return {
-        "phase": phase,
-        "non_leader_count": count,
-        "collapse": collapse,
-        "detail": (
-            "leader-only: no non-leader is still firing" if count == 0 else
-            "round-robin collapse: only one non-leader is still firing" if collapse else
-            "steady field"
-        ),
-    }
+    # A thin field only means "the fight is ending" once the auction is actually in its end-game;
+    # early on, a quiet last 3 minutes is just the pre-war lull, not a collapse.
+    late = phase in ("thinning", "end-game")
+    collapse = late and count <= 1
+    if not late:
+        detail = "steady field" if count > 1 else "quiet so far (still early)"
+    elif count == 0:
+        detail = "leader-only: no non-leader is still firing"
+    elif collapse:
+        detail = "round-robin collapse: only one non-leader is still firing"
+    else:
+        detail = "steady field"
+    return {"phase": phase, "non_leader_count": count, "collapse": collapse, "detail": detail}
 
 
 def chase_ability(
@@ -237,25 +239,32 @@ def decision_summary(previous_winners: list[dict[str, Any]], *, your_cap: float 
 
 def best_bet_score(previous_winners: list[dict[str, Any]], *, current_price: float | None = None,
                   your_cap: float | None = None, active_bidders: int | None = None,
-                  recent_bidders: list[str] | None = None) -> dict[str, Any] | None:
-    """Phase-1 ranking: the auction is a strong bet when it is cheap by history and the field is thinned."""
+                  recent_bidders: list[str] | None = None, phase: str | None = None) -> dict[str, Any] | None:
+    """Phase-1 ranking: the auction is a strong bet when it is cheap by history and the field is thinned.
+
+    The "cheap right now" and "thin field" rewards only count in the end-game: early on the price is
+    always far below the median and the field always looks quiet, so they would flag every fresh auction.
+    """
     prices = winner_prices(previous_winners)
     if not prices:
         return None
     median = statistics.median(prices)
     cheap = collapse_rate(previous_winners)
+    late = phase in ("thinning", "end-game")
     score = 50.0
     if your_cap and your_cap > 0:
         score -= max(0.0, min(35.0, (median - your_cap) / max(1.0, your_cap) * 35.0))
     if cheap is not None:
         score += cheap * 30.0
-    if active_bidders is not None:
+    if late and active_bidders is not None:
         score += max(0.0, min(20.0, (6 - active_bidders) * 4.0))
-    if current_price is not None:
+    if late and current_price is not None:
         score += max(0.0, min(15.0, (median - current_price) / max(1.0, median) * 15.0))
-    if recent_bidders:
+    if late and recent_bidders:
         unique = list(dict.fromkeys(str(b).strip() for b in recent_bidders if str(b).strip()))
         score += max(0.0, min(10.0, (4 - len(unique)) * 3.5))
+    if not late:
+        score = min(score, 59.0)  # nothing is a "Strong"/"Best bet" until the end-game
     score = max(0.0, min(100.0, score))
     if score >= 75:
         label = "Best bet"

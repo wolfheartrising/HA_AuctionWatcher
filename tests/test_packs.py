@@ -63,3 +63,14 @@ def test_entry_window():
     assert entry_open(0.53, 5, False) == (True, 447)
     assert entry_open(5.01, 5, False) == (False, 0)
     assert entry_open(1.0, 5, True) == (False, 0)
+
+
+def test_live_signals_are_phase_gated():
+    from aw.packs import best_bet_score, war_collapse
+    winners = [{"price": "360", "bids_placed": "4000"}] * 10  # money pit vs a tiny entry limit
+    early = best_bet_score(winners, current_price=3.0, your_cap=20.0, active_bidders=2, phase="claiming")
+    late = best_bet_score(winners, current_price=3.0, your_cap=20.0, active_bidders=2, phase="end-game")
+    assert early["label"] in {"Skip", "Okay"} and early["score"] < late["score"]
+    # "Collapse" only flags in the end-game; a quiet field early on does not
+    assert war_collapse(["Leader", "A"], leader="Leader", clock_seconds=2000)["collapse"] is False
+    assert war_collapse(["Leader", "A"], leader="Leader", clock_seconds=5)["collapse"] is True

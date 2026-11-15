@@ -258,7 +258,8 @@ def build_state(
                             current_price=live.get("price"),
                             your_cap=static.get("no_jumper_limit") or None,
                             active_bidders=live.get("active_bidders"),
-                            recent_bidders=live.get("recent_bidders", []))
+                            recent_bidders=live.get("recent_bidders", []),
+                            phase=phase)
     extra = {
         "no_jumper_limit": static.get("no_jumper_limit"),
         "label_notes": static.get("label_notes", {}),

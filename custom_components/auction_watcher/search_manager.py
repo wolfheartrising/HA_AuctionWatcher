@@ -33,7 +33,8 @@ from .const import (
     SITE_OLA,
     STORAGE_VERSION,
 )
-from .searches import SITE_ORDER, Hit, SavedSearch, add_search, filter_hits, hit_dict, new_matches, title_matches, to_dict
+from .searches import (SITE_ORDER, Hit, SavedSearch, add_search, filter_hits, hit_dict, new_matches,
+                       prune_dismissed, title_matches, to_dict)
 from .sites import macbid as mb
 from .sites.base import AuthError, SiteError
 
@@ -63,6 +64,7 @@ class SearchManager:
         self.seen: dict[str, list[str]] = {}
         self.results: dict[str, list[dict[str, Any]]] = {}
         self.excluded: dict[str, int] = {}
+        self.dismissed: set[str] = set()   # "site:item_id" results the owner hid from the page
         self.errors: dict[str, str] = {}
         self.last_run: float | None = None
         self.run_time = DEFAULT_RUN_TIME
@@ -88,6 +90,7 @@ class SearchManager:
         self.seen = d.get("seen", {})
         self.results = d.get("results", {})
         self.excluded = d.get("excluded", {})
+        self.dismissed = set(d.get("dismissed", []))
         self.errors = d.get("errors", {})
         self.last_run = d.get("last_run")
         self.run_time = d.get("run_time", DEFAULT_RUN_TIME)
@@ -103,7 +106,7 @@ class SearchManager:
         self.version += 1
         await self._store.async_save({
             "searches": [to_dict(s) for s in self.searches], "seen": self.seen, "results": self.results,
-            "excluded": self.excluded, "errors": self.errors, "last_run": self.last_run,
+            "excluded": self.excluded, "dismissed": sorted(self.dismissed), "errors": self.errors, "last_run": self.last_run,
             "run_time": self.run_time, "mb_choice": self.mb_choice, "refresh_hours": self.refresh_hours,
         })
         self._changed(bump=False)
@@ -418,9 +421,13 @@ class SearchManager:
             site, _, item = k.partition(":")
             if (item in following.get(site, set())) == on:
                 self._starred.pop(k)
+        hidden: set[str] = set()
         for s in self.searches:
             for h in self.results.get(s.id, []):
                 if ended(h, s.id):
+                    continue
+                if h["key"] in self.dismissed:
+                    hidden.add(h["key"])
                     continue
                 h = {**h, "following": self._starred.get(h["key"], h["item_id"] in following.get(h["site"], set()))}
                 cur = merged.get(h["key"])
@@ -451,7 +458,27 @@ class SearchManager:
             "macbid_buildings": buildings,
             "macbid_from_account": self.mb_choice is None,
             "excluded_total": sum(self.excluded.get(s.id, 0) for s in self.searches if SITE_MACBID in s.sites),
+            "hidden_total": len(hidden),
         }
+
+    async def async_dismiss(self, key: str, on: bool = True) -> None:
+        """Hide (or un-hide) one result by its "site:item_id" key so it drops off the page."""
+        key = str(key or "").strip()
+        if not key:
+            return
+        if on:
+            self.dismissed.add(key)
+            live = {h["key"] for hs in self.results.values() for h in hs}
+            self.dismissed = prune_dismissed(self.dismissed, live)  # forget hidden items that have since ended
+        else:
+            self.dismissed.discard(key)
+        await self._save()
+
+    async def async_unhide_all(self) -> None:
+        """Bring back every hidden result."""
+        if self.dismissed:
+            self.dismissed.clear()
+            await self._save()
 
 
 # ---------------- websocket commands for the Auctions page (admin only)
@@ -476,9 +503,10 @@ async def ws_view(hass: HomeAssistant, connection: Any, msg: dict[str, Any]) -> 
 
 @websocket_api.websocket_command({
     vol.Required("type"): "auction_watcher/searches/change",
-    vol.Required("action"): vol.In(["add", "remove", "update", "run", "settings", "watch"]),
+    vol.Required("action"): vol.In(["add", "remove", "update", "run", "settings", "watch", "dismiss", "unhide_all"]),
     vol.Optional("site"): vol.In(list(SITE_ORDER)),
     vol.Optional("item_id"): str,
+    vol.Optional("key"): str,
     vol.Optional("keyword"): str,
     vol.Optional("search_id"): str,
     vol.Optional("sites"): [vol.In(list(SITE_ORDER))],
@@ -510,6 +538,10 @@ async def ws_change(hass: HomeAssistant, connection: Any, msg: dict[str, Any]) -
             await m.async_update(msg.get("search_id", ""), msg.get("sites"), msg.get("max_price"), msg.get("title_only"))
         elif action == "watch":
             await m.async_watch(msg.get("site", ""), msg.get("item_id", ""), bool(msg.get("on", True)))
+        elif action == "dismiss":
+            await m.async_dismiss(msg.get("key", ""), bool(msg.get("on", True)))
+        elif action == "unhide_all":
+            await m.async_unhide_all()
         elif action == "run":
             await m.async_run(only=msg.get("search_id"))
         else:

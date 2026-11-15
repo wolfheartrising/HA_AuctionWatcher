@@ -170,6 +170,13 @@ REBOOK_FIXED = "fixed"
 REBOOK_REMAINING = "remaining"
 AUTO_RETRY_SECONDS = 30
 
+# Smart late-entry: how the commit price ceiling ("target") is chosen
+SMART_TARGET_CAP = "suggested_cap"       # the suggested cap (70th-percentile of past winners)
+SMART_TARGET_MEDIAN = "median"           # the product's median final price
+SMART_TARGET_MEDIAN_PCT = "median_pct"   # median adjusted by smart_pct percent
+SMART_TARGET_FIXED = "fixed"             # a price you set (smart_price)
+SMART_TARGETS = (SMART_TARGET_CAP, SMART_TARGET_MEDIAN, SMART_TARGET_MEDIAN_PCT, SMART_TARGET_FIXED)
+
 
 @dataclass
 class AutoSettings:
@@ -179,11 +186,20 @@ class AutoSettings:
     rebook_amount: int = 10
     max_price: float = 0.0               # passed to the site's own price cap (0 = none)
     topup_at: int = 0                    # rebook when booked bids left <= this (0 = only once they run out)
+    # Smart late-entry auto-mode: get in, hold, strike near the median when the field thins
+    smart_late: bool = False
+    smart_target: str = SMART_TARGET_CAP  # how the commit price ceiling is chosen
+    smart_price: float = 0.0             # the ceiling when smart_target == "fixed"
+    smart_pct: float = 0.0               # percent adjustment to the median when smart_target == "median_pct"
+    smart_join_at: int = 2               # arm once the other bidders have thinned to this many (or fewer)
+    smart_claim: bool = False            # stake one bid before the entry limit to keep the right to re-enter
+    walk_away: float = 0.0               # never book above this price (0 = fall back to the suggested cap)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any] | None) -> "AutoSettings":
         d = d or {}
         mode = d.get("rebook_mode", REBOOK_FIXED)
+        target = d.get("smart_target", SMART_TARGET_CAP)
         return cls(
             auto_cancel=bool(d.get("auto_cancel", False)),
             auto_rebook=bool(d.get("auto_rebook", False)),
@@ -191,11 +207,18 @@ class AutoSettings:
             rebook_amount=max(0, int(d.get("rebook_amount", 10) or 0)),
             max_price=max(0.0, float(d.get("max_price", 0) or 0)),
             topup_at=max(0, int(d.get("topup_at", 0) or 0)),
+            smart_late=bool(d.get("smart_late", False)),
+            smart_target=target if target in SMART_TARGETS else SMART_TARGET_CAP,
+            smart_price=max(0.0, float(d.get("smart_price", 0) or 0)),
+            smart_pct=float(d.get("smart_pct", 0) or 0),
+            smart_join_at=max(1, int(d.get("smart_join_at", 2) or 2)),
+            smart_claim=bool(d.get("smart_claim", False)),
+            walk_away=max(0.0, float(d.get("walk_away", 0) or 0)),
         )
 
     @property
     def any_auto(self) -> bool:
-        return self.auto_cancel or self.auto_rebook
+        return self.auto_cancel or self.auto_rebook or self.smart_late
 
 
 @dataclass
@@ -273,6 +296,99 @@ def decide_auto(
             return "book", count, f"topping up: {s.your_booked_left} booked bid{'' if s.your_booked_left == 1 else 's'} left"
         return "book", count, f"down to {s.active_bidders} bidder{'' if s.active_bidders == 1 else 's'}"
     return "", 0, mem.status or "watching"
+
+
+def smart_target_price(settings: AutoSettings, s: AuctionState) -> float | None:
+    """The price ceiling the smart late-entry mode is willing to commit at (None = no history-based
+    ceiling, so only the walk-away, Max bids and budget gate it)."""
+    median = s.extra.get("median_final_price")
+    cap = s.extra.get("suggested_cap")
+    mode = settings.smart_target
+    if mode == SMART_TARGET_FIXED:
+        return settings.smart_price or None
+    if mode == SMART_TARGET_MEDIAN:
+        return float(median) if median is not None else None
+    if mode == SMART_TARGET_MEDIAN_PCT:
+        return float(median) * (1 + settings.smart_pct / 100.0) if median is not None else None
+    return float(cap) if cap is not None else (float(median) if median is not None else None)
+
+
+def decide_smart_late(
+    s: AuctionState,
+    settings: AutoSettings,
+    mem: AutoMemory,
+    rules: Rules,
+    points: int | None,
+    now: float,
+    budget_left: int | None = None,
+    paused: bool = False,
+) -> tuple[str, int, str]:
+    """Late-entry auto-mode. Returns (action, count, reason); action is "" or "book".
+
+    Stake a claim before the entry limit (optional), hold through the early fight, then book your
+    remaining Max bids only once the field has thinned to your join threshold and the price is at/under
+    your target, never above your walk-away. Your Max bids, weekly budget and spending cap still cap it.
+    """
+    if not settings.smart_late:
+        return "", 0, ""
+    limit = rules.bid_limit(s.auction_id)
+    if not limit:
+        return "", 0, "smart auto is off until you set Max bids for this auction"
+    if s.status != STATUS_LIVE or s.active_bidders is None:
+        return "", 0, "waiting for the auction to go live"
+    if s.clock_seconds is not None and s.clock_seconds > FINAL_PHASE_MAX_CLOCK:
+        return "", 0, "waiting for the first countdown to end"
+    if now - mem.last_attempt < AUTO_RETRY_SECONDS:
+        return "", 0, mem.status
+    price = s.price or 0.0
+    room = limit - s.your_bids - s.your_booked_left  # booked bids still to fire count against Max bids too
+    labels = " ".join(s.labels).lower()
+    no_reentry = "no re-entry" in labels
+    entry_limit = s.extra.get("no_jumper_limit")
+
+    # 1) Stake one claim bid before the entry limit, so you keep the right to re-enter later.
+    if settings.smart_claim and s.your_bids == 0 and s.your_booked_left == 0 and not no_reentry:
+        if entry_limit and price < float(entry_limit) and not s.closed_to_new:
+            if paused:
+                return "", 0, "auto-booking is switched off"
+            if budget_left is not None and budget_left <= 0:
+                return "", 0, "weekly budget used up"
+            if points is not None and points < 1:
+                return "", 0, "no points to stake a claim"
+            if room < 1:
+                return "", 0, "bid limit reached"
+            return "book", 1, f"staking a claim before the ${float(entry_limit):.0f} entry limit"
+
+    # 2) Hold until the end-game and the field has thinned to your join threshold.
+    phase = s.extra.get("gov_phase")
+    if phase not in ("thinning", "end-game"):
+        return "", 0, f"holding through the {phase or 'early'} phase"
+    thinned = s.active_bidders <= max(1, settings.smart_join_at) or bool(s.extra.get("gov_collapse"))
+    if not thinned:
+        return "", 0, f"waiting for the field to thin (now {s.active_bidders} other bidders)"
+
+    # 3) Price gates: at/under your target, and never past walk-away.
+    target = smart_target_price(settings, s)
+    if target is not None and price > target:
+        return "", 0, f"price ${price:.0f} is above your target ${target:.0f}; holding"
+    walk = settings.walk_away or s.extra.get("suggested_cap") or 0.0
+    if walk and price > float(walk):
+        return "", 0, f"price ${price:.0f} is past your walk-away ${float(walk):.0f}; stopping"
+
+    # 4) Commit the remaining Max bids, capped by points and the weekly budget.
+    if room <= 0:
+        return "", 0, "bid limit reached"
+    if s.closed_to_new and s.your_bids == 0:
+        return "", 0, "closed to new bidders and you haven't bid yet"
+    if paused:
+        return "", 0, "auto-booking is switched off"
+    if budget_left is not None and budget_left <= 0:
+        return "", 0, "weekly budget used up"
+    count = min(room, points if points is not None else room, budget_left if budget_left is not None else room)
+    if count < 1:
+        return "", 0, "no points left to book"
+    tnote = f" (target ${target:.0f})" if target is not None else ""
+    return "book", count, f"thinned to {s.active_bidders}; committing at ${price:.0f}{tnote}"
 
 
 # ---------------------------------------------------------------- timed auctions (Mac.bid)

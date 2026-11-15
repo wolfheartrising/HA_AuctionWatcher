@@ -137,6 +137,49 @@ set_auto_booking:
           max: 100000
           step: 0.01
           mode: box
+    smart_late:
+      selector:
+        boolean:
+    smart_target:
+      selector:
+        select:
+          options:
+            - suggested_cap
+            - median
+            - median_pct
+            - fixed
+    smart_price:
+      selector:
+        number:
+          min: 0
+          max: 100000
+          step: 0.01
+          mode: box
+    smart_pct:
+      selector:
+        number:
+          min: -100
+          max: 100
+          step: 1
+          mode: box
+          unit_of_measurement: "%"
+    smart_join_at:
+      selector:
+        number:
+          min: 1
+          max: 20
+          mode: box
+          unit_of_measurement: bidders
+    smart_claim:
+      selector:
+        boolean:
+    walk_away:
+      selector:
+        number:
+          min: 0
+          max: 100000
+          step: 0.01
+          mode: box
           unit_of_measurement: "$"
 
 place_bid:

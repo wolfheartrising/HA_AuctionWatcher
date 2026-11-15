@@ -113,6 +113,12 @@ def new_matches(results: dict[str, list[Hit]], seen: dict[str, list[str]], first
     return out
 
 
+def prune_dismissed(dismissed: set[str], live_keys: set[str]) -> set[str]:
+    """Keep only hidden-result keys that still appear in the live results, so the hidden set
+    doesn't grow forever as items end and drop off the lists."""
+    return set(dismissed) & set(live_keys)
+
+
 def to_dict(s: SavedSearch) -> dict[str, Any]:
     return asdict(s)
 

@@ -10,7 +10,7 @@
  * until you save it, and the page re-draws from those drafts.
  */
 
-const PANEL_VERSION = "1.10.0";  // must match const.py VERSION (a test checks)
+const PANEL_VERSION = "1.13.0";  // must match const.py VERSION (a test checks)
 const SITE_NAMES = { govauctions: "GovAuctions", macbid: "Mac.bid", ebay: "eBay", ola: "OLA" };
 // What the per-auction spending cap is called on each site
 const LIMIT_LABEL = { govauctions: "Max bids", macbid: "Max bid ($)", ebay: "Max price ($)", ola: "Max bid ($)" };
@@ -249,7 +249,7 @@ class AuctionWatcherPanel extends HTMLElement {
       { id: "outbid", label: "Outbid", filter: (a) => a.status === "live" && !a.winning
           && (a.site === "govauctions" ? Number(a.your_bids || 0) > 0 : !!a.you_are_bidding) },
       { id: "auto", label: "Auto-bidding", filter: (a) => a.status !== "ended" && a.status !== "awaiting_pickup"
-          && (!!a.auto_cancel || !!a.auto_rebook || a.mb_mode === "late") },
+          && (!!a.auto_cancel || !!a.auto_rebook || !!a.smart_late || a.mb_mode === "late") },
       { id: "watching", label: "Watching", filter: (a) => a.category === "watching" && a.status !== "ended" },
       { id: "pickup", label: "Awaiting pickup", filter: (a) => a.status === "awaiting_pickup" },
       { id: "ended", label: "Ended", filter: (a) => a.status === "ended" },
@@ -282,6 +282,7 @@ class AuctionWatcherPanel extends HTMLElement {
     const accounts = this._accounts();
     const signature = JSON.stringify([this._pv?.people, this._badEntries, this._tab, this._subtab, this._sort, auctions.map((a) => [a.entity_id, a.price, a.updated, a.bid_limit,
       a.auto_cancel, a.auto_rebook, a.rebook_mode, a.rebook_amount, a.topup_at, a.max_price, a.auto_status, a.your_booked_left,
+      a.smart_late, a.smart_target, a.smart_price, a.smart_pct, a.smart_join_at, a.smart_claim, a.walk_away,
       a.mb_mode, a.mb_placed, a.mb_status, a.proxy, a.winning, a.has_assurance, a.mb_assurance, (a.condition_notes || []).length]),
       accounts, this._saved, this._subtab === "packs" ? [this._packs(), this._showLocked] : null,
       this._tab === "searches" ? [this._sd?.version, !!this._sd, this._sfilter, this._sLimit, this._serr, this._sbusy] : null,
@@ -346,7 +347,7 @@ class AuctionWatcherPanel extends HTMLElement {
         <button class="subtab ${sub === "settings" ? "on" : ""}" data-subtab="settings">⚙ Settings</button>
         ${sub === "packs" ? `<span class="muted">Point packs aren't auctions you're in: they're "if you're interested" picks.</span>` : ""}</div>` : ""}
       ${tab.searches ? `<div class="sv-slot"></div>` : tab.settings ? `<div class="gs-slot"></div>`
-        : sub === "settings" ? `<div class="ss-slot"></div>` : `<div class="grid">
+        : sub === "settings" ? `<div class="ss-slot"></div>` : `${sub === "packs" ? "" : this._legend()}<div class="grid">
         ${sub === "packs" ? this._packsView() : shown.length ? shown.map((a) => this._safeCard(a)).join("") : `<div class="empty">Nothing here right now.</div>`}
       </div>`}`;
 
@@ -825,6 +826,7 @@ class AuctionWatcherPanel extends HTMLElement {
         <label class="chk"><input type="checkbox" data-sfilter-new ${flt.newOnly ? "checked" : ""}> New only</label>
         <span class="muted">${total} result${total === 1 ? "" : "s"}</span>
         ${excl && (!flt.site || flt.site === "macbid") ? `<span class="muted">Excluded ${num(excl)} Mac.bid result${excl === 1 ? "" : "s"} by location filters</span>` : ""}
+        ${d.hidden_total ? `<button class="secondary" data-sact="unhide" title="Bring back results you've hidden">${num(d.hidden_total)} hidden · show all</button>` : ""}
       </div>
 
       <div class="hits">
@@ -843,7 +845,8 @@ class AuctionWatcherPanel extends HTMLElement {
         <div class="htitle"><button class="star ${h.following ? "on" : ""}" data-sact="star" data-site="${esc(h.site)}" data-item="${esc(h.item_id)}"
             data-on="${h.following ? "0" : "1"}" title="${h.following ? "You're following this (watching or bidding). Tap to remove it from your " + (h.site === "govauctions" ? "bookmarks" : "watchlist") : "Add to your " + (h.site === "govauctions" ? "GovAuctions bookmarks" : SITE_NAMES[h.site] + " watchlist") + ": it then shows on the Watching tab"}">${h.following ? "★" : "☆"}</button>
           ${siteDot(h.site)} ${h.new ? `<span class="badge on">NEW</span>` : ""}
-          <a href="${safeUrl(h.url)}" target="_blank" rel="noreferrer">${esc(h.title)}</a></div>
+          <a href="${safeUrl(h.url)}" target="_blank" rel="noreferrer">${esc(h.title)}</a>
+          <button class="hhide" data-sact="hide" data-key="${esc(h.key)}" title="Hide this result from the list">✕</button></div>
         <div class="hmeta">
           <b>${money(h.price)}</b>
           ${left !== null && left > 0 ? `<span>ends in ${fmtDuration(left)}</span>` : ""}
@@ -885,6 +888,8 @@ class AuctionWatcherPanel extends HTMLElement {
         b.disabled = true; b.textContent = "…";
         return this._searchChange({ action: "watch", site: b.dataset.site, item_id: b.dataset.item, on: b.dataset.on === "1" });
       }
+      if (act === "hide") return this._searchChange({ action: "dismiss", key: b.dataset.key });
+      if (act === "unhide") return this._searchChange({ action: "unhide_all" });
       if (act === "title") {
         const x = this._sd.searches.find((y) => y.id === b.dataset.sid);
         if (x) return this._searchChange({ action: "update", search_id: x.id, title_only: x.title_only === false });
@@ -925,6 +930,20 @@ class AuctionWatcherPanel extends HTMLElement {
     root.querySelector("[data-sfilter-new]")?.addEventListener("change", (ev) => {
       this._sfilter.newOnly = ev.target.checked; this._sLimit = 60; this._maybeRender(true);
     });
+  }
+
+  _legend() {
+    return `<details class="legend" style="margin:6px 2px 10px;">
+      <summary style="cursor:pointer;font-weight:600;">ⓘ What do the badges mean?</summary>
+      <div class="note" style="margin-top:6px;line-height:1.5;">
+        <p><b>Phase</b> — Claiming → Mid-war → Thinning → End-game: where the fight is, from the countdown. The real finish is the <b>End-game</b>, where the clock keeps resetting to a few seconds.</p>
+        <p><b>Best bet / Strong / Okay / Skip</b> — a right-now score for whether this is a good moment. It only rewards a low price and a thin field once it's in the end-game, so early auctions won't be flagged "Strong".</p>
+        <p><b>Collapse</b> / "leader-only" — in the end-game, only one (or no) other bidder is still firing. Earlier you'll see "steady field" or "quiet so far".</p>
+        <p><b>Chase verdict — Skip / Borderline / Chase</b> — the history view: is this <i>product</i> usually a money pit? From its past 30-day winners (median price vs the entry limit, and how often it closes cheap).</p>
+        <p><b>Suggested cap</b> — a recommended ceiling: the price most past winners stayed under. <b>Entry limit</b> — the price past which no new bidders can join. <b>Other bidders (3 min)</b> — rivals seen in the last 3 minutes.</p>
+        <p class="muted">History and "right now" can disagree on purpose: a money-pit product (Skip) can still have a momentarily low price. The verdict is the long game; best-bet is this moment. Hover any badge for its own tip.</p>
+      </div>
+    </details>`;
   }
 
   _safeCard(a) {
@@ -972,12 +991,12 @@ class AuctionWatcherPanel extends HTMLElement {
             ${this._stopButton(a)}
             ${this._watchButton(a)}
             <div class="sub">${esc(SITE_NAMES[a.site] || a.site)} · <span class="status ${esc(status)}">${esc(status)}</span>
-              ${a.opportunity ? `<span class="badge hot">🎯 few bidders</span>` : ""}
-                ${a.gov_phase_label ? `<span class="badge ${a.gov_war ? "hot" : "on"}">${esc(a.gov_phase_label)}</span>` : ""}
-                ${a.gov_best_bet ? `<span class="badge on">${esc(a.gov_best_bet)}</span>` : ""}
-                ${a.gov_collapse ? `<span class="badge cap">Collapse</span>` : ""}
-                ${a.bid_limit_reached ? `<span class="badge cap">⛔ max bids reached</span>` : ""}
-                ${a.closed_to_new && !a.your_bids ? `<span class="badge">closed to new bidders</span>` : ""}
+              ${a.opportunity ? `<span class="badge hot" title="Few active bidders right now — a smaller field than usual.">🎯 few bidders</span>` : ""}
+                ${a.gov_phase_label ? `<span class="badge ${a.gov_war ? "hot" : "on"}" title="Stage of the fight, from the countdown clock: Claiming → Mid-war → Thinning → End-game. The real finish is the End-game, where the clock keeps resetting to a few seconds.">${esc(a.gov_phase_label)}</span>` : ""}
+                ${a.gov_best_bet ? `<span class="badge on" title="A right-now score (0–100) for whether this is a good moment to jump in. It only rewards a low price and a thin field once the auction is in its end-game.">${esc(a.gov_best_bet)}</span>` : ""}
+                ${a.gov_collapse ? `<span class="badge cap" title="End-game: only one (or no) other bidder is still firing. Earlier on you'll see 'steady field' instead.">Collapse</span>` : ""}
+                ${a.bid_limit_reached ? `<span class="badge cap" title="You've hit your Max bids for this auction; auto-booking won't bid any more.">⛔ max bids reached</span>` : ""}
+                ${a.closed_to_new && !a.your_bids ? `<span class="badge" title="Past the entry limit, so no new bidders can join — and you haven't bid yet.">closed to new bidders</span>` : ""}
                 ${a.dropped ? `<span class="badge">no longer followed</span>` : ""}
               </div>
           </div>
@@ -1012,7 +1031,8 @@ class AuctionWatcherPanel extends HTMLElement {
           <div class="hist"><span class="k">Past ${num(a.history_wins)} wins${a.history_period_days ? ` (${a.history_period_days} days)` : ""}:</span>
             median ${money(a.history_median_final_price)}, winners used ~${num(a.history_median_winner_bids)} bids${a.history_avg_winner_cost ? `, avg cost ${money(a.history_avg_winner_cost)}` : ""}</div>` : ""}
         ${a.gov_chase_summary ? `
-          <div class="hist"><span class="k">Chase verdict</span>
+          <div class="hist" title="The history view: is this product usually a money pit? Based on its past 30-day winners — the median winning price vs the entry limit, and how often it closes cheap. Skip = it usually sells far above the entry price. This is the long game, separate from the right-now badges above.">
+            <span class="k">Chase verdict</span>
             <span class="badge ${a.gov_chase_verdict === "green" ? "on" : a.gov_chase_verdict === "yellow" ? "hot" : a.gov_chase_verdict === "red" ? "cap" : ""}">${esc(a.gov_chase_label || a.gov_chase_verdict || "Review")}</span>
             ${esc(a.gov_chase_summary)}${a.suggested_cap ? ` · suggested cap ${money(a.suggested_cap)}${a.suggested_cap_cover !== undefined && a.suggested_cap_cover !== null ? ` (${Math.round(a.suggested_cap_cover * 100)}% of wins under it)` : ""}` : ""}</div>` : ""}
         <div class="limits">
@@ -1373,7 +1393,7 @@ class AuctionWatcherPanel extends HTMLElement {
   _running(a) {
     if (a.status !== "live" && a.status !== "upcoming") return false;
     return a.site === "macbid" ? a.mb_mode === "late"
-      : !!(a.auto_cancel || a.auto_rebook || a.topup_at || a.your_booked_left);
+      : !!(a.auto_cancel || a.auto_rebook || a.smart_late || a.topup_at || a.your_booked_left);
   }
 
   _hasBids(a) {
@@ -1450,7 +1470,7 @@ class AuctionWatcherPanel extends HTMLElement {
   _bookingControls(a) {
     const id = esc(a.auction_id);
     const aid = a.auction_id;
-    const auto = a.auto_cancel || a.auto_rebook;
+    const auto = a.auto_cancel || a.auto_rebook || a.smart_late;
     const mode = this._val(aid, "rebook_mode", a.rebook_mode || "fixed");
     const limitLabel = LIMIT_LABEL[a.site] || "bid limit";
     return `
@@ -1480,6 +1500,27 @@ class AuctionWatcherPanel extends HTMLElement {
           <input data-id="${id}" data-field="topup_at" type="number" min="0" step="1" inputmode="numeric" class="small"
             value="${esc(this._val(aid, "topup_at", a.topup_at || 0))}"> or fewer booked bids are left
           <span class="muted">(0 = only once they run out)</span></div>
+        <label class="bk-check"><input data-id="${id}" data-field="smart_late" type="checkbox"
+          ${this._val(aid, "smart_late", a.smart_late) ? "checked" : ""}>
+          <b>Smart late-entry</b> — get in, hold, then book your Max bids when it thins near the median</label>
+        <div class="bk-line">Strike at or under
+          <select data-id="${id}" data-field="smart_target">
+            ${["suggested_cap", "median", "median_pct", "fixed"].map((v) => `<option value="${v}" ${this._val(aid, "smart_target", a.smart_target || "suggested_cap") === v ? "selected" : ""}>${{ suggested_cap: "suggested cap", median: "the median", median_pct: "median ± %", fixed: "a price I set" }[v]}</option>`).join("")}
+          </select>
+          ${this._val(aid, "smart_target", a.smart_target) === "fixed" ? `<input data-id="${id}" data-field="smart_price" type="number" min="0" step="1" class="small" value="${esc(this._val(aid, "smart_price", a.smart_price || 0))}"> $` : ""}
+          ${this._val(aid, "smart_target", a.smart_target) === "median_pct" ? `<input data-id="${id}" data-field="smart_pct" type="number" step="1" class="small" value="${esc(this._val(aid, "smart_pct", a.smart_pct || 0))}"> % vs median` : ""}
+        </div>
+        <div class="bk-line">Join when down to
+          <input data-id="${id}" data-field="smart_join_at" type="number" min="1" max="20" step="1" inputmode="numeric" class="small"
+            value="${esc(this._val(aid, "smart_join_at", a.smart_join_at || 2))}"> or fewer other bidders</div>
+        <div class="bk-line">Walk away above
+          <input data-id="${id}" data-field="walk_away" type="number" min="0" step="1" inputmode="numeric" class="small"
+            value="${esc(this._val(aid, "walk_away", a.walk_away || 0))}"> $ <span class="muted">(0 = use the suggested cap)</span></div>
+        <label class="bk-check"><input data-id="${id}" data-field="smart_claim" type="checkbox"
+          ${this._val(aid, "smart_claim", a.smart_claim) ? "checked" : ""}>
+          Stake 1 bid before the entry limit (keeps your re-entry; skips No-Re-Entry)</label>
+        <div class="note">${a.median_final_price ? `History median ${money(a.median_final_price)}` : "No history yet"}${a.suggested_cap ? ` · suggested cap ${money(a.suggested_cap)}` : ""}.
+          When armed it books all your remaining Max bids at once; your weekly budget and the spending cap still apply.</div>
         <div class="bk-row">
           <button type="button" data-act="auto" data-id="${id}">Save booking settings</button>
           <span class="saved">${esc(this._saved["auto:" + aid] || "")}</span>
@@ -1520,6 +1561,8 @@ class AuctionWatcherPanel extends HTMLElement {
     const a = this._auctions().find((x) => String(x.auction_id) === String(id)) || {};
     const saved = { limit: a.bid_limit, max_price: a.max_price, book_count: a.rebook_amount || 10, auto_cancel: a.auto_cancel,
       auto_rebook: a.auto_rebook, rebook_mode: a.rebook_mode || "fixed", rebook_amount: a.rebook_amount || 10, topup_at: a.topup_at || 0,
+      smart_late: a.smart_late, smart_target: a.smart_target || "suggested_cap", smart_price: a.smart_price || 0, smart_pct: a.smart_pct || 0,
+      smart_join_at: a.smart_join_at || 2, smart_claim: a.smart_claim, walk_away: a.walk_away || 0,
       mb_late: a.mb_mode === "late", mb_assure: !!a.mb_assurance, mb_late_min: Math.round((a.mb_late_seconds || 180) / 60),
       proxy_person: (this._pv?.people || []).some((x) => x.id === a.proxy?.person_id) ? a.proxy.person_id : undefined,
       proxy_max: a.proxy?.hard_max, proxy_mode: a.proxy?.mode }[field];
@@ -1701,7 +1744,8 @@ class AuctionWatcherPanel extends HTMLElement {
         await this._hass.callService("auction_watcher", "cancel_booked_bids", { auction_id: id });
         this._saved[key] = "Cancelled";
       } else if (act === "auto") {
-        const wantsAuto = !!this._field(id, "auto_cancel", false) || !!this._field(id, "auto_rebook", false);
+        const smartLate = !!this._field(id, "smart_late", false);
+        const wantsAuto = !!this._field(id, "auto_cancel", false) || !!this._field(id, "auto_rebook", false) || smartLate;
         const limit = int(this._field(id, "limit", 0));
         if (wantsAuto && !limit) throw new Error("set Max bids for this auction first (box above)");
         // Save Max bids / Max price too if you typed them, so one button does it all
@@ -1714,8 +1758,16 @@ class AuctionWatcherPanel extends HTMLElement {
           rebook_amount: Math.max(1, int(this._field(id, "rebook_amount", 10))),
           topup_at: Math.max(0, int(this._field(id, "topup_at", 0))),
           max_price: dec(this._field(id, "max_price", 0)),
+          smart_late: smartLate,
+          smart_target: this._field(id, "smart_target", "suggested_cap"),
+          smart_price: dec(this._field(id, "smart_price", 0)),
+          smart_pct: dec(this._field(id, "smart_pct", 0)),
+          smart_join_at: Math.max(1, int(this._field(id, "smart_join_at", 2))),
+          smart_claim: !!this._field(id, "smart_claim", false),
+          walk_away: dec(this._field(id, "walk_away", 0)),
         });
-        this._clearDrafts(id, ["limit", "max_price", "auto_cancel", "auto_rebook", "rebook_mode", "rebook_amount", "topup_at"]);
+        this._clearDrafts(id, ["limit", "max_price", "auto_cancel", "auto_rebook", "rebook_mode", "rebook_amount", "topup_at",
+          "smart_late", "smart_target", "smart_price", "smart_pct", "smart_join_at", "smart_claim", "walk_away"]);
         this._saved[key] = "Saved";
       }
     } catch (err) {
@@ -1795,6 +1847,8 @@ const STYLE = `
   .hits .more { align-self: center; }
   .star { background: none; border: 0; padding: 0 4px 0 0; font-size: 20px; line-height: 1; color: var(--secondary-text-color); cursor: pointer; vertical-align: middle; }
   .star.on { color: #f5b301; }
+  .hhide { background: none; border: 0; padding: 0 2px; font-size: 14px; line-height: 1; color: var(--secondary-text-color); cursor: pointer; float: right; opacity: .55; }
+  .hhide:hover { opacity: 1; color: var(--error-color, #d33); }
   .star:hover { color: #f5b301; }
   .gs-sec { background: var(--card-background-color); border: 1px solid var(--divider-color); border-radius: 12px; padding: 12px 14px; }
   .gs-sec h3 { margin: 0 0 8px; font-size: 16px; font-weight: 500; }
